@@ -1,0 +1,28 @@
+# Local development infrastructure for JHSC Worker Hub.
+#
+# This is a DEV-ONLY compose file. Production uses Neon Postgres in
+# ca-central-1; see ARCHITECTURE.md §12. Do not point this at a production
+# database.
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: jhsc-postgres-dev
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: jhsc_dev
+      POSTGRES_PASSWORD: jhsc_dev_local_only
+      POSTGRES_DB: jhsc_worker_hub_dev
+    ports:
+      - '5432:5432'
+    volumes:
+      - jhsc_postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U jhsc_dev -d jhsc_worker_hub_dev']
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  jhsc_postgres_data:
+    name: jhsc_postgres_data

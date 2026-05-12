@@ -1,0 +1,53 @@
+# Dependencies
+node_modules/
+.pnpm-store/
+
+# Build output
+dist/
+build/
+.turbo/
+.next/
+out/
+
+# Bun / Node
+.bun/
+.npm/
+*.tsbuildinfo
+
+# Test / coverage
+coverage/
+playwright-report/
+test-results/
+.vitest/
+
+# Local env (NEVER commit real secrets — see .env.example)
+.env
+.env.local
+.env.*.local
+.env.production
+.env.development
+
+# Editor / OS
+.DS_Store
+Thumbs.db
+.vscode/*
+!.vscode/extensions.json
+!.vscode/settings.recommended.json
+.idea/
+
+# Logs
+*.log
+npm-debug.log*
+pnpm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Fly / deploy artifacts
+fly.toml.local
+.fly/
+
+# Docker
+.docker/
+
+# Generated drizzle metadata snapshots are kept; drizzle journals stay versioned.
+# Local Postgres data volume is named, not bind-mounted — nothing to ignore.

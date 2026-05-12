@@ -1,0 +1,17 @@
+node_modules
+dist
+build
+coverage
+playwright-report
+test-results
+pnpm-lock.yaml
+*.min.js
+*.min.css
+design/prototypes
+
+# User-authored spec & onboarding docs — preserve exactly as committed.
+CLAUDE.md
+ARCHITECTURE.md
+SECURITY.md
+ROADMAP.md
+BOOTSTRAP_PROMPT.md
