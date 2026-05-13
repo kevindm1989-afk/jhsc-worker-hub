@@ -1,0 +1,37 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+    <meta name="color-scheme" content="light dark" />
+    <meta name="theme-color" content="#0f172a" />
+    <!-- Fonts are loaded via @fontsource-variable in src/main.tsx — no Google Fonts CDN. -->
+    <title>JHSC Worker Hub</title>
+    <script>
+      // FOUC prevention: resolve theme synchronously before React mounts.
+      // Mirrors the logic in src/components/theme-provider.tsx so the first
+      // paint matches the user's preference and no light→dark flash occurs.
+      (function () {
+        try {
+          var stored = localStorage.getItem('jhsc:theme');
+          var theme =
+            stored === 'light' || stored === 'dark' || stored === 'system' ? stored : 'system';
+          var resolved =
+            theme === 'system'
+              ? window.matchMedia('(prefers-color-scheme: dark)').matches
+                ? 'dark'
+                : 'light'
+              : theme;
+          document.documentElement.setAttribute('data-theme', resolved);
+        } catch (e) {
+          document.documentElement.setAttribute('data-theme', 'light');
+        }
+      })();
+    </script>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>

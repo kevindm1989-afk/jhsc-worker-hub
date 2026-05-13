@@ -1,0 +1,122 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/*
+  Theme tokens — HSL triplets (no hsl() wrapper) so Tailwind can apply
+  alpha via `hsl(var(--name) / <alpha>)`. Mapping to Tailwind utility
+  classes is in tailwind.config.ts.
+
+  Accent intentionally matches Tailwind's blue-600 (light) / blue-400
+  (dark), which is what the design prototypes actually use for Submit
+  buttons, focus rings, and citation surfaces.
+
+  Status tokens are SINGLE-HUE — used for dots, progress fills, and
+  accent stripes. For tinted badges (`bg-red-50 text-red-700`), use the
+  raw Tailwind palette directly, exactly as the prototypes do.
+*/
+
+@layer base {
+  :root {
+    --background: 210 40% 98%; /* slate-50 */
+    --foreground: 222 47% 11%; /* slate-900 */
+
+    --card: 0 0% 100%; /* white — intentional elevation against slate-50 page */
+    --card-foreground: 222 47% 11%;
+
+    --popover: 0 0% 100%;
+    --popover-foreground: 222 47% 11%;
+
+    --primary: 222 47% 11%; /* slate-900 — matches prototype FAB / palette */
+    --primary-foreground: 210 40% 98%;
+
+    --secondary: 210 40% 96%; /* slate-100 */
+    --secondary-foreground: 222 47% 11%;
+
+    --muted: 210 40% 96%;
+    --muted-foreground: 215 16% 47%; /* slate-500 */
+
+    --accent: 221 83% 53%; /* blue-600 — per prototypes, not blue-900 */
+    --accent-foreground: 0 0% 100%;
+
+    --destructive: 0 84% 60%; /* red-500 */
+    --destructive-foreground: 0 0% 100%;
+
+    --border: 214 32% 91%; /* slate-200 */
+    --input: 214 32% 91%;
+    --ring: 221 83% 53%; /* mirrors --accent */
+
+    --radius: 0.5rem;
+
+    --status-open: 0 84% 60%; /* red-500 */
+    --status-pending: 38 92% 50%; /* amber-500 */
+    --status-resolved: 160 84% 39%; /* emerald-500 */
+    --status-info: 217 91% 60%; /* blue-500 */
+    --status-neutral: 215 16% 47%; /* slate-500 — darker on light bg for legibility */
+  }
+
+  [data-theme='dark'] {
+    --background: 222 47% 4%; /* slate-950 */
+    --foreground: 210 40% 98%; /* slate-50 */
+
+    --card: 222 47% 11%; /* slate-900 — lifted off slate-950 page */
+    --card-foreground: 210 40% 98%;
+
+    --popover: 222 47% 11%;
+    --popover-foreground: 210 40% 98%;
+
+    --primary: 210 40% 98%; /* slate-50 */
+    --primary-foreground: 222 47% 11%;
+
+    --secondary: 217 33% 17%; /* slate-800 */
+    --secondary-foreground: 210 40% 98%;
+
+    --muted: 217 33% 17%;
+    --muted-foreground: 215 20% 65%; /* slate-400 */
+
+    --accent: 213 94% 68%; /* blue-400 */
+    --accent-foreground: 222 47% 11%;
+
+    --destructive: 0 87% 73%; /* red-400 */
+    --destructive-foreground: 222 47% 11%;
+
+    --border: 217 33% 17%; /* slate-800 */
+    --input: 217 33% 17%;
+    --ring: 213 94% 68%;
+
+    --status-open: 0 87% 73%; /* red-400 */
+    --status-pending: 43 96% 56%; /* amber-400 */
+    --status-resolved: 158 64% 52%; /* emerald-400 */
+    --status-info: 213 94% 68%; /* blue-400 */
+    --status-neutral: 215 20% 65%; /* slate-400 — lighter on dark bg */
+  }
+
+  *,
+  *::before,
+  *::after {
+    border-color: hsl(var(--border));
+  }
+
+  html {
+    color-scheme: light dark;
+  }
+
+  body {
+    background-color: hsl(var(--background));
+    color: hsl(var(--foreground));
+    font-family: theme('fontFamily.sans');
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    *,
+    *::before,
+    *::after {
+      animation-duration: 0.01ms !important;
+      animation-iteration-count: 1 !important;
+      transition-duration: 0.01ms !important;
+      scroll-behavior: auto !important;
+    }
+  }
+}

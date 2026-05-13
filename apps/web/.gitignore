@@ -1,0 +1,7 @@
+dist
+dev-dist
+.vite
+playwright-report
+test-results
+coverage
+*.tsbuildinfo
