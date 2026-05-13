@@ -1,0 +1,35 @@
+# Fly.io configuration for the ai-proxy service.
+#
+# Separate Fly Machine from apps/api so the Anthropic API key lives in
+# an isolated process (CLAUDE.md non-negotiable, ARCHITECTURE.md §1).
+# Region is YYZ (Toronto). Internal port 3002 (api is 3001).
+#
+# Secrets are NOT in this file. Set them via:
+#   fly secrets set ANTHROPIC_API_KEY=sk-ant-...
+#   fly secrets set AI_PROXY_SHARED_SECRET=...
+# Both land in Release 3 Milestone 3.2 when the proxy actually proxies.
+
+app = "jhsc-worker-hub-ai-proxy"
+primary_region = "yyz"
+
+[build]
+  dockerfile = "Dockerfile"
+
+[http_service]
+  internal_port = 3002
+  force_https = true
+  auto_stop_machines = "stop"
+  auto_start_machines = true
+  min_machines_running = 0
+
+  [[http_service.checks]]
+    grace_period = "10s"
+    interval = "30s"
+    method = "GET"
+    timeout = "5s"
+    path = "/health"
+
+[[vm]]
+  memory = "512mb"
+  cpu_kind = "shared"
+  cpus = 1
