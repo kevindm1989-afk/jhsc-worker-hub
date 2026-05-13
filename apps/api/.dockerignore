@@ -1,0 +1,15 @@
+node_modules
+.git
+.gitignore
+.env
+.env.*
+.dockerignore
+Dockerfile
+fly.toml
+vitest.config.ts
+drizzle.config.ts
+*.md
+dist
+build
+coverage
+src/**/*.test.ts
