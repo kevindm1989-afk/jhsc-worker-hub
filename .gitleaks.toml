@@ -1,0 +1,17 @@
+# .gitleaks.toml — JHSC Worker Hub secret-scan configuration.
+#
+# Extends the default gitleaks ruleset (no rule loosening) and allowlists
+# the literal local-dev placeholder string that appears in tracked files.
+# Real credentials never live in tracked files — they live in `.env`
+# (gitignored) or Fly Secrets. See SECURITY.md §3.
+
+title = "JHSC Worker Hub gitleaks config"
+
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Local dev placeholder password used in .env.example and docker-compose.yml — not a real credential"
+regexes = [
+  '''jhsc_dev_local_only''',
+]
