@@ -282,6 +282,13 @@ Local `gitleaks` binary is not installed. CI evidence below.
   corrected email going forward.
 - **No new action this session.** Flagged in the durable record;
   user-driven config fix.
+- **Resolution (2026-05-15):** User corrected via
+  `git config --global user.email` shortly after audit commit
+  `ff932a8`. Current config on both local (`.git/config`) and
+  global (`~/.gitconfig`) resolves to the correct address
+  (`jhscworkerhub@gmail.com`). Past commit history on `main`
+  retains the typo'd email permanently (force-push to rewrite
+  not worth it on shared `main`). No further action needed.
 
 ---
 
