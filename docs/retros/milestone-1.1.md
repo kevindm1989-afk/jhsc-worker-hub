@@ -280,3 +280,12 @@ State at end of session 2026-05-13:
   CI e2e, CI docker, gitleaks scan), require linear history, restrict
   direct pushes. Run via `gh api` with a PAT scoped for repo
   administration.
+- **Repo merge-strategy default.** The 5 GitHub Actions PRs merged on
+  2026-05-14 used "Create a merge commit" (the default button) instead
+  of "Squash and merge," leaving 10 commits on `main` (5 bumps + 5 merge
+  commits) where 5 would have sufficed. The non-linear history isn't
+  worth rewriting (would require force-push on shared `main`,
+  destructive). Before the next merge batch: switch the repo default to
+  "Squash and merge" via Settings → General → Pull Requests → Allow
+  merge commits (off), Allow squash merging (on, as default).
+  Alternatively, click the dropdown on the merge button each time.
