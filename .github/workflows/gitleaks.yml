@@ -10,6 +10,17 @@ jobs:
   scan:
     name: scan
     runs-on: ubuntu-latest
+    # Explicit permissions: required because Dependabot PR events run with a
+    # restricted GITHUB_TOKEN that drops pull-requests by default. Without
+    # this block, gitleaks-action fails with 403 on its GET /pulls/:n/commits
+    # call (used to enumerate PR commits for scanning) and the diff is never
+    # actually scanned. Push-event runs get the broader default token and
+    # work without this block — that asymmetry is what makes this non-obvious.
+    #   contents: read       — actions/checkout reads the repo tree
+    #   pull-requests: read  — gitleaks-action lists PR commits to scan
+    permissions:
+      contents: read
+      pull-requests: read
     steps:
       - uses: actions/checkout@v4
         with:
