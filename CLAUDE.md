@@ -79,7 +79,6 @@ jhsc-worker-hub/
 ├── SECURITY.md
 ├── ROADMAP.md
 ├── BOOTSTRAP_PROMPT.md
-├── fly.toml
 ├── apps/
 │   ├── web/                   # React PWA
 │   ├── api/                   # Hono + Bun (Fly Machine)
