@@ -6,6 +6,9 @@ on:
   pull_request:
     branches: [main]
 
+permissions:
+  contents: read
+
 jobs:
   verify:
     name: verify
@@ -39,6 +42,14 @@ jobs:
   e2e:
     name: e2e (chromium)
     runs-on: ubuntu-latest
+    # actions: write is defensive for upload-artifact@v7 on the
+    # if: failure() step below — the v4+ artifact backend's permission
+    # requirements aren't documented in upload-artifact's README,
+    # MIGRATION.md, or GitHub's token-auth docs. The conditional gate
+    # means CI never exercises this path, so we cover it preventively.
+    permissions:
+      contents: read
+      actions: write
     steps:
       - uses: actions/checkout@v6
 
@@ -70,6 +81,12 @@ jobs:
   docker:
     name: docker build
     runs-on: ubuntu-latest
+    # actions: write is required for docker/build-push-action's
+    # cache-to: type=gha (Actions cache scope writes); not for
+    # arbitrary Actions API usage.
+    permissions:
+      contents: read
+      actions: write
     steps:
       - uses: actions/checkout@v6
 
