@@ -1,0 +1,21 @@
+#!/usr/bin/env sh
+set -e
+
+echo "=== verification gate ==="
+pnpm typecheck
+pnpm lint
+pnpm format:check
+pnpm test
+
+echo "=== secret-name scan ==="
+SECRETS=$(git diff --cached --name-only \
+  | grep -iE '(^|/)\.env(\.|$)|\.env$|\.(key|pem|p12|pfx|crt)$|(^|/)(id_rsa|id_ed25519)$|(^|/)credentials\.(json|yml|yaml|env)$|(^|/)secrets?\.(json|yml|yaml|env)$' \
+  | grep -vE '(^|/)\.env\.(example|sample|template)$' \
+  || true)
+if [ -n "$SECRETS" ]; then
+  echo "=== SECRET-NAMED FILES STAGED — ABORTING ==="
+  echo "$SECRETS"
+  exit 1
+else
+  echo "(none — confirmed)"
+fi
