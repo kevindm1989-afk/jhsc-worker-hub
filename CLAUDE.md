@@ -85,13 +85,13 @@ jhsc-worker-hub/
 │   ├── api/                   # Hono + Bun (Fly Machine)
 │   └── ai-proxy/              # Anthropic proxy (separate Fly Machine)
 ├── packages/
-│   ├── shared-types/
-│   ├── legal-corpus/          # OHSA + CLC Part II + regs (versioned)
-│   ├── crypto/                # Envelope encryption helpers
-│   ├── audit/                 # Tamper-evident hash-chain logger
+│   ├── shared-types/          # (planned — milestone 1.3+)
+│   ├── legal-corpus/          # OHSA + CLC Part II + regs (versioned) (planned — milestone 1.4)
+│   ├── crypto/                # Envelope encryption helpers (planned — milestone 1.3)
+│   ├── audit/                 # Tamper-evident hash-chain logger (planned — milestone 1.3)
 │   ├── ui/                    # Shared components + design tokens
-│   ├── calculators/           # Ergonomic/exposure math
-│   └── excel-import/          # Excel file parser + reconciliation engine
+│   ├── calculators/           # Ergonomic/exposure math (planned — milestone 3.5)
+│   └── excel-import/          # Excel file parser + reconciliation engine (planned — milestone 1.11)
 ├── migrations/                # Drizzle migrations
 ├── config/
 │   └── workplace.ts           # Workplace identity (env-driven)
