@@ -261,6 +261,11 @@ true` was sent but returned `false`; per docs, the field only
   takes effect when `lock_branch: true`, which we left false.
   Forks sync via standard git operations regardless — intent
   satisfied by unlocked-branch state. No further action needed.
+- **Addendum (2026-05-19, post-closure):** Repo visibility reverted
+  to private. Protection endpoint now returns 403 (plan-locked); the
+  Baseline A config is no longer queryable, and whether the rules
+  persist or were auto-dropped is undetermined without re-going-public
+  (not pursued). Closure at `b112b24` stands.
 
 ### L5 — Repo merge-strategy default not switched to squash
 
