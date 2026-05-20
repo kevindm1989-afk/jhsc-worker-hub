@@ -243,6 +243,24 @@ Local `gitleaks` binary is not installed. CI evidence below.
 - **Detail:** Retro Outstanding Follow-up. Needs `gh api` with
   repo-admin PAT.
 - **No new action.** Already tracked.
+- **Resolution (2026-05-19):** Branch protection PUT'd via
+  `gh api repos/.../branches/main/protection --method PUT` with
+  Baseline A config. Verified via GET — settings persisted.
+  Effective protection: `required_linear_history: true` (matches
+  L5 squash discipline), `allow_force_pushes: false` (history
+  rewrite blocked), `allow_deletions: false` (accidental delete
+  blocked), `enforce_admins: false` (owner bypass — preserves
+  solo direct-push workflow). Required PR, status checks, and
+  signed commits are not enabled (out of scope for solo workflow
+  with existing pre-commit hook + CI gating). Two reframings
+  worth recording: (1) the audit's "repo-admin PAT" framing was
+  inaccurate — the actual blocker was plan-level (branch
+  protection requires Pro for private repos), resolved by repo
+  owner changing visibility to public. (2) `allow_fork_syncing:
+true` was sent but returned `false`; per docs, the field only
+  takes effect when `lock_branch: true`, which we left false.
+  Forks sync via standard git operations regardless — intent
+  satisfied by unlocked-branch state. No further action needed.
 
 ### L5 — Repo merge-strategy default not switched to squash
 
