@@ -252,6 +252,14 @@ Local `gitleaks` binary is not installed. CI evidence below.
   producing non-linear history; should switch to squash before next
   merge batch.
 - **No new action.** Already tracked.
+- **Resolution (2026-05-19):** Repo settings verified via
+  `gh api repos/.../jhsc-worker-hub`: `allow_merge_commit: false`,
+  `allow_squash_merge: true`. With merge commits disabled at the
+  API level, "Create a merge commit" is no longer available in
+  the PR UI — the audit's specific concern cannot recur. The
+  exact change point between 2026-05-14 and 2026-05-19 is not
+  determined from local evidence (repo owner does not recall the
+  toggle). No further action needed.
 
 ### L6 — Git config `user.email` typo (`gmaail.com` vs `gmail.com`)
 
