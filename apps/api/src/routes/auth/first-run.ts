@@ -51,6 +51,7 @@ import {
   users,
 } from '../../db/schema';
 import { env } from '../../env';
+import { ensureWorkplaceKey } from '../../evidence/workplace-key';
 
 export const firstRunRoute = new Hono();
 
@@ -251,6 +252,10 @@ firstRunRoute.post('/confirm', async (c) => {
         // so the response shape matches the closed-gate path.
         throw new ConcurrentFirstRunError();
       }
+      // Milestone 1.7: bootstrap the workplace X25519 key pair so the
+      // browser can sealed-box-encrypt evidence files immediately after
+      // first-run. Idempotent — re-runs on retry are no-ops.
+      await ensureWorkplaceKey(tx);
       return userRow.id;
     });
   } catch (e) {

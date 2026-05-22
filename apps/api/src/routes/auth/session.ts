@@ -18,6 +18,7 @@ import { clientIp, userAgent } from '../../auth/request';
 import { refreshSession, revokeAllUserSessions, revokeSession } from '../../auth/session';
 import { initCrypto, openString } from '../../auth/crypto-stub';
 import { getDb } from '../../db/client';
+import { getActiveWorkplacePublicKey } from '../../evidence/workplace-key';
 import { userProfiles } from '../../db/schema';
 import { eq } from 'drizzle-orm';
 
@@ -93,6 +94,11 @@ sessionRoute.get('/session', authMiddleware(), async (c) => {
     .where(eq(userProfiles.userId, auth.userId))
     .limit(1);
   const displayName = profiles[0]?.name !== undefined ? openString(profiles[0].name) : null;
+  // Workplace public key ships with every session response so the
+  // browser can sealed-box-encrypt evidence file DEKs (ADR-0006). The
+  // public key is safe to ship -- it's the recipient half of a sealed
+  // box, useless for decryption.
+  const workplaceKey = await getActiveWorkplacePublicKey(db);
   return c.json({
     userId: auth.userId,
     displayName,
@@ -100,5 +106,11 @@ sessionRoute.get('/session', authMiddleware(), async (c) => {
     stepUp: auth.stepUpUntil
       ? { active: true, until: auth.stepUpUntil.toISOString() }
       : { active: false, until: null },
+    workplaceKey: workplaceKey
+      ? {
+          id: workplaceKey.id,
+          publicKeyB64: Buffer.from(workplaceKey.publicKey).toString('base64'),
+        }
+      : null,
   });
 });
