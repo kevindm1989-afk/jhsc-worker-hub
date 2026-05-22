@@ -59,6 +59,7 @@ export function ThemeProvider({ children }: { children: ReactNode }): JSX.Elemen
   // Apply theme to <html data-theme> whenever the user's choice changes.
   useEffect(() => {
     const next = resolve(theme);
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- resolvedTheme must be React state so the matchMedia handler below can react to OS-level changes via setResolvedTheme; deriving from `theme` alone breaks that path
     setResolvedTheme(next);
     applyResolvedToDom(next);
   }, [theme]);
