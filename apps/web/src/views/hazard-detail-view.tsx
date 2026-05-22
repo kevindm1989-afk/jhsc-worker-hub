@@ -24,6 +24,7 @@ import {
   SeverityDot,
 } from '@/hazards/components';
 import { stepUpEmitter } from '@/auth/api';
+import { CaptureFab, EvidenceList } from '@/evidence/components';
 import type { HazardStatus } from '@jhsc/shared-types';
 import { requiresStepUp } from '@jhsc/shared-types/hazard-transitions';
 
@@ -195,7 +196,21 @@ function HazardDetailInner({ id }: { id: string }): JSX.Element {
 
       <ReporterRevealPanel hazardId={hazard.id} />
 
+      <section
+        aria-labelledby="hazard-evidence-heading"
+        className="mb-4 rounded-md border border-border bg-card p-4"
+      >
+        <h2
+          id="hazard-evidence-heading"
+          className="mb-2 text-xs font-medium uppercase tracking-wide text-muted-foreground"
+        >
+          Evidence
+        </h2>
+        <EvidenceList linkedType="hazard" linkedId={hazard.id} />
+      </section>
+
       <HistoryPanel history={hazard.history} />
+      <CaptureFab linkedType="hazard" linkedId={hazard.id} />
 
       <div className="mt-6 text-xs text-muted-foreground">
         Every status change is anchored in the audit chain — the audit row index appears next to
