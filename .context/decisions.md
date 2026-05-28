@@ -23,6 +23,13 @@ The locked tech stack and non-negotiables in `CLAUDE.md` are the canonical proje
 - **ADR:** pending (architect to draft `docs/adr/0001-security-substrate-first.md` in Chunk 1).
 - **SUPERSEDED 2026-05-28 — see entry below.**
 
+## 2026-05-28 — Auth + step-up: Lucia v3 for identity, EdDSA JWT + opaque refresh for sessions
+- **Decision:** Use Lucia v3 with the Drizzle adapter as the *identity layer* (owns users + credential validation). Build sessions on top per SECURITY.md §3: HttpOnly `__Host-access` EdDSA JWT (30 min) + HttpOnly `__Host-refresh` opaque token (14 d, rotates on use). Step-up via short-lived `step_up_until` claim. Passkey-primary; password (Argon2id, libsodium) + TOTP fallback; 8 recovery codes. Brute-force ladder 5/10/20 from SECURITY.md §3.
+- **Why:** Honors the locked stack (Lucia, EdDSA JWT, Argon2id, refresh-rotation) without re-opening either spec. Containment-first: no tokens in JS. Reversibility to bare-Oslo if Lucia v3 stops being viable is clean because the identity/session boundary is already drawn.
+- **Audit during 1.2 → 1.3 gap:** flat `auth_events` table; 1.3's chained logger backfills via a hash-of-canonical-JSON anchor entry as chain row 2. Crypto stub uses libsodium `crypto_secretbox` with a `0x01` version byte for clean migration to real `packages/crypto` (XChaCha20-Poly1305) in 1.3.
+- **Alternatives ruled out:** Lucia-default opaque-session-only (departs from SECURITY.md §3); bare Oslo (reopens CLAUDE.md stack lock without justification).
+- **ADR:** [`docs/adr/0001-auth-and-step-up.md`](../docs/adr/0001-auth-and-step-up.md).
+
 ## 2026-05-28 — Retract substrate-before-Auth; follow ROADMAP 1.2 → 1.3 ordering
 - **Decision:** Withdraw the prior entry. Build order follows `ROADMAP.md` as written: 1.1 Foundation → 1.2 Auth (Lucia, passkeys, password+TOTP, step-up helper, first-run setup) → 1.3 Encryption + Audit (`packages/crypto`, `packages/audit`, audit log table, verify script) → 1.4 Legal Corpus.
 - **Why:** The ROADMAP is the canonical plan the project started from. Reordering it requires explicit deliberation, not a unilateral architect call. Auth-first introduces a documented gap (auth events not in the hash chain until 1.3 lands) that is acceptable because:
