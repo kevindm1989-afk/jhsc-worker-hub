@@ -17,6 +17,7 @@
     "@fontsource-variable/inter": "^5.1.0",
     "@fontsource-variable/jetbrains-mono": "^5.1.0",
     "@fontsource-variable/source-serif-4": "^5.1.0",
+    "@jhsc/shared-types": "workspace:*",
     "@jhsc/ui": "workspace:*",
     "@radix-ui/react-slot": "^1.1.1",
     "@simplewebauthn/browser": "^11.0.0",

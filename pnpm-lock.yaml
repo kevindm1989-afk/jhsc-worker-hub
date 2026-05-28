@@ -154,6 +154,9 @@ importers:
       '@fontsource-variable/source-serif-4':
         specifier: ^5.1.0
         version: 5.2.9
+      '@jhsc/shared-types':
+        specifier: workspace:*
+        version: link:../../packages/shared-types
       '@jhsc/ui':
         specifier: workspace:*
         version: link:../../packages/ui

@@ -4,6 +4,7 @@ import { ThemeProvider } from './components/theme-provider';
 import { AuthProvider } from './auth/auth-context';
 import { AuthRouter } from './auth/route-guard';
 import { StepUpModal } from './auth/step-up-modal';
+import { HazardNewView } from './views/hazard-new-view';
 import { HazardsView } from './views/hazards-view';
 import { InspectionsView } from './views/inspections-view';
 import { LegalView } from './views/legal-view';
@@ -35,6 +36,7 @@ export function App(): JSX.Element {
                 <Route index element={<Navigate to="/minutes" replace />} />
                 <Route path="/minutes" element={<MinutesView />} />
                 <Route path="/hazards" element={<HazardsView />} />
+                <Route path="/hazards/new" element={<HazardNewView />} />
                 <Route path="/inspections" element={<InspectionsView />} />
                 <Route path="/recommendations" element={<RecommendationsView />} />
                 <Route path="/more" element={<MoreView />} />
