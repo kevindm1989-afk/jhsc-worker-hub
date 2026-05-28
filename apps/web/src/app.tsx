@@ -4,6 +4,9 @@ import { ThemeProvider } from './components/theme-provider';
 import { AuthProvider } from './auth/auth-context';
 import { AuthRouter } from './auth/route-guard';
 import { StepUpModal } from './auth/step-up-modal';
+import { ActionItemDetailView } from './views/action-item-detail-view';
+import { ActionItemNewView } from './views/action-item-new-view';
+import { ActionItemsView } from './views/action-items-view';
 import { HazardDetailView } from './views/hazard-detail-view';
 import { HazardNewView } from './views/hazard-new-view';
 import { HazardsView } from './views/hazards-view';
@@ -39,6 +42,9 @@ export function App(): JSX.Element {
                 <Route path="/hazards" element={<HazardsView />} />
                 <Route path="/hazards/new" element={<HazardNewView />} />
                 <Route path="/hazards/:id" element={<HazardDetailView />} />
+                <Route path="/action-items" element={<ActionItemsView />} />
+                <Route path="/action-items/new" element={<ActionItemNewView />} />
+                <Route path="/action-items/:id" element={<ActionItemDetailView />} />
                 <Route path="/inspections" element={<InspectionsView />} />
                 <Route path="/recommendations" element={<RecommendationsView />} />
                 <Route path="/more" element={<MoreView />} />
