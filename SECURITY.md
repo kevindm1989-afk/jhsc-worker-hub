@@ -188,6 +188,20 @@ Hazards are the first DB surface that carries worker-personal content: rep-autho
 
 **Audit hooks for hazard changes.** Two new event kinds (`hazard.created`, `hazard.status_changed`) added to `packages/shared-types` `AuditEventKind`. Both payloads pass through the same typed-emit boundary as 1.3 — `emitAuthEvent`'s 1.3 invariant generalizes to all writers (priv-F2 from 1.3 carries forward).
 
+**Close-out review findings (Milestone 1.5 slice 5).**
+
+| Finding | Where landed |
+|---|---|
+| sec-F1 — no body-size limit or rate cap on `/api/hazards` | `bodyLimit({maxSize: 64 * 1024})` mounted on `hazardsRoute.use('*')` (returns 413 over the cap); existing token-bucket `rateLimit` middleware applied at `60 burst / 10 rps` per-IP. |
+| sec-F2 — illegal_transition / step-up_required returned inside the FOR UPDATE transaction (held the row lock for response serialization) | Body parse + initial transition graph check + step-up freshness check moved OUTSIDE the transaction. Race-conditioned writes inside the lock throw `HazardWriteAborted` to roll back cleanly; the outer handler maps to the right JSON response. |
+| sec-F3 — PATCH inline step-up bypassed the freshness floor + omitted `max_age` | New exported `checkStepUpFreshness` in `apps/api/src/auth/step-up.ts` is the single source of truth for the freshness check. The PATCH handler calls it with `maxAgeSeconds: 60` (destructive transition) — a re-step-up older than one minute is rejected and the WWW-Authenticate header carries `max_age="60"` so the web modal can warn correctly. |
+| sec-F5 — list path crashed on a single corrupted ciphertext | Per-row `try/catch` around `openField`; bad rows surface as `summary: '[unreadable — open the detail view for diagnostics]'` so the rest of the list stays usable across KEK rotation edge cases (T-H12 in-flight). |
+| sec-F6 — ILIKE wildcard injection (no security severity, but breaks the search contract) | `q` is escaped against `\`, `%`, `_` before pattern construction; query carries `ESCAPE '\'`. |
+| sec-F7 — H-NNN sequence is non-contiguous (failed transactions leave gaps) | Documented in `docs/runbooks/hazards.md` §2 ("Hazard codes — non-contiguous by design"). Treated as an acceptable mitigation of T-H11. |
+| priv-F1 — intake form copy misled about the encryption boundary | Caption replaced with "travel to the server over HTTPS, and are encrypted at rest with a key held by the workplace before they are written to the database." Empty-state copy similarly clarified. |
+| priv-F2 — no runbook for hazards / PIPEDA right-to-erasure procedure | `docs/runbooks/hazards.md` lands covering schema overview, H-NNN non-contiguity, withdrawn lifecycle, PIPEDA Principle 9 response procedure (refuse-or-redact based on activity + retention + named-individual paths), KEK rotation impact, and tamper response. |
+| priv-F4 — `safeSummary` returned 80 chars verbatim when no word boundary exists | Falls back to `(cap - 10)` when no usable space is in the prefix, shedding the trailing partial token. Seven new unit tests cover the boundary cases (`apps/api/src/hazards/crypto.test.ts`). |
+
 ---
 
 ## 3. Security Controls

@@ -58,6 +58,33 @@ export interface RequireStepUpOptions {
   readonly maxAgeSeconds?: number;
 }
 
+/**
+ * Pure freshness-floor check shared by `requireStepUp` middleware and
+ * routes that need to gate on step-up *conditionally* (e.g. the hazards
+ * PATCH /status handler — only some transitions require step-up).
+ *
+ * Returns `null` when the grant is fresh enough; otherwise returns the
+ * `(action, maxAgeSeconds)` pair the caller must echo in the
+ * WWW-Authenticate header + the JSON body. Sec-review F3 (1.5): the
+ * hazards PATCH route used to inline a shorter check that missed the
+ * freshness floor; routing through this helper guarantees one source of
+ * truth for the step-up window across every sensitive endpoint.
+ */
+export function checkStepUpFreshness(
+  auth: ValidatedAccess,
+  opts: RequireStepUpOptions,
+): { action: string; maxAgeSeconds: number } | null {
+  const now = Date.now();
+  const stepUpUntilMs = auth.stepUpUntil?.getTime() ?? 0;
+  const cap = opts.maxAgeSeconds ?? 5 * 60;
+  const oldest = now - cap * 1000;
+  const grantIssuedAt = stepUpUntilMs - 5 * 60 * 1000;
+  if (stepUpUntilMs < now || grantIssuedAt < oldest) {
+    return { action: opts.action, maxAgeSeconds: cap };
+  }
+  return null;
+}
+
 export function requireStepUp(opts: RequireStepUpOptions): MiddlewareHandler {
   return async (c, next) => {
     const auth = c.get('auth') as ValidatedAccess | undefined;
@@ -65,22 +92,13 @@ export function requireStepUp(opts: RequireStepUpOptions): MiddlewareHandler {
       // Programmer error — authMiddleware must run first.
       return c.json({ error: 'unauthorized' }, 401);
     }
-    const now = Date.now();
-    const stepUpUntilMs = auth.stepUpUntil?.getTime() ?? 0;
-    const cap = opts.maxAgeSeconds ?? 5 * 60;
-    const oldest = now - cap * 1000;
-    // The grant must be present AND it must have been issued no longer
-    // than `cap` seconds ago. We approximate "issued at" by working
-    // backward from `step_up_until` using the default 5-min window.
-    // For shorter `cap` overrides on sensitive endpoints, this floor
-    // forces the user to re-step-up.
-    const grantIssuedAt = stepUpUntilMs - 5 * 60 * 1000;
-    if (stepUpUntilMs < now || grantIssuedAt < oldest) {
+    const challenge = checkStepUpFreshness(auth, opts);
+    if (challenge) {
       c.header(
         'WWW-Authenticate',
-        `StepUp realm="jhsc", action="${opts.action}", max_age="${cap}"`,
+        `StepUp realm="jhsc", action="${challenge.action}", max_age="${challenge.maxAgeSeconds}"`,
       );
-      return c.json({ error: 'step_up_required', action: opts.action }, 401);
+      return c.json({ error: 'step_up_required', action: challenge.action }, 401);
     }
     await next();
     return undefined;

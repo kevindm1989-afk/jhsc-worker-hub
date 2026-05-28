@@ -41,14 +41,28 @@ export function openOptionalField(field: {
 
 /**
  * Safe summary for list-view projection (T-H1/T-H4 mitigation).
- * Returns the first 80 chars of the decrypted description, trimmed at a
- * word boundary, with an ellipsis if truncated. Never returns reporter
- * identity. List route uses this; detail route returns the full body.
+ * Returns the first `max` chars of the decrypted description, trimmed
+ * at a word boundary, with an ellipsis if truncated. Never returns
+ * reporter identity. List route uses this; detail route returns the
+ * full body.
+ *
+ * Priv-review F4 (1.5): when the first `max` chars contain no space
+ * (e.g. a rep types a single-token name jammed together with the
+ * hazard description), we fall back from "trim at word boundary" to
+ * "trim at the codepoint cap minus a safety margin." That sheds the
+ * trailing partial token instead of returning the maximal name prefix.
+ * Defense-in-depth against rep-discipline failure, not a primary
+ * mitigation.
  */
 export function safeSummary(decrypted: string, max = 80): string {
   if (decrypted.length <= max) return decrypted;
   const slice = decrypted.slice(0, max);
   const lastSpace = slice.lastIndexOf(' ');
-  const trimAt = lastSpace > max - 20 ? lastSpace : max;
+  const SAFETY_MARGIN = 10;
+  const trimAt =
+    lastSpace > max - 20
+      ? lastSpace
+      : // No usable word boundary — shed the trailing partial token.
+        Math.max(0, max - SAFETY_MARGIN);
   return `${slice.slice(0, trimAt).trimEnd()}…`;
 }

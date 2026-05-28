@@ -211,8 +211,8 @@ function HazardEmptyState({ filtersApplied }: { filtersApplied: boolean }): JSX.
         {filtersApplied ? 'No hazards match the current filters.' : 'No hazards logged yet.'}
       </div>
       <p className="max-w-sm text-sm text-muted-foreground">
-        Every hazard record is encrypted at rest and entered into the tamper-evident audit chain on
-        creation.
+        Hazard descriptions and reporter identities are encrypted at rest with the workplace key;
+        each new hazard is entered into the tamper-evident audit chain on creation.
       </p>
       <div className="mt-4">
         <Button asChild size="sm" className="h-9">

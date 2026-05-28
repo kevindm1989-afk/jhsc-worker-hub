@@ -10,6 +10,7 @@ import { getDb } from '../../db/client';
 import { bootAuthTestEnv } from '../../auth/test-setup';
 import { cleanAuthTables, hasDb } from '../../auth/test-db';
 import { _internals as totpInternals } from '../../auth/totp';
+import { _resetRateLimitForTests } from '../../middleware/rate-limit';
 
 const SKIP = !hasDb();
 const EMAIL = 'cochair@workplace.invalid';
@@ -23,6 +24,7 @@ beforeAll(async () => {
 
 beforeEach(async () => {
   if (SKIP) return;
+  _resetRateLimitForTests();
   await cleanAuthTables();
 });
 
@@ -245,7 +247,7 @@ describe.skipIf(SKIP)('PATCH /api/hazards/:id/status', () => {
     expect(body.to).toBe('archived');
   });
 
-  it('requires step-up for ->withdrawn (T-H3)', async () => {
+  it('requires step-up for ->withdrawn (T-H3) and emits the max_age challenge', async () => {
     const { cookie } = await loginAsRep();
     const id = await createHazard(cookie);
     const res = await app.request(`/api/hazards/${id}/status`, {
@@ -254,7 +256,10 @@ describe.skipIf(SKIP)('PATCH /api/hazards/:id/status', () => {
       body: JSON.stringify({ toStatus: 'withdrawn', reason: 'duplicate of H-002' }),
     });
     expect(res.status).toBe(401);
-    expect(res.headers.get('www-authenticate')).toMatch(/StepUp/);
+    const challenge = res.headers.get('www-authenticate');
+    expect(challenge).toMatch(/StepUp/);
+    // sec-F3: the freshness-floor middleware emits max_age explicitly.
+    expect(challenge).toMatch(/max_age="60"/);
     const body = (await res.json()) as { error: string; action: string };
     expect(body.error).toBe('step_up_required');
     expect(body.action).toBe('hazard.status_change.withdrawn');

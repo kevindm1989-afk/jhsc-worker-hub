@@ -121,10 +121,13 @@ export function HazardNewView(): JSX.Element {
         <h1 className="text-2xl font-semibold tracking-tight text-foreground md:text-3xl">
           Log a hazard
         </h1>
-        <p className="mt-1 flex items-center gap-1 text-sm text-muted-foreground">
-          <Lock className="h-3.5 w-3.5" strokeWidth={1.75} aria-hidden="true" />
-          Description, reporter identity, and location detail are encrypted before the server stores
-          them.
+        <p className="mt-1 flex items-start gap-1 text-sm text-muted-foreground">
+          <Lock className="mt-0.5 h-3.5 w-3.5 shrink-0" strokeWidth={1.75} aria-hidden="true" />
+          <span>
+            Description, reporter identity, and location detail travel to the server over HTTPS, and
+            are encrypted at rest with a key held by the workplace before they are written to the
+            database.
+          </span>
         </p>
       </header>
 
