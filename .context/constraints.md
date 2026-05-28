@@ -96,23 +96,27 @@ Every feature touching personal information must satisfy the ten fair-informatio
 Non-negotiable for any app handling personal information:
 
 ### Encryption
+
 - **TLS 1.2 minimum** (prefer 1.3) in transit — no exceptions
 - **AES-256 at rest** for personal information
 - Encrypted backups; key management documented
 
 ### Access control
+
 - **MFA required** for all admin accounts and production access
 - **Least privilege** — no shared admin accounts; role-based access
 - Audit logs retained for at least 1 year (longer if regulated)
 - Access reviewed quarterly
 
 ### Logging hygiene
+
 - **No PII in application logs** unless absolutely necessary and documented
 - No PII in error messages returned to clients
 - No PII in URL query strings (they end up in proxy logs, browser history, referrer headers)
 - Structured logs only; redact sensitive fields at the logging layer
 
 ### Application security
+
 - Input validation at every trust boundary
 - Output encoding to prevent injection
 - Parameterized queries — no string concatenation for SQL
@@ -121,23 +125,27 @@ Non-negotiable for any app handling personal information:
 - Security headers (CSP, HSTS, X-Frame-Options, etc.)
 
 ### Vulnerability management
+
 - **Dependency audit on every CI build** — block merge on high-severity CVEs
 - Static analysis (semgrep or equivalent) on every PR
 - Regular penetration test before launch and annually after
 - Documented patching cadence
 
 ### Data lifecycle
+
 - **Retention schedule defined per data type** and enforced (automated deletion)
 - Deletion is real deletion (or documented anonymization), not just soft-delete
 - Data export available for user access requests (PIPEDA s.8 / Law 25)
 - Right-to-deletion workflow tested
 
 ### Third parties
+
 - Vendor risk assessment before integrating any subprocessor
 - Data processing agreements in place
 - Cross-border transfers documented; PIPEDA-comparable safeguards verified
 
 ### Incident response
+
 - Written incident response plan with named contacts and escalation path
 - Tabletop exercise annually
 - Communication templates for breach notification ready in advance

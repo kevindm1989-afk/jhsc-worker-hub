@@ -54,15 +54,18 @@ threshold expression — the actual problem condition.]
 ## Resolution paths
 
 ### If cause #1:
+
 1. [Step]
 2. [Step]
 3. Verify: [how to confirm fixed]
 
 ### If cause #2:
+
 1. [Step]
 2. ...
 
 ### If unknown:
+
 1. [Stabilize first — flag off, rollback, scale up]
 2. [Investigate after]
 3. [Escalation contact]

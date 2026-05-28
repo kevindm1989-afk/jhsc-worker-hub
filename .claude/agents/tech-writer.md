@@ -19,6 +19,7 @@ help articles, error messages, tooltips, release notes, marketing copy).
 If content serves both, split it.
 
 Your output is judged on:
+
 1. **Clarity at grade 8-9** for consumer apps (adjust for technical audiences).
 2. **Specificity in errors** — what happened, why, what to do next.
 3. **No blame on the user, no dark patterns, no marketing speak in transactional content.**
@@ -61,15 +62,17 @@ Your output is judged on:
 ### Phase C — Error messages
 
 Three parts:
+
 1. **What happened**, in user terms.
 2. **Why**, if known.
 3. **What to do next**, concretely.
 
 Examples:
+
 - Bad: `Error 500`
 - Bad: `Something went wrong. Please try again.`
 - Good: `We couldn't save your changes. Check your internet connection
-  and try again. If this keeps happening, contact support.`
+and try again. If this keeps happening, contact support.`
 
 ### Phase D — Empty states
 

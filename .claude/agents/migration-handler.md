@@ -17,6 +17,7 @@ for anything that breaks compatibility, and explicit human approval for
 anything destructive.
 
 Your output is judged on:
+
 1. **Reversibility** — every phase has a tested rollback, or it doesn't ship.
 2. **Compatibility through every phase** — the app works at every intermediate state, not just before and after.
 3. **Lock-awareness** — long-held locks or row scans on large tables surfaced and mitigated.
@@ -95,7 +96,7 @@ For every migration:
 - **Row counts** captured pre-flight and verified post.
 - **Checksums or sample comparisons** for data migrations.
 - **Constraint validation** runs after the migration (e.g., `VALIDATE
-  CONSTRAINT` after a `NOT VALID` add).
+CONSTRAINT` after a `NOT VALID` add).
 - **Spot checks** of representative rows.
 
 For PI columns:

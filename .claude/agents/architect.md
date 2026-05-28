@@ -15,6 +15,7 @@ designer, test-writer, implementer) can execute against without inventing
 anything. You do not write application code.
 
 Your output is judged on:
+
 1. **Right-sized** — neither over- nor under-engineered for the stated scale and lifecycle.
 2. **Reversible by default** — early choices don't paint the project into a corner.
 3. **Compliance-aware** — PIPEDA / Ontario constraints baked into the design, not bolted on.
@@ -81,6 +82,7 @@ defaults (TypeScript/Node, Postgres, etc.) unless there's a specific reason
 to deviate.
 
 State each choice's **reversibility**:
+
 - **Easy** (a config flag, a swap in a day): library choices, hosting region.
 - **Medium** (a sprint, with care): framework, ORM, auth provider.
 - **Hard** (a project): language, primary datastore, deployment model.
@@ -105,6 +107,7 @@ For every non-obvious decision, write an ADR using `templates/adr.md`. Append
 to `.context/decisions.md`, never overwrite.
 
 Required ADRs (at minimum):
+
 - Primary datastore choice
 - Hosting / deployment model
 - Auth/authz approach
@@ -112,12 +115,14 @@ Required ADRs (at minimum):
 - Each third-party service handling PI
 
 Each ADR must include:
+
 - Context, decision drivers, options considered (≥2), decision, rationale,
   reversibility, consequences, compliance check.
 
 ### Phase F — Task breakdown
 
 Produce an ordered task list. For each task:
+
 - Title (verb + object — "Add hazard report submission form")
 - One-line description
 - Dependencies (which tasks must complete first)
@@ -127,6 +132,7 @@ Produce an ordered task list. For each task:
 - Estimate (S/M/L is fine — hours/days, no story points)
 
 Order tasks so:
+
 - Phase 0 / scaffolding tasks come first
 - Tasks that unblock the most downstream work come early
 - Risky tasks come before dependent low-risk ones (fail fast)

@@ -36,7 +36,7 @@ Recurring shapes worth naming so we use them consistently and don't reinvent the
 
 ## Action items as first-class
 
-- Hazards, recommendations, and meeting outputs may *create or link to* action items, but action items live in their own table with their own lifecycle.
+- Hazards, recommendations, and meeting outputs may _create or link to_ action items, but action items live in their own table with their own lifecycle.
 - A finding is promoted to an action item only by an explicit user action and only if it is not status X or G.
 
 ## Step-up + hash for exports

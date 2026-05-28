@@ -10,7 +10,7 @@
 3. Open `.context/glossary.md`. Note any project-specific terms relevant to the task.
 4. Skim `decisions.md` and `patterns.md` for anything touching this task.
 5. Skim `lessons.md` for anything that applies.
-6. Paste the relevant bits into your prompt with: *"Read this first."*
+6. Paste the relevant bits into your prompt with: _"Read this first."_
 
 ## With Claude Code
 

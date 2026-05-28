@@ -41,12 +41,14 @@ You agree not to:
 ## 5. Content
 
 ### Your content
+
 - You retain ownership of content you submit
 - You grant us a license to use, store, and display your content as
   necessary to provide the Service
 - You represent that you have the right to submit the content
 
 ### Our content
+
 - The Service, including its design, code, and original content, is owned
   by us and protected by intellectual property laws
 - Limited license: you may use the Service as intended; you may not

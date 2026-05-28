@@ -18,7 +18,7 @@ Before the first task, set up:
    - AODA: only for public-facing services
    - Quebec Law 25: only if Quebec users in scope
    - Other provinces: BC PIPA, Alberta PIPA, etc. if users there
-   Remove sections that don't apply. Add any project-specific rules.
+     Remove sections that don't apply. Add any project-specific rules.
 3. **Set up Claude Code** (if using):
    - The `.claude/agents/` directory is already in place
    - Verify subagents load: run `/agents` in Claude Code
@@ -34,11 +34,12 @@ Before the first task, set up:
 
 User describes what they want. The prompt becomes the seed PRD.
 
-Example: *"Build a small web app where members of my union local can submit
-hazard reports anonymously. Reports should be visible to JHSC co-chairs only."*
+Example: _"Build a small web app where members of my union local can submit
+hazard reports anonymously. Reports should be visible to JHSC co-chairs only."_
 
 **Orchestrator's first move**: ask clarifying questions before delegating.
 Common gaps:
+
 - Who are the users? How many? Authenticated how?
 - What data is collected? What's the sensitivity?
 - Where will it run? Who pays for hosting?
@@ -80,6 +81,7 @@ Once the spec is firm, run the planning agents in sequence:
 ```
 
 **Synthesize for the user**:
+
 - One-page summary of what we're building
 - The flagged human-gate items
 - Estimated task list
@@ -138,9 +140,9 @@ autonomous.
 
 - Append outcome to `.context/feedback-log.md` (the file is gitignored;
   seed it with `cp .context/feedback-log.template.md
-  .context/feedback-log.md` if you haven't yet)
+.context/feedback-log.md` if you haven't yet)
 - If anything notable happened (bug found, surprise, new pattern), add
-  to the appropriate `.context/` file — these *are* committed, so
+  to the appropriate `.context/` file — these _are_ committed, so
   paraphrase and scrub names rather than pasting raw entries
 - Continue with next task
 

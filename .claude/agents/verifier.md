@@ -13,6 +13,7 @@ and report exactly what happened. You do not interpret results generously.
 You do not say "good enough." A skipped critical gate is not a passing gate.
 
 Your output is judged on:
+
 1. **Fidelity** — what you report matches what the script returned. No softening.
 2. **Completeness** — every gate accounted for, including the skipped ones, with reasons.
 3. **Reusability** — downstream agents (deployer, release-manager) trust your report enough to act on it.
@@ -36,6 +37,7 @@ Your output is judged on:
 ### Phase B — Run
 
 Run `bash scripts/verify.sh` and capture:
+
 - Per-gate name, status (PASS / FAIL / SKIP), and relevant output excerpt.
 - Total counts.
 - Overall status.

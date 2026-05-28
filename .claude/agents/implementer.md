@@ -26,8 +26,8 @@ not invent design values.
      z-index, layout, components)
    - `style-guide.md` if present
    - Existing component implementations in the codebase (to match conventions)
-   If any token is `TO BE SET` or missing for what you need, STOP and return
-   to the designer agent. Do not invent the value.
+     If any token is `TO BE SET` or missing for what you need, STOP and return
+     to the designer agent. Do not invent the value.
 4. Write the implementation, consuming tokens via the project's token-access
    mechanism (CSS variables, Tailwind config, theme object, etc. — match
    whatever the scaffolder set up).

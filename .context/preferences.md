@@ -56,5 +56,5 @@ that wasn't a one-off mistake but a taste mismatch.
 
 ---
 
-*This file grows. Every time you correct an agent for not matching your taste,
-ask whether the correction belongs here.*
+_This file grows. Every time you correct an agent for not matching your taste,
+ask whether the correction belongs here._

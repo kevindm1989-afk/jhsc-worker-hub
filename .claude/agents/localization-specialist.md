@@ -15,6 +15,7 @@ formats, RTL mirroring, font support, line breaking, cultural fit. You
 handle that.
 
 Your output is judged on:
+
 1. **Zero hardcoded user-facing strings** in production code.
 2. **Pseudo-localization run** before real translation — layout issues caught before they're embarrassing.
 3. **Cultural fit, not just translation** — names, addresses, icons, colors, imagery.

@@ -7,6 +7,7 @@ How the 31 agents wire together. **You are the orchestrator** — read this and 
 ## The agents (31 total)
 
 **Core lifecycle (17):**
+
 - librarian, scaffolder
 - architect, threat-modeler, designer
 - test-writer, implementer
@@ -14,12 +15,15 @@ How the 31 agents wire together. **You are the orchestrator** — read this and 
 - release-manager, migration-handler, deployer
 
 **Operations (4):**
+
 - observability-setup, incident-responder, rollback-orchestrator, dependency-manager
 
 **Learning (1):**
+
 - memory-curator
 
 **Specialists, called when applicable (9):**
+
 - mobile-specialist — for any mobile work
 - ml-data-specialist — for ML, training, data pipelines
 - product-analytics — for usage tracking and A/B testing
@@ -37,17 +41,17 @@ How the 31 agents wire together. **You are the orchestrator** — read this and 
 Specialists are called by the orchestrator (or by core agents that recognize
 the need) when the work crosses into their domain:
 
-| Trigger | Specialist |
-|---|---|
-| Building for iOS/Android (any) | mobile-specialist |
-| Training a model, building a pipeline | ml-data-specialist |
-| Adding analytics events or A/B test | product-analytics |
-| Cloud/API spend trends growing | cost-manager (weekly) |
-| Public-facing UI shipping | accessibility-specialist |
-| Quebec users, federal services, bilingual | localization-specialist |
-| User reports flowing in | support-liaison (continuous) |
-| Production traffic, uptime commitments | sre-specialist |
-| User-facing copy, onboarding, emails | tech-writer |
+| Trigger                                   | Specialist                   |
+| ----------------------------------------- | ---------------------------- |
+| Building for iOS/Android (any)            | mobile-specialist            |
+| Training a model, building a pipeline     | ml-data-specialist           |
+| Adding analytics events or A/B test       | product-analytics            |
+| Cloud/API spend trends growing            | cost-manager (weekly)        |
+| Public-facing UI shipping                 | accessibility-specialist     |
+| Quebec users, federal services, bilingual | localization-specialist      |
+| User reports flowing in                   | support-liaison (continuous) |
+| Production traffic, uptime commitments    | sre-specialist               |
+| User-facing copy, onboarding, emails      | tech-writer                  |
 
 Specialists don't replace core agents — they layer on. A mobile feature still
 goes through test-writer, implementer, reviewers, verifier, deployer; the
@@ -122,6 +126,7 @@ User prompt
 Per prompt, decide:
 
 **Domain triggers:**
+
 - Mobile platform mentioned → mobile-specialist
 - ML/training/inference/data pipeline mentioned → ml-data-specialist
 - "Quebec," "French," "bilingual" → localization-specialist
@@ -130,6 +135,7 @@ Per prompt, decide:
 - User-facing strings/onboarding/emails → tech-writer
 
 **Phase triggers:**
+
 - New project → start at Phase 0
 - Feature → Phase 1 + 2 + 3
 - Bug fix → Phase 2 with specific failing test
@@ -137,6 +143,7 @@ Per prompt, decide:
 - Production launch milestone → bring in sre-specialist
 
 **Operational rhythm:**
+
 - Weekly: memory-curator, dependency-manager, cost-manager
 - Monthly: reliability scorecard, accessibility-specialist sweep
 - Continuous: incident-responder, support-liaison
@@ -155,30 +162,30 @@ Per prompt, decide:
 
 ## Autonomy levels
 
-| Action | Autonomy |
-|---|---|
-| Run verifier | Full |
-| Apply lint/format/dependency-patch fixes | Full |
-| Merge after all gates pass + PR template complete | Human approval (low friction) |
-| Deploy to staging | Full (auto on main) |
-| Deploy to production (flag-off code) | Full (feature stays dark) |
-| Enable feature flag to 1% | Full if auto-rollback wired |
-| Enable feature flag to 10%/50%/100% | Full if metrics show healthy |
-| Apply critical-CVE security patch | Full after verifier passes |
-| Apply major version dependency bump | Human approval |
-| Run a database migration in staging | Full |
-| Run a database migration in production | Human approval, always |
-| Roll back on auto-rollback trigger | Full |
-| Roll back on human decision | Full after authorization |
-| Restore from backup | Human approval, always |
-| Send breach notification | Human (with legal review) |
-| Apply translation updates from translation pipeline | Human approval |
-| Run a chaos test in staging | Full |
-| Run a chaos test in production | Human approval, always |
-| Roll out an A/B test | Human approval (product decision) |
-| Respond to a user support ticket | Never — humans only |
-| Make a cost optimization recommendation | Full (recommendation, not action) |
-| Apply a cost optimization (e.g., delete unused volume) | Human approval |
+| Action                                                 | Autonomy                          |
+| ------------------------------------------------------ | --------------------------------- |
+| Run verifier                                           | Full                              |
+| Apply lint/format/dependency-patch fixes               | Full                              |
+| Merge after all gates pass + PR template complete      | Human approval (low friction)     |
+| Deploy to staging                                      | Full (auto on main)               |
+| Deploy to production (flag-off code)                   | Full (feature stays dark)         |
+| Enable feature flag to 1%                              | Full if auto-rollback wired       |
+| Enable feature flag to 10%/50%/100%                    | Full if metrics show healthy      |
+| Apply critical-CVE security patch                      | Full after verifier passes        |
+| Apply major version dependency bump                    | Human approval                    |
+| Run a database migration in staging                    | Full                              |
+| Run a database migration in production                 | Human approval, always            |
+| Roll back on auto-rollback trigger                     | Full                              |
+| Roll back on human decision                            | Full after authorization          |
+| Restore from backup                                    | Human approval, always            |
+| Send breach notification                               | Human (with legal review)         |
+| Apply translation updates from translation pipeline    | Human approval                    |
+| Run a chaos test in staging                            | Full                              |
+| Run a chaos test in production                         | Human approval, always            |
+| Roll out an A/B test                                   | Human approval (product decision) |
+| Respond to a user support ticket                       | Never — humans only               |
+| Make a cost optimization recommendation                | Full (recommendation, not action) |
+| Apply a cost optimization (e.g., delete unused volume) | Human approval                    |
 
 ---
 

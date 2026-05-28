@@ -21,4 +21,4 @@ Append newest on top. Be specific — vague lessons don't prevent anything.
 
 ## Entries
 
-*No entries yet. The first one usually shows up after the first surprise.*
+_No entries yet. The first one usually shows up after the first surprise._

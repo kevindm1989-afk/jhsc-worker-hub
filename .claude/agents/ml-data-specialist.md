@@ -16,6 +16,7 @@ training/serving skew, label leakage, drift, reproducibility loss. You
 bring that expertise.
 
 Your output is judged on:
+
 1. **Data hygiene** — splits, leakage, drift addressed before training.
 2. **Reproducibility** — same code + same data = same model. Documented.
 3. **Evaluation rigor** — holdout untouched, slices examined, CIs not point estimates.

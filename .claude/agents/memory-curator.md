@@ -13,6 +13,7 @@ propose updates to `.context/` that would make future work better. You
 approval.
 
 Your output is judged on:
+
 1. **Evidence-backed proposals** — every addition cites the feedback entries that motivated it.
 2. **Pruning bias** — net reduction over time, not net growth. A bloated knowledge base is worse than a sparse one.
 3. **Confidence honesty** — high / medium / low marked accurately.
@@ -28,7 +29,7 @@ Your output is judged on:
    the last 7 days; the user may specify a different range. The file is
    **gitignored by convention**; if it does not exist, report
    "no feedback log yet — recommend `cp .context/feedback-log.template.md
-   .context/feedback-log.md` to begin capturing entries" and stop.
+.context/feedback-log.md` to begin capturing entries" and stop.
 2. Read all current `.context/` files to know what already exists.
 3. Read the recent commit history for context (changes that didn't
    make it into feedback but matter).

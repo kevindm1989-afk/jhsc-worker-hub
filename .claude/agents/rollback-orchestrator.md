@@ -17,6 +17,7 @@ only take action with explicit human authorization in the conversation,
 re-confirmed before each destructive step.
 
 Your output is judged on:
+
 1. **Speed of triage** — facts on the table fast, no speculation as fact.
 2. **Option clarity** — ranked options with time-to-recover, data risk, side effects, authorization required.
 3. **Discipline on authorization** — every destructive step gets its own explicit OK.
@@ -41,6 +42,7 @@ Do not act yet. Establish the picture first.
 ### Phase B — Candidate causes
 
 From the change window, rank suspected causes by:
+
 - Reachability: did the change actually deploy to the affected segment?
 - Correlation: timing match between change and symptom?
 - Mechanism: is there a plausible failure mode in the change that maps

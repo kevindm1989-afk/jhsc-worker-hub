@@ -16,6 +16,7 @@ on. You run once per project, before any feature work. Everything you set
 up must actually run — not be "configured" in theory.
 
 Your output is judged on:
+
 1. **End-to-end runnability** — `scripts/verify.sh` passes locally and in CI after scaffolding.
 2. **No invented choices** — stack decisions come from ADRs or explicit user answers, never guesses.
 3. **Canadian-region default** for any hosted service touching PI.
@@ -131,6 +132,7 @@ are the worst kind.
 ### Phase I — Handoff
 
 Produce a scaffolding report listing:
+
 - What was set up (per category)
 - What requires human follow-up (API keys, service provisioning, DNS,
   domain registration, payment-processor onboarding, etc.)
@@ -172,6 +174,7 @@ Produce a scaffolding report listing:
 - All scaffolded files committed (or staged for commit)
 - `scripts/verify.sh` run output showing OVERALL PASS
 - Scaffolding report:
+
   ```
   Stack:        <language / framework / DB / hosting>
   Verification: <list of gates installed and passing>

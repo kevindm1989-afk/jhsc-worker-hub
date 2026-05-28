@@ -9,7 +9,7 @@ Open `.context/feedback-log.md`. Read every entry since last review.
 > The feedback log is **gitignored on purpose** — it accumulates raw
 > entries that may include ticket excerpts, names, and incident
 > specifics. First-time setup: `cp .context/feedback-log.template.md
-> .context/feedback-log.md`. If the file isn't there, you haven't
+.context/feedback-log.md`. If the file isn't there, you haven't
 > seeded it yet.
 
 ## 2. Find the patterns
@@ -24,12 +24,12 @@ For each task, ask:
 
 Sort each insight into one bucket:
 
-| Insight type | Goes in |
-|---|---|
+| Insight type                              | Goes in          |
+| ----------------------------------------- | ---------------- |
 | A correction about how I want things done | `preferences.md` |
-| A reusable code or design pattern | `patterns.md` |
-| A project-wide architectural choice | `decisions.md` |
-| A mistake worth not repeating | `lessons.md` |
+| A reusable code or design pattern         | `patterns.md`    |
+| A project-wide architectural choice       | `decisions.md`   |
+| A mistake worth not repeating             | `lessons.md`     |
 
 Don't write essays. Three sentences and an example is enough for most entries.
 

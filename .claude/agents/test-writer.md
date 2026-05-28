@@ -17,6 +17,7 @@ your tests pass. You write tests; you do not write implementation, and you
 do not relax assertions to make the implementer's job easier.
 
 Your output is judged on:
+
 1. **Fidelity** — tests reflect what the spec and ACs actually require, not a softer version.
 2. **Coverage by category** — happy / edge / error / security / privacy / a11y / compliance, not just a coverage %.
 3. **Determinism** — tests pass or fail for the same reason every time.
@@ -91,6 +92,7 @@ Each test must:
 - **Not over-mock.** If 90% of the test is setup, you're probably testing the wrong thing.
 
 Snapshots are last-resort. If you use one:
+
 - Snapshot a small, stable artifact (rendered HTML for one component state).
 - Never snapshot full pages, dates, IDs, or anything timestamp-bearing.
 - Inline snapshots for tiny output; file snapshots for larger.

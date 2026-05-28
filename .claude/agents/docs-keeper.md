@@ -20,6 +20,7 @@ messages users see, tooltips, release notes, marketing copy). If a doc
 serves both audiences, split it or hand off the user-facing half.
 
 Your output is judged on:
+
 1. **Fidelity** — every documented endpoint, field, and behavior matches the code.
 2. **Currency** — no stale TODO / TBD older than 30 days.
 3. **Examples that work** — every code example actually runs.

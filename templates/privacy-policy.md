@@ -24,16 +24,19 @@ For privacy matters, contact our Privacy Officer at:
 We collect the following personal information:
 
 ### From you, directly:
+
 - [Account information: name, email, etc.]
 - [Profile information, if applicable]
 - [Content you submit]
 
 ### Automatically, when you use the Service:
+
 - [IP address, browser type, device]
 - [Pages visited, features used (analytics)]
 - [Cookies and similar technologies]
 
 ### From third parties:
+
 - [List integrations that share data with you]
 
 ## 3. Why we collect it (purposes)
@@ -60,11 +63,13 @@ Privacy Officer (this may affect our ability to provide the Service).
 We share personal information only as described here:
 
 ### Service providers (subprocessors):
+
 - [List each: name, purpose, country of processing]
 - Each provider is bound by a data processing agreement requiring
   PIPEDA-comparable protections.
 
 ### Legal disclosures:
+
 - When required by law (court order, lawful warrant)
 - To protect rights, safety, or property
 
@@ -99,6 +104,7 @@ To exercise these rights, contact our Privacy Officer. We will respond
 within 30 days as required by PIPEDA.
 
 [For Quebec users (Law 25), you additionally have:]
+
 - **Portability** of personal information
 - **Right to be informed** of automated decisions affecting you
 - **Right to deindex** in some circumstances
@@ -146,11 +152,13 @@ You may file a complaint with us at privacy@[domain].ca.
 
 If unresolved, you may contact the **Office of the Privacy Commissioner
 of Canada**:
+
 - https://www.priv.gc.ca
 - 1-800-282-1376
 
 [For Quebec users:] You may contact the **Commission d'accès à
 l'information du Québec**:
+
 - https://www.cai.gouv.qc.ca
 
 ---

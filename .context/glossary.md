@@ -4,15 +4,15 @@ Domain terms and their precise meaning in this project. When a term is ambiguous
 
 ## Statutory bodies and frameworks
 
-- **OHSA** — Ontario *Occupational Health and Safety Act*. Provincially regulated workplaces in Ontario.
-- **CLC Part II** — *Canada Labour Code Part II*. Federally regulated workplaces (e.g. inter-provincial transport, banking, telecom).
-- **MLITSD** — Ontario *Ministry of Labour, Immigration, Training and Skills Development*. The provincial regulator and inspectorate.
-- **OLRB** — *Ontario Labour Relations Board*. Hears reprisal complaints under OHSA s.50.
+- **OHSA** — Ontario _Occupational Health and Safety Act_. Provincially regulated workplaces in Ontario.
+- **CLC Part II** — _Canada Labour Code Part II_. Federally regulated workplaces (e.g. inter-provincial transport, banking, telecom).
+- **MLITSD** — Ontario _Ministry of Labour, Immigration, Training and Skills Development_. The provincial regulator and inspectorate.
+- **OLRB** — _Ontario Labour Relations Board_. Hears reprisal complaints under OHSA s.50.
 - **Labour Program** — federal counterpart to MLITSD under CLC Part II.
 
 ## JHSC roles and entities
 
-- **JHSC** — *Joint Health & Safety Committee*. Statutory committee co-chaired by a worker rep and an employer rep.
+- **JHSC** — _Joint Health & Safety Committee_. Statutory committee co-chaired by a worker rep and an employer rep.
 - **Worker co-chair** — the worker-side chair of the JHSC. The primary user of this app.
 - **Rep team** — the worker reps on the JHSC who report to the worker co-chair. Secondary users.
 - **Certified member** — JHSC member who has completed certification training; required for OHSA s.43 work-refusal investigations.

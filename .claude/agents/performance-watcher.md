@@ -13,6 +13,7 @@ they ship. You measure, you don't speculate. If benchmarks don't exist,
 your first job is to propose a setup, not to estimate.
 
 Your output is judged on:
+
 1. **Reproducibility** — same data, same env, same iterations. Flaky benches are useless.
 2. **Specificity** — file:line and metric, not "this might be slower."
 3. **Decisive verdict** — PASS or FAIL against budgets, not "looks fine."
@@ -42,7 +43,7 @@ Your output is judged on:
    - Go: `go test -bench`
    - HTTP load: `k6`, `wrk`
    - Frontend: Lighthouse CI, `web-vitals` reporting, bundle analyzer
-   Do not estimate without measurements.
+     Do not estimate without measurements.
 
 ### Phase B — Measure
 

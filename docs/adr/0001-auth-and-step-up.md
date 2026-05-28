@@ -38,24 +38,28 @@ The repo state at 1.1 close: pnpm monorepo, Vite+React PWA shell, Hono+Bun API, 
 **Description:** Use Lucia v3's native opaque-session model. One `__Host-session` cookie, validated per request via Lucia's `validateSession`.
 
 **Pros:**
+
 - Minimal bespoke code.
 - Stateful by default — clean revocation.
 
 **Cons:**
+
 - Departs from SECURITY.md §3 ("JWT EdDSA, 30 min access"). Reopening that decision requires a SECURITY.md edit, not an ADR.
 - Every request touches the DB to validate. Acceptable for low-traffic single-tenant but not ideal at the edge.
 
 ### Option B: Lucia v3 for identity, bespoke EdDSA JWT + opaque refresh on top
 
-**Description:** Use Lucia v3 only for the *identity layer* — owning the `users` and credential tables and providing the credential-validation primitives. Sessions are our own: a short-lived EdDSA JWT in an HttpOnly cookie (`__Host-access`, 30 min) plus an opaque refresh token in a second HttpOnly cookie (`__Host-refresh`, 14 days, stored hashed in `sessions`, rotates on use). Refresh emits a new access token without a DB write to the credentials path.
+**Description:** Use Lucia v3 only for the _identity layer_ — owning the `users` and credential tables and providing the credential-validation primitives. Sessions are our own: a short-lived EdDSA JWT in an HttpOnly cookie (`__Host-access`, 30 min) plus an opaque refresh token in a second HttpOnly cookie (`__Host-refresh`, 14 days, stored hashed in `sessions`, rotates on use). Refresh emits a new access token without a DB write to the credentials path.
 
 **Pros:**
+
 - Matches SECURITY.md §3 to the letter.
 - Access verification is signature-only — fast and edge-friendly.
 - Revocation still possible via refresh rotation (kill the refresh row → next refresh fails).
 - Lucia carries the identity layer that's actually hard (credential storage, Drizzle adapter), and we own the session shape we want.
 
 **Cons:**
+
 - More bespoke code than Option A (JWT signing, refresh rotation, two cookies).
 - Two cookies to keep in sync.
 
@@ -64,10 +68,12 @@ The repo state at 1.1 close: pnpm monorepo, Vite+React PWA shell, Hono+Bun API, 
 **Description:** Skip Lucia. Use `@oslojs/crypto`, `@oslojs/jwt`, `@oslojs/webauthn` primitives directly and own every table.
 
 **Pros:**
+
 - Aligned with where the Lucia author is steering the ecosystem.
 - Zero abandonware risk.
 
 **Cons:**
+
 - More code to write and audit in 1.2.
 - Reopens CLAUDE.md's "Lucia Auth" lock — should be a deliberate stack edit, not an ADR detour.
 
@@ -113,24 +119,24 @@ When 1.3 lands, the chained logger appends a **system genesis** entry as chain r
 
 ## Tables added in 1.2 (Drizzle schema)
 
-| Table | Purpose |
-|---|---|
-| `users` | One row per human. Owns `id`, `created_at`, `disabled_at`. No PII columns; display name lives in `user_profiles`. |
-| `user_profiles` | `user_id` PK, encrypted `display_name_ciphertext`, encrypted `email_ciphertext`. Field encryption stub in 1.2 (deferred to 1.3 — see "Encryption stub"). |
-| `password_credentials` | `user_id` PK, `hash` (Argon2id, libsodium-encoded), `algo_params` jsonb for future rotation. |
-| `passkey_credentials` | `id` = WebAuthn credential ID (bytes), `user_id`, `public_key`, `counter`, `transports`, `attestation_type`, `created_at`, `last_used_at`, `nickname`. |
-| `totp_credentials` | `user_id` PK, `secret_ciphertext` (encrypted at rest with master key — stub in 1.2), `enrolled_at`. |
-| `recovery_codes` | `id`, `user_id`, `code_hash` (BLAKE2b), `consumed_at` null. 8 per user at enrollment. |
-| `sessions` | `id` (Lucia's session row), `user_id`, `expires_at`, `refresh_token_hash`, `refresh_expires_at`, `step_up_until` timestamptz null, `ip_at_create`, `ua_at_create`. |
-| `login_attempts` | `id`, `identifier` (lowercased email or userId), `ip`, `ts`, `outcome` (`success`/`failure`). Source of truth for the lockout ladder. |
-| `setup_state` | Singleton (`id = 1`). `first_run_completed_at` null until first-run finishes. |
-| `auth_events` | Flat audit table — see above. |
+| Table                  | Purpose                                                                                                                                                            |
+| ---------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `users`                | One row per human. Owns `id`, `created_at`, `disabled_at`. No PII columns; display name lives in `user_profiles`.                                                  |
+| `user_profiles`        | `user_id` PK, encrypted `display_name_ciphertext`, encrypted `email_ciphertext`. Field encryption stub in 1.2 (deferred to 1.3 — see "Encryption stub").           |
+| `password_credentials` | `user_id` PK, `hash` (Argon2id, libsodium-encoded), `algo_params` jsonb for future rotation.                                                                       |
+| `passkey_credentials`  | `id` = WebAuthn credential ID (bytes), `user_id`, `public_key`, `counter`, `transports`, `attestation_type`, `created_at`, `last_used_at`, `nickname`.             |
+| `totp_credentials`     | `user_id` PK, `secret_ciphertext` (encrypted at rest with master key — stub in 1.2), `enrolled_at`.                                                                |
+| `recovery_codes`       | `id`, `user_id`, `code_hash` (BLAKE2b), `consumed_at` null. 8 per user at enrollment.                                                                              |
+| `sessions`             | `id` (Lucia's session row), `user_id`, `expires_at`, `refresh_token_hash`, `refresh_expires_at`, `step_up_until` timestamptz null, `ip_at_create`, `ua_at_create`. |
+| `login_attempts`       | `id`, `identifier` (lowercased email or userId), `ip`, `ts`, `outcome` (`success`/`failure`). Source of truth for the lockout ladder.                              |
+| `setup_state`          | Singleton (`id = 1`). `first_run_completed_at` null until first-run finishes.                                                                                      |
+| `auth_events`          | Flat audit table — see above.                                                                                                                                      |
 
 All tables ship in migration `0001_auth.sql`. No `users` row exists at migration time; `setup_state` ships with `(1, null)`.
 
 ### Encryption stub
 
-`user_profiles.display_name_ciphertext`, `user_profiles.email_ciphertext`, and `totp_credentials.secret_ciphertext` are sensitive. 1.3 owns `packages/crypto`. For 1.2 we ship a `@jhsc/crypto-stub` *inside* `apps/api/src/crypto-stub.ts` (not a package — single-file shim) that:
+`user_profiles.display_name_ciphertext`, `user_profiles.email_ciphertext`, and `totp_credentials.secret_ciphertext` are sensitive. 1.3 owns `packages/crypto`. For 1.2 we ship a `@jhsc/crypto-stub` _inside_ `apps/api/src/crypto-stub.ts` (not a package — single-file shim) that:
 
 - Reads `MASTER_KEY` from env (required in production; randomized per-test in tests).
 - Uses **`crypto_secretbox_easy`** from libsodium with a random 24-byte nonce per write. Same algorithm class as XChaCha20-Poly1305 (a libsodium `secretbox` is XSalsa20-Poly1305; the actual XChaCha variant lands as `crypto_secretbox_xchacha20poly1305_easy` in 1.3).
@@ -196,17 +202,20 @@ Lockout responses are constant-time relative to credential verification (no orac
 ## Consequences
 
 ### Positive
+
 - Phishing-resistant primary path on day one.
 - Tokens unreachable from JS.
 - Step-up wired before the features that depend on it land (exports/imports in 1.8/1.11).
 - Clean handoff to 1.3: `auth_events` is the backfill source; the stub crypto wire format already carries a version byte for migration.
 
 ### Negative / accepted tradeoffs
+
 - Two-cookie session model is more bespoke code than Lucia's default. Mitigation: the session layer is small (~150 LOC) and well-tested.
 - 1.2 ships before the audit chain. The flat `auth_events` table is honest about this and the backfill design is specified here, not deferred.
 - The crypto stub (`crypto_secretbox`) is not the XChaCha20-Poly1305 SECURITY.md specifies. The version byte makes the migration safe and the 1.2 → 1.3 window short. **This is documented in `auth_events` provenance and the runbook.**
 
 ### Risks
+
 - Lucia v3 abandonware risk. Mitigation: Option B's boundary lets us swap to bare Oslo without touching the session layer.
 - WebAuthn UX edge cases on iOS Safari (UV cancellation, platform-authenticator availability). Mitigation: password+TOTP fallback always reachable from the login screen.
 - JWT key compromise. Mitigation: `kid` in the header; rotation is a single ops command that adds a new active key and a grace window for in-flight access tokens.
@@ -216,7 +225,7 @@ Lockout responses are constant-time relative to credential verification (no orac
 - [x] Aligns with `.context/constraints.md` (PIPEDA: minimization — no PI in tokens, no PI in audit metadata; Ontario residency — Neon ca-central-1).
 - [ ] Threat model updated — **follow-up: threat-modeler appends an auth-specific section to SECURITY.md §2 or `.context/threat-model.md`.**
 - [x] No cross-border transfer added.
-- [x] No new subprocessor (Lucia is a library, not a service; @simplewebauthn and @oslojs/* are libraries).
+- [x] No new subprocessor (Lucia is a library, not a service; @simplewebauthn and @oslojs/\* are libraries).
 
 ## Follow-ups
 

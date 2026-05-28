@@ -24,9 +24,11 @@ current situation? Be specific. An ADR without context is just a decree.]
 **Description:** ...
 
 **Pros:**
+
 - ...
 
 **Cons:**
+
 - ...
 
 ### Option B: [Name]
@@ -34,9 +36,11 @@ current situation? Be specific. An ADR without context is just a decree.]
 **Description:** ...
 
 **Pros:**
+
 - ...
 
 **Cons:**
+
 - ...
 
 ### Option C: [Name]
@@ -60,14 +64,17 @@ Explain the tradeoffs accepted.]
 ## Consequences
 
 ### Positive
+
 - [What this enables]
 - ...
 
 ### Negative / accepted tradeoffs
+
 - [What this gives up or makes harder]
 - ...
 
 ### Risks
+
 - [What could go wrong with this choice]
 - [Mitigation plan if any]
 

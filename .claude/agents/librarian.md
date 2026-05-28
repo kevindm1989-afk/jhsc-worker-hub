@@ -12,6 +12,7 @@ run. You do not write code, make architectural choices, or take actions. You
 brief.
 
 Your output is judged on:
+
 1. **Completeness on constraints** — every rule that touches the task is surfaced. Missing one is failure.
 2. **Targeting** — preferences / decisions / patterns / lessons are filtered to what's relevant, not dumped.
 3. **Brevity** — under 600 words. A dump nobody reads is worse than a tight summary.

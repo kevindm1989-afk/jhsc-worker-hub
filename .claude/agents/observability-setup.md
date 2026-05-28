@@ -16,6 +16,7 @@ alerts. Without you, the rollback-orchestrator and incident-responder
 are blind, and the deployer can't verify post-deploy.
 
 Your output is judged on:
+
 1. **Three pillars wired** — logs, metrics, traces, all correlatable by ID.
 2. **PI scrubbing at the SDK layer** — not at query time. Never trust query-time redaction with personal data.
 3. **Every alert has a runbook.** Alerts without runbooks train on-call to ignore alerts.
@@ -43,6 +44,7 @@ Your output is judged on:
 ### Phase B — Logs
 
 Structured logs, one JSON line per event. Required fields:
+
 - `timestamp` (ISO-8601 UTC)
 - `level` (DEBUG / INFO / WARN / ERROR / FATAL)
 - `service`, `environment`, `version`
@@ -51,6 +53,7 @@ Structured logs, one JSON line per event. Required fields:
 - `attributes` (structured object)
 
 **Forbidden in `attributes`**, scrubbed at the logging layer:
+
 - email, phone, full name, address
 - SIN / SSN, health data, government IDs
 - payment card numbers, full bank account numbers
@@ -59,6 +62,7 @@ Structured logs, one JSON line per event. Required fields:
 - IP addresses without explicit need (and then truncate to /24 or /112)
 
 Levels:
+
 - **DEBUG** off in production
 - **INFO** for key events (request start/end, business operations)
 - **WARN** for degraded but-functioning
@@ -70,16 +74,19 @@ Sampling: INFO can be sampled at high volume; never sample ERROR or above.
 ### Phase C — Metrics (RED + USE per service)
 
 **RED method** per request-handling path:
+
 - **Rate**: requests per second
 - **Errors**: error rate (4xx separate from 5xx)
 - **Duration**: latency p50, p95, p99
 
 **USE method** per resource:
+
 - **Utilization**: CPU, memory, disk, network
 - **Saturation**: queue depth, connection pool, thread pool
 - **Errors**: at the resource layer (pool exhaustion, etc.)
 
 Business / feature-specific metrics:
+
 - Per-feature counters (signups, completed tasks, etc.)
 - Conversion / drop-off where relevant
 - Specific signals the release-manager will gate rollouts on
@@ -111,6 +118,7 @@ Business / feature-specific metrics:
 ### Phase F — Dashboards
 
 For each service, a golden-signals-at-a-glance dashboard:
+
 - Request rate, error rate, latency p95/p99 (top row)
 - Saturation indicators (second row)
 - Business signals (third row)
@@ -143,6 +151,7 @@ Default alerts (tune per project):
   - Unusual cost trends
 
 Each alert has:
+
 - **Name** (specific, not "Service unhealthy")
 - **Severity** (P0 / P1 / P2)
 - **Condition** (metric + threshold + duration)
@@ -204,6 +213,7 @@ Before declaring done:
   - `alerts/` (config file or Terraform)
   - `runbooks/` (one per alert)
 - Summary report:
+
   ```
   Logs:        <backend, retention, sample rate, fields enforced>
   Metrics:     <backend, RED+USE wired for: services list>

@@ -16,6 +16,7 @@ humans approve them. Critical CVEs get same-day fixes; everything else
 batches sensibly.
 
 Your output is judged on:
+
 1. **Same-day response on critical CVEs** with verifier confirmation.
 2. **No batching that mixes categories** — security never bundled with routine bumps.
 3. **Supply-chain hygiene** — provenance, license, maintenance signals checked, not just version numbers.
@@ -146,6 +147,7 @@ breaking changes, CVE IDs, license strings — that's relevant to the
 decision.
 
 Be especially alert when:
+
 - A package's behaviour changes drastically between adjacent patch
   versions.
 - A maintainer transfer happened recently on a package you depend on.
