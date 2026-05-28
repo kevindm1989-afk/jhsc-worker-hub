@@ -43,6 +43,22 @@ The locked tech stack and non-negotiables in `CLAUDE.md` are the canonical proje
 - **Alternatives ruled out:** Substrate-first (the retracted entry) — defensible on security grounds, but rewriting the ROADMAP sequencing belongs to a ROADMAP edit + approval cycle, not a `.context/` ledger entry that hides the change.
 - **ADR:** none. The previous "pending ADR 0001-security-substrate-first" is cancelled. If, when 1.3 lands, the genesis-backfill design needs an ADR, the architect will draft one then.
 
+## 2026-05-29 — Milestone 1.6: action items — central operational entity, chain-anchored section moves, Action Flag pure function
+
+- **Decision:** Land `action_items` + `action_item_moves` tables per ADR-0005. Four envelope-encrypted columns (`description`, `recommended_action`, `raised_by` external, `follow_up_owner` external) plus the encrypted move `reason_ct`. Four fixed taxonomies (Type, Status, Section, Risk) mirroring CLAUDE.md §"Action Item Conventions" verbatim. Section workflow as a directed-graph pure helper in `packages/shared-types/src/action-item-transitions.ts` next to the 1.5 hazard graph. Action Flag (ARCHITECTURE.md §5) computed server-side from `(section, status, start_date, closed_date, today)` and projected into every list/detail response so the client never re-computes. Six routes (POST create, GET list, GET detail, PATCH update, POST move, POST move-undo) — no DELETE. Audit chain emits `action_item.created`, `action_item.updated`, `action_item.moved`, `action_item.move_undone` with non-PI payloads. Step-up gates `→ archived` and move-undo. Polymorphic `(source_type, source_id)` accepts `'manual' | 'hazard' | 'recommendation' | 'inspection' | 'incident' | 'excel_import'`; only `'hazard'` is FK-validated in 1.6.
+- **Why:** CLAUDE.md non-negotiable #12 ("action items have first-class status — they are not a sub-concept of hazards"). Replaces the Excel `_MoveHistory` sheet with a cryptographically tamper-evident audit chain ("Action item section moves are always audited" — CLAUDE.md). Lands the hazards 1.5 deferral (hazards → action items linkage) without putting action-item state on the hazards row. Action Flag pure function gives every list view the 21-day s.9(21) signal the JHSC team already reads fluently from the spreadsheet vocabulary.
+- **Scope deferrals (per ROADMAP):**
+  - `meeting_id` is nullable text/uuid pre-1.10; FK + backfill check land with the meetings migration.
+  - `source_type='recommendation' | 'inspection' | 'incident'` validation is route-level only in 1.6; per-source-type trigger backstops land when each source table ships (1.8/1.9/later).
+  - `source_excel_hash` reserved for 1.11 Excel-import reconciliation; stays NULL through 1.6.
+  - Dexie offline-first sync queue is 1.10; 1.6 ships server-authoritative state only.
+- **Alternatives ruled out:**
+  - Action item as a column on the hazards table — refused under non-negotiable #12 + ARCHITECTURE.md.
+  - Single denormalized `move_log` JSON column instead of `action_item_moves` table — breaks chain anchoring (no per-row `audit_idx` FK).
+  - Computed Action Flag stored as a column — drifts at day boundaries; pure function over canonical dates is the only correct shape.
+  - Postgres polymorphic association via `INHERITS` — Postgres triggers + nullable uuid is simpler and matches the rest of the schema's style.
+- **ADR:** [`docs/adr/0005-action-items.md`](../docs/adr/0005-action-items.md).
+
 ## 2026-05-29 — Milestone 1.5: hazards — encrypted-field schema, status-graph workflow, chain-anchored transitions
 
 - **Decision:** Land `hazards` + `hazard_status_history` tables per ADR-0004. Four encrypted columns via the `@jhsc/crypto` envelope: `description`, `reporter_identity`, `location_detail`, `status_history.reason`. Severity is a fixed 4-tier enum (critical/high/medium/low). Status workflow is a directed graph: `open → assessing → assigned → resolved → archived`, plus the universal `→ withdrawn` escape valve. Every transition emits `hazard.status_changed` into the audit chain; every create emits `hazard.created`. Step-up auth required to reveal `reporter_identity` plaintext and for any `→ withdrawn` transition. No DELETE endpoint — `withdrawn` is the only cancellation path. List route projects safe summaries only (first 80 chars of decrypted description, no reporter identity); detail route returns full plaintext to the authenticated rep.
