@@ -159,6 +159,7 @@ export const actionItemUpdateField = [
   'description',
   'recommended_action',
   'target_date',
+  'closed_date',
   'tags',
   'follow_up_owner',
   'department',

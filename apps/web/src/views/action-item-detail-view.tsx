@@ -182,9 +182,19 @@ function DetailInner({ id }: { id: string }): JSX.Element {
           </div>
         ) : null}
         {item.raisedBy ? (
-          <div className="mt-3 border-t border-border pt-2 text-xs">
-            <span className="font-medium text-foreground">Raised by:</span>{' '}
-            <span className="text-muted-foreground">{item.raisedBy}</span>
+          <div className="mt-3 flex items-start gap-1.5 border-t border-border pt-2 text-xs">
+            <Lock
+              className="mt-0.5 h-3 w-3 shrink-0 text-muted-foreground"
+              strokeWidth={1.75}
+              aria-hidden="true"
+            />
+            <div>
+              <span className="font-medium text-foreground">Raised by:</span>{' '}
+              <span className="text-muted-foreground">{item.raisedBy}</span>
+              <span className="ml-1 text-[10px] uppercase tracking-wide text-muted-foreground">
+                · encrypted at rest
+              </span>
+            </div>
           </div>
         ) : null}
         {item.department ? (

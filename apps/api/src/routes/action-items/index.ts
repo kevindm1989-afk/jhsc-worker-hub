@@ -18,7 +18,7 @@
 // Action Flag computed server-side in @jhsc/shared-types/action-item-flag
 // and projected into list + detail.
 
-import { sql } from 'drizzle-orm';
+import { sql, type SQL } from 'drizzle-orm';
 import { Hono } from 'hono';
 import { bodyLimit } from 'hono/body-limit';
 import { z } from 'zod';
@@ -56,6 +56,12 @@ import { rateLimit } from '../../middleware/rate-limit';
 export const actionItemsRoute = new Hono();
 
 actionItemsRoute.use('*', authMiddleware());
+// sec-review F4 1.6: rateLimit runs BEFORE bodyLimit so an authenticated
+// rep spamming >64KB POSTs still drains the bucket. bodyLimit returns
+// onError without calling next(), so putting it first would let an
+// attacker pin bandwidth at near-zero CPU cost without ever burning a
+// token. The 413 still fires after the bucket check.
+actionItemsRoute.use('*', rateLimit({ name: 'action-items', capacity: 60, refillPerSecond: 10 }));
 actionItemsRoute.use(
   '*',
   bodyLimit({
@@ -63,7 +69,6 @@ actionItemsRoute.use(
     onError: (c) => c.json({ error: 'payload_too_large' }, 413),
   }),
 );
-actionItemsRoute.use('*', rateLimit({ name: 'action-items', capacity: 60, refillPerSecond: 10 }));
 
 // ---------------------------------------------------------------------------
 // Schemas
@@ -101,6 +106,25 @@ const createBody = z
       // sourceId must be set iff sourceType is one of the FK-validated kinds.
       !b.sourceType || b.sourceType === 'manual' || b.sourceType === 'excel_import' || !!b.sourceId,
     { message: 'sourceId required for this sourceType', path: ['sourceId'] },
+  )
+  .refine(
+    (b) =>
+      // sec-review F7 / priv-AI-F3 1.6: SECURITY.md T-AI8 promises route-
+      // level FK validation for hazard / recommendation / inspection /
+      // incident. Only hazards is actually backed by a DB trigger (the
+      // others ship in 1.8 / 1.9 / later). Reject those source types at
+      // the route until their owning migration lands a trigger; that's
+      // fail-closed and matches the documented mitigation. Existing
+      // 'hazard' source rows still flow through the trigger.
+      !b.sourceType ||
+      b.sourceType === 'manual' ||
+      b.sourceType === 'hazard' ||
+      b.sourceType === 'excel_import',
+    {
+      message:
+        'sourceType not yet supported -- recommendation / inspection / incident land in their owning milestones',
+      path: ['sourceType'],
+    },
   );
 
 const listQuery = z.object({
@@ -159,18 +183,7 @@ actionItemsRoute.post('/', async (c) => {
   const followUpSealed = sealOptionalField(body.followUpOwner);
 
   const created = await db.transaction(async (tx) => {
-    // T-AI5: allocate per-section sequence_number under a section lock.
-    // pg_advisory_xact_lock keyed on a hash of the section text — cheap
-    // and bounded to the section, so different sections don't contend.
-    await tx.execute(
-      sql`SELECT pg_advisory_xact_lock(hashtext('action_items.seq.' || ${body.section}))`,
-    );
-    const seq = (await tx.execute(sql`
-      SELECT COALESCE(MAX(sequence_number), 0) + 1 AS n
-      FROM action_items
-      WHERE section = ${body.section}
-    `)) as unknown as Array<{ n: number | string }>;
-    const sequenceNumber = Number(seq[0]!.n);
+    const sequenceNumber = await allocateSequenceNumber(tx, body.section);
 
     const inserted = (await tx.execute(sql`
       INSERT INTO action_items (
@@ -262,8 +275,10 @@ actionItemsRoute.get('/', async (c) => {
     return c.json({ error: 'invalid_query', issues: parsed.error.flatten() }, 400);
   }
   const { section, status, risk, type, q, meetingId, limit, offset } = parsed.data;
-  // sec-F6 (1.5) shape: escape LIKE metachars.
-  const escapedQ = q ? q.replace(/\\/g, '\\\\').replace(/[%_]/g, (c) => `\\${c}`) : null;
+  // q is applied post-decrypt by JS .includes(), so LIKE metachars don't
+  // need escaping here (sec-review F5 1.6 -- cleaned up the vestigial
+  // escapedQ from the 1.5 hazards lineage that was never used by the
+  // post-decrypt filter).
   const db = getDb();
   const today = new Date().toISOString().slice(0, 10);
   const rows = (await db.execute(sql`
@@ -342,7 +357,7 @@ actionItemsRoute.get('/', async (c) => {
   // (FTS would index ciphertext otherwise). This is fine for the
   // single-tenant scope; the rate-limit + body-limit + page-size cap
   // bound the worst case.
-  if (escapedQ) {
+  if (q) {
     const needle = q!.toLowerCase();
     items = items.filter((i) => i.summary.toLowerCase().includes(needle));
   }
@@ -492,47 +507,144 @@ actionItemsRoute.patch('/:id', async (c) => {
   const body = bodyParsed.data;
   const db = getDb();
 
-  // Build the changed-fields allow-list for the audit payload (T-AI6:
-  // names only, never values).
-  const changedFields: ActionItemUpdateField[] = [];
-  const map: Array<[keyof typeof body, ActionItemUpdateField]> = [
-    ['status', 'status'],
-    ['risk', 'risk'],
-    ['description', 'description'],
-    ['recommendedAction', 'recommended_action'],
-    ['targetDate', 'target_date'],
-    ['tags', 'tags'],
-    ['followUpOwner', 'follow_up_owner'],
-    ['followUpOwnerUserId', 'follow_up_owner'],
-    ['department', 'department'],
-    ['typeSubtype', 'type_subtype'],
-  ];
-  for (const [k, f] of map) {
-    if (body[k] !== undefined && !changedFields.includes(f)) changedFields.push(f);
-  }
-  if (changedFields.length === 0) {
-    return c.json({ error: 'no_changes' }, 400);
-  }
-  // Each field name in changedFields must be in the allow-list.
-  for (const f of changedFields) {
-    if (!actionItemUpdateField.includes(f)) {
-      return c.json({ error: 'invalid_change_field', field: f }, 400);
-    }
-  }
+  // Sec-review F1 + F3 1.6: every patchable column lives in ONE table that
+  // produces both the SET fragments AND the audit-chain changedFields. A
+  // future contributor who adds a column has to extend the table or the
+  // typechecker fires; the audit chain cannot silently miss a write. The
+  // earlier shape kept the SET-assembly and the changedFields map in
+  // separate code blocks -- closedDate slipped through the audit chain
+  // because the SET path was wired without an entry in the map.
+  type PatchEntry = {
+    /** Whether the body actually carries this field (key is set, value any). */
+    readonly touched: boolean;
+    /** Allow-listed column name surfaced in the audit chain payload. */
+    readonly field: ActionItemUpdateField;
+    /** Zero or more SET fragments to add when the column is written. */
+    readonly setParts: ReadonlyArray<SQL>;
+  };
 
-  const descSealed = body.description !== undefined ? sealField(body.description) : null;
+  function bufferOrNull(v: { ct: Uint8Array; dekCt: Uint8Array } | null): {
+    ct: Uint8Array;
+    dekCt: Uint8Array;
+  } | null {
+    return v
+      ? {
+          ct: Buffer.from(v.ct) as unknown as Uint8Array,
+          dekCt: Buffer.from(v.dekCt) as unknown as Uint8Array,
+        }
+      : null;
+  }
+  const descSealed =
+    body.description !== undefined ? bufferOrNull(sealField(body.description)) : null;
   const recommendedSealed =
     body.recommendedAction !== undefined
       ? body.recommendedAction === null
         ? null
-        : sealField(body.recommendedAction)
+        : bufferOrNull(sealField(body.recommendedAction))
       : undefined;
   const followUpSealed =
     body.followUpOwner !== undefined
       ? body.followUpOwner === null
         ? null
-        : sealField(body.followUpOwner)
+        : bufferOrNull(sealField(body.followUpOwner))
       : undefined;
+
+  const PATCH_TABLE: ReadonlyArray<PatchEntry> = [
+    {
+      touched: body.status !== undefined,
+      field: 'status',
+      setParts: [sql`status = ${body.status}`],
+    },
+    {
+      touched: body.risk !== undefined,
+      field: 'risk',
+      setParts: [sql`risk = ${body.risk}`],
+    },
+    {
+      touched: body.description !== undefined,
+      field: 'description',
+      setParts: descSealed
+        ? [sql`description_ct = ${descSealed.ct}`, sql`description_dek_ct = ${descSealed.dekCt}`]
+        : [],
+    },
+    {
+      touched: body.recommendedAction !== undefined,
+      field: 'recommended_action',
+      setParts:
+        recommendedSealed === null
+          ? [sql`recommended_action_ct = NULL`, sql`recommended_action_dek_ct = NULL`]
+          : recommendedSealed
+            ? [
+                sql`recommended_action_ct = ${recommendedSealed.ct}`,
+                sql`recommended_action_dek_ct = ${recommendedSealed.dekCt}`,
+              ]
+            : [],
+    },
+    {
+      touched: body.targetDate !== undefined,
+      field: 'target_date',
+      setParts: [sql`target_date = ${body.targetDate}`],
+    },
+    {
+      // sec-review F1 + priv-AI-F2 1.6: closed_date is in the allow-list
+      // AND in this table. Writes to closed_date now emit a chain row.
+      touched: body.closedDate !== undefined,
+      field: 'closed_date',
+      setParts: [sql`closed_date = ${body.closedDate}`],
+    },
+    {
+      touched: body.tags !== undefined,
+      field: 'tags',
+      setParts: [sql`tags = ${body.tags}::text[]`],
+    },
+    {
+      touched: body.department !== undefined,
+      field: 'department',
+      setParts: [sql`department = ${body.department}`],
+    },
+    {
+      touched: body.typeSubtype !== undefined,
+      field: 'type_subtype',
+      setParts: [sql`type_subtype = ${body.typeSubtype}`],
+    },
+    {
+      touched: body.followUpOwner !== undefined,
+      field: 'follow_up_owner',
+      setParts:
+        followUpSealed === null
+          ? [sql`follow_up_owner_ct = NULL`, sql`follow_up_owner_dek_ct = NULL`]
+          : followUpSealed
+            ? [
+                sql`follow_up_owner_ct = ${followUpSealed.ct}`,
+                sql`follow_up_owner_dek_ct = ${followUpSealed.dekCt}`,
+              ]
+            : [],
+    },
+    {
+      touched: body.followUpOwnerUserId !== undefined,
+      field: 'follow_up_owner',
+      setParts: [sql`follow_up_owner_user_id = ${body.followUpOwnerUserId}`],
+    },
+  ];
+
+  const changedFields: ActionItemUpdateField[] = [];
+  const setParts: SQL[] = [];
+  for (const entry of PATCH_TABLE) {
+    if (!entry.touched) continue;
+    if (!changedFields.includes(entry.field)) changedFields.push(entry.field);
+    for (const p of entry.setParts) setParts.push(p);
+  }
+  if (changedFields.length === 0) {
+    return c.json({ error: 'no_changes' }, 400);
+  }
+  // Defence-in-depth: the field names in PATCH_TABLE are typed against
+  // ActionItemUpdateField at compile time, but this runtime check covers
+  // the case where a contributor `as`-casts a string into the union.
+  for (const f of changedFields) {
+    if (!actionItemUpdateField.includes(f)) {
+      return c.json({ error: 'invalid_change_field', field: f }, 400);
+    }
+  }
 
   await db
     .transaction(async (tx) => {
@@ -542,61 +654,9 @@ actionItemsRoute.patch('/:id', async (c) => {
       if (peek.length === 0) {
         throw new ActionItemWriteAborted({ status: 404, body: { error: 'not_found' } });
       }
-
-      // Build the UPDATE in pieces so we only touch the columns the rep
-      // actually changed. sql.join keeps each SET pair parameter-bound.
-      const setParts = [];
-      if (body.status !== undefined) setParts.push(sql`status = ${body.status}`);
-      if (body.risk !== undefined) setParts.push(sql`risk = ${body.risk}`);
-      if (descSealed) {
-        setParts.push(sql`description_ct = ${Buffer.from(descSealed.ct) as unknown as Uint8Array}`);
-        setParts.push(
-          sql`description_dek_ct = ${Buffer.from(descSealed.dekCt) as unknown as Uint8Array}`,
-        );
-      }
-      if (recommendedSealed === null) {
-        setParts.push(sql`recommended_action_ct = NULL`);
-        setParts.push(sql`recommended_action_dek_ct = NULL`);
-      } else if (recommendedSealed) {
-        setParts.push(
-          sql`recommended_action_ct = ${Buffer.from(recommendedSealed.ct) as unknown as Uint8Array}`,
-        );
-        setParts.push(
-          sql`recommended_action_dek_ct = ${Buffer.from(recommendedSealed.dekCt) as unknown as Uint8Array}`,
-        );
-      }
-      if (body.targetDate !== undefined) {
-        setParts.push(sql`target_date = ${body.targetDate}`);
-      }
-      if (body.closedDate !== undefined) {
-        setParts.push(sql`closed_date = ${body.closedDate}`);
-      }
-      if (body.tags !== undefined) {
-        setParts.push(sql`tags = ${body.tags}::text[]`);
-      }
-      if (body.department !== undefined) {
-        setParts.push(sql`department = ${body.department}`);
-      }
-      if (body.typeSubtype !== undefined) {
-        setParts.push(sql`type_subtype = ${body.typeSubtype}`);
-      }
-      if (followUpSealed === null) {
-        setParts.push(sql`follow_up_owner_ct = NULL`);
-        setParts.push(sql`follow_up_owner_dek_ct = NULL`);
-      } else if (followUpSealed) {
-        setParts.push(
-          sql`follow_up_owner_ct = ${Buffer.from(followUpSealed.ct) as unknown as Uint8Array}`,
-        );
-        setParts.push(
-          sql`follow_up_owner_dek_ct = ${Buffer.from(followUpSealed.dekCt) as unknown as Uint8Array}`,
-        );
-      }
-      if (body.followUpOwnerUserId !== undefined) {
-        setParts.push(sql`follow_up_owner_user_id = ${body.followUpOwnerUserId}`);
-      }
       await tx.execute(sql`
-      UPDATE action_items SET ${sql.join(setParts, sql`, `)} WHERE id = ${idParsed.data}
-    `);
+        UPDATE action_items SET ${sql.join(setParts, sql`, `)} WHERE id = ${idParsed.data}
+      `);
 
       await append(tx, {
         actorId: auth.userId,
@@ -712,7 +772,17 @@ actionItemsRoute.post('/:id/moves', async (c) => {
           ${chainRow.idx}
         )
       `);
-      await tx.execute(sql`UPDATE action_items SET section = ${to} WHERE id = ${idParsed.data}`);
+      // sec-review F2: the item's sequence_number is per-section. Moving
+      // sections must re-allocate the "#" in the destination section,
+      // otherwise the (section, sequence_number) UNIQUE index throws when
+      // the incoming number collides with an item already there. Same
+      // advisory lock + MAX+1 pattern as create. The item gets a fresh #
+      // in its new section, matching the Excel workflow (a row moved to a
+      // new sheet gets that sheet's next row number).
+      const newSeq = await allocateSequenceNumber(tx, to);
+      await tx.execute(
+        sql`UPDATE action_items SET section = ${to}, sequence_number = ${newSeq} WHERE id = ${idParsed.data}`,
+      );
     });
   } catch (err) {
     if (err instanceof ActionItemWriteAborted) {
@@ -826,8 +896,10 @@ actionItemsRoute.post('/:id/moves/:moveId/undo', async (c) => {
         VALUES (${idParsed.data}, ${auth.userId}, ${from}, ${revertTo}, ${chainRow.idx}, false)
         RETURNING id
       `)) as unknown as Array<{ id: string }>;
+      // sec-review F2 1.6: same allocator on undo as on move.
+      const newSeq = await allocateSequenceNumber(tx, revertTo);
       await tx.execute(sql`
-        UPDATE action_items SET section = ${revertTo} WHERE id = ${idParsed.data}
+        UPDATE action_items SET section = ${revertTo}, sequence_number = ${newSeq} WHERE id = ${idParsed.data}
       `);
       return { revertMoveId: insertedRevert[0]!.id, newSection: revertTo };
     });
@@ -852,4 +924,23 @@ class ActionItemWriteAborted extends Error {
     this.name = 'ActionItemWriteAborted';
     this.payload = payload;
   }
+}
+
+// Per-section sequence-number allocator. Runs inside the caller's
+// transaction. Uses pg_advisory_xact_lock keyed on the section name so
+// concurrent inserts into the same section serialize but different
+// sections do not contend (T-AI5). Reused on every path that places an
+// action_item INTO a section: create, move, undo. Without re-allocation
+// on move, the (section, sequence_number) UNIQUE index throws when an
+// inbound item's # collides with one already in the destination
+// (sec-review F2 1.6 -- this fixed the move handler).
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+async function allocateSequenceNumber(tx: any, section: string): Promise<number> {
+  await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtext('action_items.seq.' || ${section}))`);
+  const seq = (await tx.execute(sql`
+    SELECT COALESCE(MAX(sequence_number), 0) + 1 AS n
+    FROM action_items
+    WHERE section = ${section}
+  `)) as unknown as Array<{ n: number | string }>;
+  return Number(seq[0]!.n);
 }

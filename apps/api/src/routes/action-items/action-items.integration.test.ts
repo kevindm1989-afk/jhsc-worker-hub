@@ -120,6 +120,25 @@ describe.skipIf(SKIP)('POST /api/action-items', () => {
     expect(res.status).toBe(400);
   });
 
+  it('priv-AI-F3 / sec-F7 1.6: rejects sourceType=recommendation until 1.9 trigger lands', async () => {
+    const { cookie } = await loginAsRep();
+    const res = await app.request('/api/action-items', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-requested-with': 'jhsc-web', cookie },
+      body: JSON.stringify({
+        type: 'INSIGHT',
+        description: 'd',
+        status: 'Not Started',
+        risk: 'Low',
+        section: 'new_business',
+        startDate: '2026-05-29',
+        sourceType: 'recommendation',
+        sourceId: '00000000-0000-0000-0000-000000000000',
+      }),
+    });
+    expect(res.status).toBe(400);
+  });
+
   it('rejects unauthenticated requests with 401', async () => {
     const res = await app.request('/api/action-items', {
       method: 'POST',
@@ -219,6 +238,24 @@ describe.skipIf(SKIP)('PATCH /api/action-items/:id', () => {
     expect(v.ok).toBe(true);
   });
 
+  it('sec-review F1 / priv-AI-F2 1.6: closedDate PATCH emits closed_date in changedFields', async () => {
+    const { cookie } = await loginAsRep();
+    const { id } = await createItem(cookie);
+    const res = await app.request(`/api/action-items/${id}`, {
+      method: 'PATCH',
+      headers: { 'content-type': 'application/json', 'x-requested-with': 'jhsc-web', cookie },
+      body: JSON.stringify({ status: 'Closed', closedDate: '2026-05-29' }),
+    });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { changedFields: string[] };
+    expect(body.changedFields).toEqual(expect.arrayContaining(['status', 'closed_date']));
+    const db = getDb();
+    const chain = (await db.execute(sql`
+      SELECT payload FROM audit_log WHERE kind = 'action_item.updated' ORDER BY idx DESC LIMIT 1
+    `)) as unknown as Array<{ payload: { changedFields: string[] } }>;
+    expect(chain[0]!.payload.changedFields).toContain('closed_date');
+  });
+
   it('returns 400 no_changes when the body is empty', async () => {
     const { cookie } = await loginAsRep();
     const { id } = await createItem(cookie);
@@ -277,6 +314,29 @@ describe.skipIf(SKIP)('POST /api/action-items/:id/moves', () => {
     });
     expect(res.status).toBe(401);
     expect(res.headers.get('www-authenticate')).toMatch(/max_age="60"/);
+  });
+
+  it('sec-review F2 1.6: move re-allocates sequence_number in the destination section', async () => {
+    const { cookie } = await loginAsRep();
+    // A and B both get seq=1 in their own sections.
+    const a = await createItem(cookie, { section: 'new_business' });
+    const b = await createItem(cookie, { section: 'old_business' });
+    expect(a.sequenceNumber).toBe(1);
+    expect(b.sequenceNumber).toBe(1);
+    // Move A to old_business. Pre-fix this UPDATE collided with B at
+    // (old_business, 1) and 500'd. Post-fix A gets seq=2 in old_business.
+    const res = await app.request(`/api/action-items/${a.id}/moves`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-requested-with': 'jhsc-web', cookie },
+      body: JSON.stringify({ toSection: 'old_business' }),
+    });
+    expect(res.status).toBe(200);
+    // Fetch A's detail and confirm the new sequence_number.
+    const detail = (await (
+      await app.request(`/api/action-items/${a.id}`, { headers: { cookie } })
+    ).json()) as { section: string; sequenceNumber: number };
+    expect(detail.section).toBe('old_business');
+    expect(detail.sequenceNumber).toBe(2);
   });
 });
 
