@@ -15,9 +15,11 @@
   },
   "dependencies": {
     "@lucia-auth/adapter-drizzle": "^1.1.0",
+    "@oslojs/crypto": "^1.0.1",
     "@oslojs/encoding": "^1.1.0",
     "@oslojs/otp": "^1.0.0",
     "@simplewebauthn/server": "^11.0.0",
+    "@simplewebauthn/types": "^11.0.0",
     "drizzle-orm": "^0.45.2",
     "hono": "^4.6.14",
     "jose": "^5.9.6",
