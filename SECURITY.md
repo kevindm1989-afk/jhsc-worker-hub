@@ -57,6 +57,56 @@ In order of sensitivity:
 - Physical theft of an unlocked device
 - The integrity of the Excel files the rep chooses to import (if the rep imports a tampered file, the import will faithfully reflect what's in it; we cannot detect upstream tampering)
 
+### 2.1 Auth-specific threats and mitigations (Milestone 1.2)
+
+Concrete adversary actions against the authentication surface and how the 1.2 design (per ADR-0001) blocks or contains them.
+
+| # | Threat | Adversary | Mitigation in 1.2 | Residual risk |
+|---|---|---|---|---|
+| T-A1 | Phishing the co-chair's password | Opportunistic / targeted | Passkey/WebAuthn primary path is phishing-resistant (origin-bound). Password fallback is gated by mandatory TOTP. | If the rep types both password and a fresh TOTP into a phishing site, attacker still needs to bypass the brute-force ladder on the real site. Acceptable; documented. |
+| T-A2 | Credential stuffing on the password endpoint | Opportunistic | `login_attempts`-driven ladder: 5/15 min, 10/1 h, 20/manual. Constant-time response relative to credential verification to avoid an email-existence oracle. Rate limit 10 req/min/IP per `§3 Rate Limiting`. | Distributed attackers can hide under per-IP counters. Per-identifier counters catch this. |
+| T-A3 | Session theft via XSS | Opportunistic / targeted | Tokens live in `__Host-*` HttpOnly Secure SameSite=Strict cookies. No `Authorization: Bearer` path. Strict CSP per `§3 Headers & Transport`. | If XSS lets the attacker make same-origin requests under the victim's session, the cookies will be sent — but only while the access JWT is valid (30 min). Step-up still required for sensitive actions. |
+| T-A4 | Refresh-token replay after exfiltration | Targeted | Refresh tokens rotate on every use; reuse of a consumed refresh token is treated as compromise — the entire session row is killed and the user notified on next access. | Race window between use and rotation is sub-second. |
+| T-A5 | JWT forgery | Targeted | EdDSA signing key in Fly Secrets only; `kid` header for rotation. Verifier only accepts known public keys. | Compromise of `AUTH_JWT_ED25519_PRIVATE_KEY_B64` is catastrophic — same blast radius as a DB-side session forge. Mitigated by Fly Secrets access controls. |
+| T-A6 | WebAuthn challenge replay | Targeted | Challenges are single-use, 60-second TTL, stored server-side in `webauthn_challenges` and deleted on verify. UV is required on both registration and authentication. | None material. |
+| T-A7 | Authenticator counter rollback | Targeted | `passkey_credentials.counter` is monotonic; any decrease vs. stored value fails authentication and flags the credential. | Authenticators that don't increment the counter (some platform authenticators) are accepted; documented. |
+| T-A8 | TOTP brute force | Opportunistic / targeted | TOTP path inherits the `login_attempts` ladder. 30-second window with single-step skew tolerance only. | Negligible at ladder thresholds. |
+| T-A9 | TOTP secret theft from DB | Insider / compromise | TOTP secrets encrypted at rest with the master key (via the 1.2 crypto stub; XChaCha20-Poly1305 in 1.3). Master key in Fly Secrets, never logged. | Master-key compromise compromises all stored TOTP secrets. Mitigated by Fly Secrets access controls + planned key rotation in 1.3. |
+| T-A10 | Recovery-code theft | Insider / compromise | Codes stored as BLAKE2b hashes; only the user holds the plaintext (shown once at enrollment). | If the rep records codes in a compromised password manager, attacker can use them. Out of scope per §2 "Endpoint security." |
+| T-A11 | First-run hijack | Opportunistic | `setup_state` singleton; the route returns 404 once `first_run_completed_at` is set. First-run does not require auth (you're bootstrapping) — but the route is on a fly-internal hostname during initial deploy if the operator follows the runbook. | If the production hostname is exposed before first-run completes, an attacker who reaches the URL first claims the co-chair account. **Runbook must require first-run before public DNS cutover.** |
+| T-A12 | Step-up bypass | Targeted | `requireStepUp` middleware checks the access JWT's `step_up_until` claim. Claims are signed; the only way to forge one is T-A5. Step-up window default 5 min; export endpoints override to 60 s. | None at the auth layer. |
+| T-A13 | Lockout used as a DoS against the rep | Targeted | Lockouts are scoped per-identifier *and* per-IP. A rep coming from a fresh IP can still authenticate even if their email is locked from another IP. **Manual-unlock (20-fail) tier is the residual DoS surface.** | The 20-fail tier requires a CLI ops action — documented in `docs/runbooks/auth.md` (follow-up). The rep can also authenticate via passkey path, which bypasses the password-side counters. |
+| T-A14 | Audit gap during 1.2 → 1.3 window | Compelled disclosure / adversarial review | All auth events written to `auth_events` table in 1.2. 1.3's chained logger appends a backfill anchor whose payload is the SHA-256 of the canonical-JSON of those rows. Tamper of pre-chain rows is detected when the backfill anchor is re-verified. | Tamper *between* the event write and the 1.3 backfill anchor is undetectable. Window is the 1.2 → 1.3 calendar gap (≤ 2 weeks per ROADMAP). Accept and document. |
+| T-A15 | Side-channel / timing oracle on email existence | Opportunistic | Password-path code does an Argon2id verify against a canary hash when the user doesn't exist, so latency does not distinguish "no such user" from "wrong password." Passkey path is discoverable-credential-first so no identifier is sent in plaintext at all. | None material. |
+| T-A16 | Cross-origin/CSRF write via `__Host-*` cookies | Opportunistic | `SameSite=Strict` on all auth cookies. Mutating endpoints also require a custom header (`X-Requested-With: jhsc-web`) that simple CSRF forms cannot set. | None material. |
+
+### Auth data flows (1.2)
+
+```
+[browser] --TLS--> [Hono /api/auth/*] --DB-->  users, sessions,
+                                              passkey_credentials,
+                                              password_credentials,
+                                              totp_credentials,
+                                              recovery_codes,
+                                              login_attempts,
+                                              auth_events,
+                                              setup_state,
+                                              webauthn_challenges
+                                              (all in Neon ca-central-1)
+                                              
+                              \--Fly Secrets--> MASTER_KEY,
+                                                AUTH_JWT_ED25519_PRIVATE_KEY_B64,
+                                                AUTH_JWT_ED25519_PUBLIC_KEY_B64
+```
+
+No PI in transit beyond what the rep types (email at first-run, optional display name). No PI in JWT claims (only opaque `sub`, `sid`, `iat`, `exp`, `step_up_until`). No PI in `auth_events.metadata` (IP and UA only, plus typed event kinds).
+
+### Trust boundaries (1.2)
+
+- **Browser ↔ API:** untrusted on both sides of the wire; TLS 1.3 only; HSTS preload.
+- **API ↔ Postgres:** API-side validates and authorizes every query; the DB role used by `apps/api` cannot read `auth_events` from a non-API session (enforced by row-level controls + a separate read-only role for the audit-verify script in 1.3).
+- **API ↔ Fly Secrets:** read-only; the API never writes secrets. Secrets never appear in logs (the Pino redactor's allowlist already strips known secret keys; an additional regex catches `AUTH_JWT_*` and `MASTER_KEY`).
+
 ---
 
 ## 3. Security Controls
