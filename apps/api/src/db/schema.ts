@@ -14,8 +14,10 @@
 import { sql } from 'drizzle-orm';
 import {
   bigint,
+  boolean,
   check,
   customType,
+  date,
   index,
   inet,
   integer,
@@ -404,6 +406,105 @@ export const hazardStatusHistory = pgTable(
 );
 
 // ---------------------------------------------------------------------------
+// Action items (1.6, ADR-0005)
+// ---------------------------------------------------------------------------
+
+export const actionItems = pgTable(
+  'action_items',
+  {
+    id: uuid('id')
+      .primaryKey()
+      .default(sql`gen_random_uuid()`),
+    sequenceNumber: integer('sequence_number').notNull(),
+    type: text('type').notNull(),
+    typeSubtype: text('type_subtype'),
+    descriptionCt: bytea('description_ct').notNull(),
+    descriptionDekCt: bytea('description_dek_ct').notNull(),
+    recommendedActionCt: bytea('recommended_action_ct'),
+    recommendedActionDekCt: bytea('recommended_action_dek_ct'),
+    raisedByCt: bytea('raised_by_ct'),
+    raisedByDekCt: bytea('raised_by_dek_ct'),
+    raisedByUserId: uuid('raised_by_user_id').references(() => users.id, {
+      onDelete: 'restrict',
+      onUpdate: 'restrict',
+    }),
+    followUpOwnerCt: bytea('follow_up_owner_ct'),
+    followUpOwnerDekCt: bytea('follow_up_owner_dek_ct'),
+    followUpOwnerUserId: uuid('follow_up_owner_user_id').references(() => users.id, {
+      onDelete: 'restrict',
+      onUpdate: 'restrict',
+    }),
+    department: text('department'),
+    status: text('status').notNull(),
+    risk: text('risk').notNull(),
+    section: text('section').notNull(),
+    // dates surfaced as ISO YYYY-MM-DD strings in TS so the Action Flag
+    // helper (pure function) can consume them without timezone surprises.
+    startDate: date('start_date', { mode: 'string' }).notNull(),
+    targetDate: date('target_date', { mode: 'string' }),
+    closedDate: date('closed_date', { mode: 'string' }),
+    verifiedByJhscId: uuid('verified_by_jhsc_id').references(() => users.id, {
+      onDelete: 'restrict',
+      onUpdate: 'restrict',
+    }),
+    meetingId: uuid('meeting_id'),
+    sourceType: text('source_type'),
+    sourceId: uuid('source_id'),
+    sourceExcelHash: bytea('source_excel_hash'),
+    tags: text('tags')
+      .array()
+      .notNull()
+      .default(sql`'{}'::text[]`),
+    createdAt: timestamp('created_at', { withTimezone: true })
+      .notNull()
+      .default(sql`now()`),
+    updatedAt: timestamp('updated_at', { withTimezone: true })
+      .notNull()
+      .default(sql`now()`),
+  },
+  (t) => ({
+    sectionIdx: index('action_items_section_idx').on(t.section),
+    statusIdx: index('action_items_status_idx').on(t.status),
+    riskIdx: index('action_items_risk_idx').on(t.risk),
+    typeIdx: index('action_items_type_idx').on(t.type),
+    sectionSeqIdx: index('action_items_section_seq_idx').on(t.section, t.sequenceNumber),
+    sourceIdx: index('action_items_source_idx').on(t.sourceType, t.sourceId),
+    meetingIdx: index('action_items_meeting_idx').on(t.meetingId),
+  }),
+);
+
+export const actionItemMoves = pgTable(
+  'action_item_moves',
+  {
+    id: uuid('id')
+      .primaryKey()
+      .default(sql`gen_random_uuid()`),
+    actionItemId: uuid('action_item_id')
+      .notNull()
+      .references(() => actionItems.id, { onDelete: 'restrict', onUpdate: 'restrict' }),
+    movedByUserId: uuid('moved_by_user_id')
+      .notNull()
+      .references(() => users.id, { onDelete: 'restrict', onUpdate: 'restrict' }),
+    movedAt: timestamp('moved_at', { withTimezone: true })
+      .notNull()
+      .default(sql`now()`),
+    fromSection: text('from_section'),
+    toSection: text('to_section').notNull(),
+    reasonCt: bytea('reason_ct'),
+    reasonDekCt: bytea('reason_dek_ct'),
+    meetingId: uuid('meeting_id'),
+    auditIdx: bigint('audit_idx', { mode: 'number' })
+      .notNull()
+      .references(() => auditLog.idx, { onDelete: 'restrict', onUpdate: 'restrict' }),
+    undone: boolean('undone').notNull().default(false),
+  },
+  (t) => ({
+    itemIdx: index('action_item_moves_item_idx').on(t.actionItemId, t.movedAt),
+    auditIdxUnique: uniqueIndex('action_item_moves_audit_idx_unique').on(t.auditIdx),
+  }),
+);
+
+// ---------------------------------------------------------------------------
 // Re-export for Drizzle adapters
 // ---------------------------------------------------------------------------
 
@@ -425,6 +526,8 @@ export const schema = {
   clauses,
   hazards,
   hazardStatusHistory,
+  actionItems,
+  actionItemMoves,
   loginAttemptOutcome,
   authEventKind,
   webauthnPurpose,

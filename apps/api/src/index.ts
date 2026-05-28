@@ -1,6 +1,7 @@
 import { Hono } from 'hono';
 import { env } from './env';
 import { csrfHeaderGuard, securityHeaders } from './middleware/security';
+import { actionItemsRoute } from './routes/action-items';
 import { authRoute } from './routes/auth';
 import { hazardsRoute } from './routes/hazards';
 import { healthRoute } from './routes/health';
@@ -20,6 +21,7 @@ app.route('/api/auth', authRoute);
 app.route('/api/workplace', workplaceRoute);
 app.route('/api/legal', legalRoute);
 app.route('/api/hazards', hazardsRoute);
+app.route('/api/action-items', actionItemsRoute);
 
 // Bun picks up the default export and calls Bun.serve under the hood. Tests
 // import the named `app` export instead and never trigger the server.

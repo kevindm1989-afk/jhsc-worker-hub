@@ -78,6 +78,10 @@ export type AuditEventKind =
   | 'audit.corpus.amended'
   | 'hazard.created'
   | 'hazard.status_changed'
+  | 'action_item.created'
+  | 'action_item.updated'
+  | 'action_item.moved'
+  | 'action_item.move_undone'
   | AuthEventKind;
 
 // ---------------------------------------------------------------------------
@@ -99,6 +103,68 @@ export type HazardStatus = (typeof hazardStatus)[number];
 
 export const hazardJurisdiction = ['ON', 'CA'] as const;
 export type HazardJurisdiction = (typeof hazardJurisdiction)[number];
+
+// ---------------------------------------------------------------------------
+// Action items (Milestone 1.6, ADR-0005)
+// ---------------------------------------------------------------------------
+
+export const actionItemType = [
+  'INSP',
+  'INSIGHT',
+  'FLI',
+  'INC',
+  'REC',
+  'TRAIN',
+  'PROC',
+  'OTHER',
+] as const;
+export type ActionItemType = (typeof actionItemType)[number];
+
+export const actionItemStatus = [
+  'Not Started',
+  'In Progress',
+  'Blocked',
+  'Pending Review',
+  'Closed',
+  'Cancelled',
+] as const;
+export type ActionItemStatus = (typeof actionItemStatus)[number];
+
+export const actionItemSection = [
+  'new_business',
+  'old_business',
+  'recommendation',
+  'completed_this_period',
+  'archived',
+] as const;
+export type ActionItemSection = (typeof actionItemSection)[number];
+
+export const actionItemRisk = ['Low', 'Medium', 'High', 'Critical'] as const;
+export type ActionItemRisk = (typeof actionItemRisk)[number];
+
+export const actionItemSourceType = [
+  'manual',
+  'hazard',
+  'recommendation',
+  'inspection',
+  'incident',
+  'excel_import',
+] as const;
+export type ActionItemSourceType = (typeof actionItemSourceType)[number];
+
+/** Allow-list of update field names that can appear in the action_item.updated payload. */
+export const actionItemUpdateField = [
+  'status',
+  'risk',
+  'description',
+  'recommended_action',
+  'target_date',
+  'tags',
+  'follow_up_owner',
+  'department',
+  'type_subtype',
+] as const;
+export type ActionItemUpdateField = (typeof actionItemUpdateField)[number];
 
 /**
  * Per-kind payload shapes. Every kind that ever lands an audit row
@@ -145,6 +211,32 @@ export type AuditPayload =
       readonly hazardCode: string;
       readonly fromStatus: HazardStatus;
       readonly toStatus: HazardStatus;
+    }
+  | {
+      readonly kind: 'action_item.created';
+      readonly itemId: string;
+      readonly itemType: ActionItemType;
+      readonly section: ActionItemSection;
+      readonly risk: ActionItemRisk;
+    }
+  | {
+      readonly kind: 'action_item.updated';
+      readonly itemId: string;
+      readonly changedFields: ReadonlyArray<ActionItemUpdateField>;
+    }
+  | {
+      readonly kind: 'action_item.moved';
+      readonly itemId: string;
+      readonly fromSection: ActionItemSection | null;
+      readonly toSection: ActionItemSection;
+      readonly undone?: boolean;
+    }
+  | {
+      readonly kind: 'action_item.move_undone';
+      readonly itemId: string;
+      readonly movedItemId: string;
+      readonly revertedFromSection: ActionItemSection;
+      readonly revertedToSection: ActionItemSection;
     }
   | { readonly kind: 'signup'; readonly via: 'first_run' | 'invite' }
   | { readonly kind: 'login.passkey' }

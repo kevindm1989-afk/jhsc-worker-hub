@@ -12,6 +12,14 @@
     "./hazard-transitions": {
       "types": "./src/hazard-transitions.ts",
       "default": "./src/hazard-transitions.ts"
+    },
+    "./action-item-transitions": {
+      "types": "./src/action-item-transitions.ts",
+      "default": "./src/action-item-transitions.ts"
+    },
+    "./action-item-flag": {
+      "types": "./src/action-item-flag.ts",
+      "default": "./src/action-item-flag.ts"
     }
   },
   "scripts": {
