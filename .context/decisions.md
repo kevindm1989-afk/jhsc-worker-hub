@@ -21,6 +21,16 @@ The locked tech stack and non-negotiables in `CLAUDE.md` are the canonical proje
   - Auth first, retrofit audit later — leaves a forensic gap covering the most sensitive lifecycle events.
   - Audit log as plain table — fails CLAUDE.md non-negotiable #2 (tamper-evident).
 - **ADR:** pending (architect to draft `docs/adr/0001-security-substrate-first.md` in Chunk 1).
+- **SUPERSEDED 2026-05-28 — see entry below.**
+
+## 2026-05-28 — Retract substrate-before-Auth; follow ROADMAP 1.2 → 1.3 ordering
+- **Decision:** Withdraw the prior entry. Build order follows `ROADMAP.md` as written: 1.1 Foundation → 1.2 Auth (Lucia, passkeys, password+TOTP, step-up helper, first-run setup) → 1.3 Encryption + Audit (`packages/crypto`, `packages/audit`, audit log table, verify script) → 1.4 Legal Corpus.
+- **Why:** The ROADMAP is the canonical plan the project started from. Reordering it requires explicit deliberation, not a unilateral architect call. Auth-first introduces a documented gap (auth events not in the hash chain until 1.3 lands) that is acceptable because:
+  1. 1.3 lands the same release and is sequenced immediately after 1.2.
+  2. The first-run setup flow in 1.2 creates exactly one co-chair account; the window of unlogged auth events is tiny and pre-production.
+  3. When 1.3 lands, the audit logger backfills a synthetic "system genesis" entry covering the 1.2 setup so the chain has no real gap from any auditor's perspective.
+- **Alternatives ruled out:** Substrate-first (the retracted entry) — defensible on security grounds, but rewriting the ROADMAP sequencing belongs to a ROADMAP edit + approval cycle, not a `.context/` ledger entry that hides the change.
+- **ADR:** none. The previous "pending ADR 0001-security-substrate-first" is cancelled. If, when 1.3 lands, the genesis-backfill design needs an ADR, the architect will draft one then.
 
 ---
 
