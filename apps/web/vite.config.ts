@@ -20,6 +20,14 @@ export default defineConfig({
     port: 5173,
     strictPort: false,
     host: '127.0.0.1',
+    // Forward /api/* to the API server so the SPA's fetch calls reach
+    // the Hono routes during dev (and during Playwright e2e runs).
+    proxy: {
+      '/api': {
+        target: `http://127.0.0.1:${process.env.API_PORT ?? 3001}`,
+        changeOrigin: true,
+      },
+    },
   },
   build: {
     target: 'es2022',

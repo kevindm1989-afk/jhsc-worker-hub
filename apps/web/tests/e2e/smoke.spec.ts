@@ -6,6 +6,30 @@ import { expect, test } from '@playwright/test';
 // `pnpm exec playwright install chromium`.
 
 test('app shell smoke — boots, navigates between tabs, toggles theme', async ({ page }) => {
+  // AuthRouter (Milestone 1.2) blocks rendering of the shell until it
+  // has resolved first-run-status + session. Stub both at the network
+  // layer so this smoke test continues to exercise the chrome and not
+  // the auth gate.
+  await page.route('**/api/auth/first-run/status', (route) =>
+    route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({ completed: true }),
+    }),
+  );
+  await page.route('**/api/auth/session', (route) =>
+    route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({
+        userId: 'smoke-user',
+        displayName: 'Smoke User',
+        sessionId: 'smoke-session',
+        stepUp: { active: false, until: null },
+      }),
+    }),
+  );
+
   await page.goto('/');
 
   // Default redirect lands on /minutes (ARCHITECTURE.md §3).
