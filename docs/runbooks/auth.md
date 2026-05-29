@@ -221,6 +221,38 @@ bun run /app/apps/api/scripts/auth-unlock.ts --lookup-hash --email-from-stdin
 
 ---
 
+## 7. Audit-chain tamper response (Milestone 1.3+)
+
+The nightly cron runs `bun run apps/api/scripts/audit-log-verify.ts`. Exit code:
+
+- `0` — chain verified
+- `1` — tamper detected (firstDivergence + reason printed)
+- `2` — operational error (DB unreachable, env unset)
+
+When exit code 1 lands:
+
+1. **Stop writes.** Disable the API or put it behind a maintenance page. New audit rows after detection cannot be trusted into the chain; treat them as quarantined.
+2. **Capture forensics.** Take a snapshot of `audit_log` to off-host storage before any other action:
+
+   ```sh
+   pg_dump -t audit_log "$DATABASE_URL" > /tmp/audit_log.$(date -u +%Y%m%dT%H%M%SZ).sql
+   gpg --output /backup/audit_log.<ts>.sql.gpg --encrypt --recipient ops /tmp/audit_log.<ts>.sql
+   ```
+
+3. **Determine the diverging row.** The script prints `first divergence at idx: <N>` and a `reason`:
+   - `hash_mismatch` — the row's `this_hash` does not equal SHA-256(prev_hash || canonical_json(headers + payload)). Implies the body OR the stored hash was altered.
+   - `prev_hash_mismatch` — the row's `prev_hash` does not equal row N-1's `this_hash`. Implies a row was inserted, deleted, or reordered before idx=N.
+   - `idx_gap` — `idx` is non-contiguous. Implies a row deletion.
+   - `genesis_prev_hash` — row 0's `prev_hash` is not `\x00 × 32`. Implies genesis tamper.
+
+4. **Compare against the most recent verified snapshot.** Operators retain weekly off-host snapshots of `audit_log` (see runbook follow-up below). Diff `idx` ranges to identify exactly which row's body changed.
+
+5. **Restore from snapshot if forensically defensible.** If the rep needs the chain back online and the operator has confirmed the snapshot was off-host and predates the divergence, restore. Append a new `audit.tamper_response` row (manual SQL — log to the chain with the rotation procedure) capturing the divergence + restoration. Continued operation requires re-running `audit-log-verify` to confirm post-restore PASS.
+
+6. **Notify** under PIPEDA s.10.1 if the tamper meets the RROSH threshold (real risk of significant harm). Document the determination in `docs/incident-response.md` with the divergence details.
+
+> **TODO:** weekly off-host snapshot schedule + restore drill — track as ROADMAP 1.12 hardening line item.
+
 ## 6. When 1.3 lands: backfill the auth chain
 
 ADR-0001 specifies that 1.3's chained logger will:

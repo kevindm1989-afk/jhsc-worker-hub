@@ -13,6 +13,7 @@ export function hasDb(): boolean {
 }
 
 const TABLES_TO_TRUNCATE = [
+  'audit_log',
   'auth_events',
   'login_attempts',
   'webauthn_challenges',

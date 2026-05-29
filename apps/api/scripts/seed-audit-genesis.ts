@@ -54,6 +54,8 @@ async function main(): Promise<void> {
       kind: 'system.genesis',
       resourceType: null,
       resourceId: null,
+      ip: null,
+      userAgent: null,
     },
     genesisPayload,
   );
@@ -96,6 +98,8 @@ async function main(): Promise<void> {
       kind: 'audit.backfill.1_2_auth_events',
       resourceType: 'auth_events',
       resourceId: null,
+      ip: null,
+      userAgent: null,
     },
     anchorPayload,
   );
@@ -107,13 +111,13 @@ async function main(): Promise<void> {
   out.push('BEGIN');
   out.push('  IF NOT EXISTS (SELECT 1 FROM audit_log WHERE idx = 0) THEN');
   out.push(
-    '    INSERT INTO audit_log (idx, ts, actor_id, kind, resource_type, resource_id, prev_hash, this_hash, payload) VALUES',
+    '    INSERT INTO audit_log (idx, ts, actor_id, kind, resource_type, resource_id, ip, user_agent, prev_hash, this_hash, payload) VALUES',
   );
   out.push(
-    `      (0, to_timestamp(${genesisTsMs} / 1000.0), NULL, 'system.genesis', NULL, NULL, ${toHexBytea(GENESIS_PREV_HASH)}, ${toHexBytea(genesisHash)}, '${JSON.stringify(genesisPayload).replace(/'/g, "''")}'::jsonb),`,
+    `      (0, to_timestamp(${genesisTsMs} / 1000.0), NULL, 'system.genesis', NULL, NULL, NULL, NULL, ${toHexBytea(GENESIS_PREV_HASH)}, ${toHexBytea(genesisHash)}, '${JSON.stringify(genesisPayload).replace(/'/g, "''")}'::jsonb),`,
   );
   out.push(
-    `      (1, to_timestamp(${anchorTsMs} / 1000.0), NULL, 'audit.backfill.1_2_auth_events', 'auth_events', NULL, ${toHexBytea(genesisHash)}, ${toHexBytea(anchorHash)}, '${JSON.stringify(anchorPayload).replace(/'/g, "''")}'::jsonb);`,
+    `      (1, to_timestamp(${anchorTsMs} / 1000.0), NULL, 'audit.backfill.1_2_auth_events', 'auth_events', NULL, NULL, NULL, ${toHexBytea(genesisHash)}, ${toHexBytea(anchorHash)}, '${JSON.stringify(anchorPayload).replace(/'/g, "''")}'::jsonb);`,
   );
   out.push('  END IF;');
   out.push('END $$;');

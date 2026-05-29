@@ -6,6 +6,7 @@ import { sql } from 'drizzle-orm';
 import {
   bigint,
   customType,
+  inet,
   index,
   jsonb,
   pgTable,
@@ -32,6 +33,12 @@ export const auditLog = pgTable(
     kind: text('kind').notNull(),
     resourceType: text('resource_type'),
     resourceId: text('resource_id'),
+    // Optional network context. Auth events populate them. Other modules
+    // (hazards, exports, etc.) leave them null. computeThisHash binds
+    // both into the hash so tampering with the network context flips the
+    // chain.
+    ip: inet('ip'),
+    userAgent: text('user_agent'),
     prevHash: bytea('prev_hash').notNull(),
     thisHash: bytea('this_hash').notNull(),
     payload: jsonb('payload')

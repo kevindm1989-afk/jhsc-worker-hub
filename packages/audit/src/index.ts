@@ -51,6 +51,10 @@ export interface ChainHeaders {
   readonly kind: AuditEventKind;
   readonly resourceType: string | null;
   readonly resourceId: string | null;
+  /** Source IP for auth-surface events. null for non-auth modules. */
+  readonly ip: string | null;
+  /** Browser user-agent for auth-surface events. null otherwise. */
+  readonly userAgent: string | null;
 }
 
 export function computeThisHash(
@@ -68,6 +72,8 @@ export function computeThisHash(
     kind: headers.kind,
     resource_type: headers.resourceType,
     resource_id: headers.resourceId,
+    ip: headers.ip,
+    user_agent: headers.userAgent,
     payload,
   });
   const h = createHash('sha256');
@@ -87,6 +93,8 @@ export interface AppendInput {
   readonly kind?: AuditEventKind;
   readonly resourceType?: string | null;
   readonly resourceId?: string | null;
+  readonly ip?: string | null;
+  readonly userAgent?: string | null;
   /** Optional — defaults to Date.now(). Caller sets this for backfill scripts. */
   readonly nowMs?: number;
 }
@@ -100,20 +108,14 @@ export async function append(db: DrizzlePg, input: AppendInput): Promise<Appende
   const kind = (input.kind ?? input.payload.kind) as AuditEventKind;
   return db.transaction(async (tx) => {
     // Latest row, locked. `SELECT ... ORDER BY idx DESC LIMIT 1 FOR UPDATE`.
-    const latest = await tx.execute(sql`
+    const latest = (await tx.execute(sql`
       SELECT idx, this_hash
       FROM ${auditLog}
       ORDER BY idx DESC
       LIMIT 1
       FOR UPDATE
-    `);
-    const rows =
-      (
-        latest as unknown as {
-          rows?: Array<{ idx: string | number; this_hash: Uint8Array | Buffer }>;
-        }
-      ).rows ?? [];
-    const prev = rows[0];
+    `)) as unknown as Array<{ idx: string | number; this_hash: Uint8Array | Buffer }>;
+    const prev = latest[0];
     const nextIdx = prev ? Number(prev.idx) + 1 : 0;
     const prevHash = prev
       ? Uint8Array.from(prev.this_hash as Uint8Array | Buffer)
@@ -127,6 +129,8 @@ export async function append(db: DrizzlePg, input: AppendInput): Promise<Appende
       kind,
       resourceType: input.resourceType ?? null,
       resourceId: input.resourceId ?? null,
+      ip: input.ip ?? null,
+      userAgent: input.userAgent ?? null,
     };
     const thisHash = computeThisHash(prevHash, headers, input.payload);
     await tx.insert(auditLog).values({
@@ -136,6 +140,8 @@ export async function append(db: DrizzlePg, input: AppendInput): Promise<Appende
       kind,
       resourceType: input.resourceType ?? null,
       resourceId: input.resourceId ?? null,
+      ip: input.ip ?? null,
+      userAgent: input.userAgent ?? null,
       prevHash: Buffer.from(prevHash) as unknown as Uint8Array,
       thisHash: Buffer.from(thisHash) as unknown as Uint8Array,
       payload: input.payload as unknown as Record<string, unknown>,
@@ -173,6 +179,8 @@ export async function verify(db: DrizzlePg, input: VerifyInput = {}): Promise<Ve
       kind: auditLog.kind,
       resourceType: auditLog.resourceType,
       resourceId: auditLog.resourceId,
+      ip: auditLog.ip,
+      userAgent: auditLog.userAgent,
       prevHash: auditLog.prevHash,
       thisHash: auditLog.thisHash,
       payload: auditLog.payload,
@@ -189,6 +197,8 @@ export async function verify(db: DrizzlePg, input: VerifyInput = {}): Promise<Ve
     kind: string;
     resourceType: string | null;
     resourceId: string | null;
+    ip: string | null;
+    userAgent: string | null;
     prevHash: Uint8Array;
     thisHash: Uint8Array;
     payload: unknown;
@@ -229,6 +239,8 @@ export async function verify(db: DrizzlePg, input: VerifyInput = {}): Promise<Ve
         kind: r.kind as AuditEventKind,
         resourceType: r.resourceType,
         resourceId: r.resourceId,
+        ip: r.ip,
+        userAgent: r.userAgent,
       },
       r.payload as AuditPayload,
     );
