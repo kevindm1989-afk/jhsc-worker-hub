@@ -13,6 +13,8 @@ export function hasDb(): boolean {
 }
 
 const TABLES_TO_TRUNCATE = [
+  'hazard_status_history',
+  'hazards',
   'clauses',
   'statutes',
   'corpus_versions',
@@ -46,6 +48,10 @@ export async function cleanAuthTables(): Promise<void> {
       `TRUNCATE TABLE ${TABLES_TO_TRUNCATE.map((t) => `"${t}"`).join(', ')} RESTART IDENTITY CASCADE`,
     ),
   );
+  // hazards_code_seq is a standalone sequence (not a column default
+  // serial), so TRUNCATE ... RESTART IDENTITY doesn't reset it. Reset
+  // explicitly so hazard_code values are deterministic across tests.
+  await db.execute(sql`ALTER SEQUENCE hazards_code_seq RESTART WITH 1`);
   await db.execute(
     sql`INSERT INTO "setup_state" (id, first_run_completed_at, first_run_completed_by) VALUES (1, NULL, NULL) ON CONFLICT (id) DO UPDATE SET first_run_completed_at = NULL, first_run_completed_by = NULL`,
   );

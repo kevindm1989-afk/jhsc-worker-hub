@@ -13,6 +13,7 @@
 
 import { sql } from 'drizzle-orm';
 import {
+  bigint,
   check,
   customType,
   index,
@@ -321,6 +322,88 @@ export { clauses, corpusVersions, statutes } from '@jhsc/legal-corpus';
 import { clauses, corpusVersions, statutes } from '@jhsc/legal-corpus';
 
 // ---------------------------------------------------------------------------
+// Hazards (1.5, ADR-0004)
+// ---------------------------------------------------------------------------
+
+// Per-row encrypted column pairs use the @jhsc/crypto envelope: a fresh
+// DEK seals the field plaintext, then the KEK seals the DEK. The DB
+// stores the (ct, dek_ct) pair; the route handler decrypts on read.
+
+export const hazards = pgTable(
+  'hazards',
+  {
+    id: uuid('id')
+      .primaryKey()
+      .default(sql`gen_random_uuid()`),
+    hazardCode: text('hazard_code').notNull(),
+    title: text('title').notNull(),
+    descriptionCt: bytea('description_ct').notNull(),
+    descriptionDekCt: bytea('description_dek_ct').notNull(),
+    reporterIdentityCt: bytea('reporter_identity_ct'),
+    reporterIdentityDekCt: bytea('reporter_identity_dek_ct'),
+    reportedBy: uuid('reported_by')
+      .notNull()
+      .references(() => users.id, { onDelete: 'restrict', onUpdate: 'restrict' }),
+    severity: text('severity').notNull(),
+    status: text('status').notNull(),
+    locationZone: text('location_zone'),
+    locationDetailCt: bytea('location_detail_ct'),
+    locationDetailDekCt: bytea('location_detail_dek_ct'),
+    jurisdiction: text('jurisdiction').notNull(),
+    reportedAt: timestamp('reported_at', { withTimezone: true })
+      .notNull()
+      .default(sql`now()`),
+    assessedAt: timestamp('assessed_at', { withTimezone: true }),
+    resolvedAt: timestamp('resolved_at', { withTimezone: true }),
+    archivedAt: timestamp('archived_at', { withTimezone: true }),
+    createdAt: timestamp('created_at', { withTimezone: true })
+      .notNull()
+      .default(sql`now()`),
+    updatedAt: timestamp('updated_at', { withTimezone: true })
+      .notNull()
+      .default(sql`now()`),
+  },
+  (t) => ({
+    codeUnique: uniqueIndex('hazards_code_unique').on(t.hazardCode),
+    statusIdx: index('hazards_status_idx').on(t.status),
+    severityIdx: index('hazards_severity_idx').on(t.severity),
+    reportedAtIdx: index('hazards_reported_at_idx').on(t.reportedAt),
+    reportedByIdx: index('hazards_reported_by_idx').on(t.reportedBy),
+  }),
+);
+
+export const hazardStatusHistory = pgTable(
+  'hazard_status_history',
+  {
+    id: uuid('id')
+      .primaryKey()
+      .default(sql`gen_random_uuid()`),
+    hazardId: uuid('hazard_id')
+      .notNull()
+      .references(() => hazards.id, { onDelete: 'restrict', onUpdate: 'restrict' }),
+    fromStatus: text('from_status'),
+    toStatus: text('to_status').notNull(),
+    actorId: uuid('actor_id')
+      .notNull()
+      .references(() => users.id, { onDelete: 'restrict', onUpdate: 'restrict' }),
+    reasonCt: bytea('reason_ct'),
+    reasonDekCt: bytea('reason_dek_ct'),
+    // auditIdx pins the chain row that anchors this transition; FK
+    // enforces that we cannot record a transition without a chain entry.
+    auditIdx: bigint('audit_idx', { mode: 'number' })
+      .notNull()
+      .references(() => auditLog.idx, { onDelete: 'restrict', onUpdate: 'restrict' }),
+    occurredAt: timestamp('occurred_at', { withTimezone: true })
+      .notNull()
+      .default(sql`now()`),
+  },
+  (t) => ({
+    hazardIdx: index('hazard_status_history_hazard_idx').on(t.hazardId, t.occurredAt),
+    auditIdxUnique: uniqueIndex('hazard_status_history_audit_idx_unique').on(t.auditIdx),
+  }),
+);
+
+// ---------------------------------------------------------------------------
 // Re-export for Drizzle adapters
 // ---------------------------------------------------------------------------
 
@@ -340,6 +423,8 @@ export const schema = {
   corpusVersions,
   statutes,
   clauses,
+  hazards,
+  hazardStatusHistory,
   loginAttemptOutcome,
   authEventKind,
   webauthnPurpose,

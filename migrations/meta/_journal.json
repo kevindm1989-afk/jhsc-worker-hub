@@ -29,6 +29,13 @@
       "when": 1780180000000,
       "tag": "0003_legal_corpus_review_fixes",
       "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "7",
+      "when": 1780260000000,
+      "tag": "0004_hazards",
+      "breakpoints": true
     }
   ]
 }

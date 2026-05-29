@@ -8,6 +8,10 @@
     ".": {
       "types": "./src/index.ts",
       "default": "./src/index.ts"
+    },
+    "./hazard-transitions": {
+      "types": "./src/hazard-transitions.ts",
+      "default": "./src/hazard-transitions.ts"
     }
   },
   "scripts": {

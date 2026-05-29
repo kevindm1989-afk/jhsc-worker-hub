@@ -76,7 +76,29 @@ export type AuditEventKind =
   | 'audit.kek.rotation'
   | 'audit.corpus.seeded'
   | 'audit.corpus.amended'
+  | 'hazard.created'
+  | 'hazard.status_changed'
   | AuthEventKind;
+
+// ---------------------------------------------------------------------------
+// Hazards (Milestone 1.5, ADR-0004)
+// ---------------------------------------------------------------------------
+
+export const hazardSeverity = ['critical', 'high', 'medium', 'low'] as const;
+export type HazardSeverity = (typeof hazardSeverity)[number];
+
+export const hazardStatus = [
+  'open',
+  'assessing',
+  'assigned',
+  'resolved',
+  'archived',
+  'withdrawn',
+] as const;
+export type HazardStatus = (typeof hazardStatus)[number];
+
+export const hazardJurisdiction = ['ON', 'CA'] as const;
+export type HazardJurisdiction = (typeof hazardJurisdiction)[number];
 
 /**
  * Per-kind payload shapes. Every kind that ever lands an audit row
@@ -109,6 +131,20 @@ export type AuditPayload =
       readonly citation: string;
       readonly priorVersionDate: string;
       readonly newVersionDate: string;
+    }
+  | {
+      readonly kind: 'hazard.created';
+      readonly hazardId: string;
+      readonly hazardCode: string;
+      readonly severity: HazardSeverity;
+      readonly jurisdiction: HazardJurisdiction;
+    }
+  | {
+      readonly kind: 'hazard.status_changed';
+      readonly hazardId: string;
+      readonly hazardCode: string;
+      readonly fromStatus: HazardStatus;
+      readonly toStatus: HazardStatus;
     }
   | { readonly kind: 'signup'; readonly via: 'first_run' | 'invite' }
   | { readonly kind: 'login.passkey' }
