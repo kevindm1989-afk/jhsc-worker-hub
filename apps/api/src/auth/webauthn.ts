@@ -56,14 +56,15 @@ async function persistChallenge(
   });
 }
 
-async function consumeChallenge(
-  purpose: WebauthnPurpose,
-  challenge: Uint8Array,
-  expectedUserId: string | null,
-): Promise<boolean> {
+async function consumeChallenge(purpose: WebauthnPurpose, challenge: Uint8Array): Promise<boolean> {
   const db = getDb();
   const now = new Date();
-  // Atomic consume-if-unconsumed-and-not-expired-and-matches-purpose.
+  // Atomic consume by challenge bytes + purpose. The unique index on
+  // `challenge` plus the `expires_at` and `consumed_at` predicates make
+  // this exactly-one-winner. We intentionally do NOT pin the row's
+  // user_id because the AUTHENTICATE flow uses discoverable credentials
+  // (stored with user_id=null) — the verifying credential's user is
+  // derived from the credential row, not from the challenge row.
   const updated = await db
     .update(webauthnChallenges)
     .set({ consumedAt: now })
@@ -73,9 +74,6 @@ async function consumeChallenge(
         eq(webauthnChallenges.purpose, purpose),
         gt(webauthnChallenges.expiresAt, now),
         isNull(webauthnChallenges.consumedAt),
-        expectedUserId
-          ? eq(webauthnChallenges.userId, expectedUserId)
-          : isNull(webauthnChallenges.userId),
       ),
     )
     .returning({ id: webauthnChallenges.id });
@@ -172,7 +170,8 @@ export async function finishRegistration(
         requireUserVerification: true,
       });
       if (!verification.verified || !verification.registrationInfo) continue;
-      const consumed = await consumeChallenge('register', row.challenge, input.userId);
+      const consumed = await consumeChallenge('register', row.challenge);
+      void input;
       if (!consumed) continue;
       const info = verification.registrationInfo;
       return {
@@ -305,7 +304,7 @@ export async function finishAuthentication(
       if (newCounter < cred.counter) {
         return { ok: false, reason: 'counter_rollback' };
       }
-      const consumed = await consumeChallenge(purpose, row.challenge, cred.userId);
+      const consumed = await consumeChallenge(purpose, row.challenge);
       if (!consumed) {
         // The same plaintext shouldn't be reusable; bail.
         return { ok: false, reason: 'verification_failed' };
