@@ -23,14 +23,14 @@
     "drizzle-orm": "^0.45.2",
     "hono": "^4.6.14",
     "jose": "^5.9.6",
-    "libsodium-wrappers": "0.7.15",
+    "libsodium-wrappers-sumo": "0.7.15",
     "lucia": "^3.2.0",
     "postgres": "^3.4.5",
     "zod": "^3.23.8"
   },
   "devDependencies": {
     "@types/bun": "^1.1.14",
-    "@types/libsodium-wrappers": "^0.7.14",
+    "@types/libsodium-wrappers-sumo": "^0.7.8",
     "drizzle-kit": "^0.31.10",
     "typescript": "^5.7.2",
     "vitest": "^3.2.4"

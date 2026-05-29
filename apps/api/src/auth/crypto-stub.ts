@@ -18,7 +18,7 @@
 //
 // All keys are 32 raw bytes (libsodium `crypto_secretbox_KEYBYTES`).
 
-import sodium from 'libsodium-wrappers';
+import sodium from 'libsodium-wrappers-sumo';
 import { requireAuthEnv } from '../env';
 
 let ready = false;
