@@ -43,6 +43,21 @@ The locked tech stack and non-negotiables in `CLAUDE.md` are the canonical proje
 - **Alternatives ruled out:** Substrate-first (the retracted entry) — defensible on security grounds, but rewriting the ROADMAP sequencing belongs to a ROADMAP edit + approval cycle, not a `.context/` ledger entry that hides the change.
 - **ADR:** none. The previous "pending ADR 0001-security-substrate-first" is cancelled. If, when 1.3 lands, the genesis-backfill design needs an ADR, the architect will draft one then.
 
+## 2026-05-29 — Milestone 1.5: hazards — encrypted-field schema, status-graph workflow, chain-anchored transitions
+
+- **Decision:** Land `hazards` + `hazard_status_history` tables per ADR-0004. Four encrypted columns via the `@jhsc/crypto` envelope: `description`, `reporter_identity`, `location_detail`, `status_history.reason`. Severity is a fixed 4-tier enum (critical/high/medium/low). Status workflow is a directed graph: `open → assessing → assigned → resolved → archived`, plus the universal `→ withdrawn` escape valve. Every transition emits `hazard.status_changed` into the audit chain; every create emits `hazard.created`. Step-up auth required to reveal `reporter_identity` plaintext and for any `→ withdrawn` transition. No DELETE endpoint — `withdrawn` is the only cancellation path. List route projects safe summaries only (first 80 chars of decrypted description, no reporter identity); detail route returns full plaintext to the authenticated rep.
+- **Why:** First worker-data surface. Activates CLAUDE.md non-negotiables #2 (evidentially sensitive), #4 (privacy-by-default encryption), and #12 (action items are NOT a sub-concept of hazards — hazards stand alone in 1.5; the linkage column lands in 1.6). The fixed status graph + chain anchor means the JHSC's "who closed H-47, when, why" audit question is answerable from `audit_log` alone with tamper evidence. The pure-function transition validator is the single source of truth for the workflow — no scattered conditionals in route handlers.
+- **Scope deferrals (per ROADMAP):**
+  - `linked_action_item_id` lands in 1.6 with the action_items table.
+  - Photo + GPS + voice capture flow lands in 1.7 (evidence vault).
+  - Witness statements land in 1.8.
+  - FTS over description is not in scope — description is encrypted at rest. Title is FTS-indexed; 1.5 list search is title-only.
+- **Alternatives ruled out:**
+  - Free-text assignee on `hazards` row — risks PI in a non-encrypted column under non-negotiable #1. Wait for the 1.6 action_items FK.
+  - Soft-delete with a `deleted_at` column — circumvents the audit-chain narrative. `withdrawn` keeps the row and the story intact.
+  - Severity computed from a risk matrix (likelihood × consequence) — the JHSC SME judgment is what matters and the rep types it directly; matrices come back in 3.5 calculators.
+- **ADR:** [`docs/adr/0004-hazards.md`](../docs/adr/0004-hazards.md).
+
 ## 2026-05-29 — Milestone 1.4: legal corpus — versioned statute schema, `<CitationRef />`, FTS-backed `/legal`
 
 - **Decision:** Land `packages/legal-corpus` per ADR-0003 with two tables (`statutes` + `clauses`) and a `corpus_versions` ledger. Hash-anchored historical citations: every recommendation/hazard/minute records the `body_hash` of the clause it cites at draft time; a future re-seed inserts a new clause row (new id, same citation, new version_date) while the old row stays addressable so 2025-era drafts continue to cite the 2025 text. `<CitationRef />` ships in `packages/ui` and uses a shadcn Popover (desktop hover) / bottom sheet (mobile long-press). Legal Reference screen at `/legal` uses Postgres FTS (`tsvector`) over the loaded corpus. Corpus mutation is migration-only — no API write endpoints. Audit-chain anchors every seed (`audit.corpus.seeded`) and every amendment (`audit.corpus.amended`).
