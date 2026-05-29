@@ -43,6 +43,22 @@ The locked tech stack and non-negotiables in `CLAUDE.md` are the canonical proje
 - **Alternatives ruled out:** Substrate-first (the retracted entry) — defensible on security grounds, but rewriting the ROADMAP sequencing belongs to a ROADMAP edit + approval cycle, not a `.context/` ledger entry that hides the change.
 - **ADR:** none. The previous "pending ADR 0001-security-substrate-first" is cancelled. If, when 1.3 lands, the genesis-backfill design needs an ADR, the architect will draft one then.
 
+## 2026-05-29 — `audit_log` retention: chain rows are permanent; IP/UA columns redact to NULL at 1 year (privacy-reviewer F1)
+
+- **Decision:** `audit_log` rows are retained **indefinitely**. The chain is the durable evidentiary record for OHSA / OLRB / PIPEDA s.10.1 scenarios — deleting rows would invalidate every downstream `this_hash` and destroy the chain's value. SECURITY.md §3's "90 days hot, 1 year cold" is hereby SUPERSEDED for `audit_log` specifically and applies only to the operational tables (`login_attempts`, `webauthn_challenges`, application logs).
+- **IP and User-Agent redaction at 1 year:** the `audit_log.ip` and `audit_log.user_agent` columns ARE persistent personal information under PIPEDA. To meet PIPEDA Principle 5 (Limiting Retention) without breaking the chain, a redaction sweep runs annually that:
+  1. Sets `ip = NULL` and `user_agent = NULL` on every row older than 12 months.
+  2. Recomputes `this_hash` for every redacted row (since the headers changed) AND for every row downstream of the redacted set.
+  3. Appends a single `audit.ip_redacted` chain row that records `{from_idx, to_idx, redactedAt}` so the redaction is itself audit-evidence.
+  4. `audit-log-verify` re-derives the post-redaction hash chain and PASSes.
+- **Why:** Chain retention indefinite is the right answer for evidentiary defensibility (CLAUDE.md "When in doubt → evidentiary defensibility"). Cryptographic erasure of IP/UA via column-redact-and-rehash satisfies PIPEDA P5 without compromising the chain. The redaction is itself audit-evidence (the chain anchor).
+- **Alternatives ruled out:**
+  - Chain rotation (split into yearly segments) — complicates verify(), forces a separate archive store, and weakens the "single canonical chain" claim ADR-0002 makes.
+  - Hash-and-discard (replace IP/UA with hashes) — adds a per-row keyed lookup but doesn't actually erase the PI relative to a master-keyed adversary.
+  - Status quo (indefinite IP/UA retention) — fails PIPEDA P5.
+- **Operationalization:** the redaction sweep script (`apps/api/scripts/audit-ip-redact.ts`) is a 1.12 hardening line item. Until then, 1.3 ships with IP/UA retained for the full chain age; the residual is documented in SECURITY.md §2.2 footnote and tracked.
+- **ADR:** no separate ADR (refinement of ADR-0002). If the redaction sweep design needs more depth when the script is implemented, draft an ADR-0003 then.
+
 ## 2026-05-29 — Milestone 1.3: production XChaCha20-Poly1305 envelope + tamper-evident audit chain
 
 - **Decision:** Land `packages/shared-types`, `packages/crypto`, `packages/audit` per ADR-0002. `packages/crypto` adds the wire-format v=0x02 (XChaCha20-Poly1305) writer + v=0x01 backward-read + lazy `rewrap()` migration. Envelope encryption (per-record DEK sealed by workplace KEK) lands for heavyweight tables (1.5+); auth-surface tables stay on the single-key path. `packages/audit` provides hash-chained `append()` and `verify()`. The `audit_log` migration preseeds genesis (idx=0) and the 1.2 `auth_events` backfill anchor (idx=1) so the chain is verifiable from the first deploy of 1.3.

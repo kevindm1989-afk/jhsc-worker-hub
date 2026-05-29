@@ -82,6 +82,16 @@ If the second call does **not** 404, the singleton was not flipped and the gate 
 
 **Do not** simply `DELETE FROM login_attempts` from a SQL console — the action would not be audit-logged, and you would lose the chain-of-custody evidence that the lockout was intentional.
 
+**`--reason` values land in the immutable audit chain.** Keep them to **event-class strings + ISO timestamps**:
+
+- ✓ `"phone-confirmed identity 2026-05-29 14:02 EDT"`
+- ✓ `"device-lost report 2026-05-29 09:15 EDT"`
+- ✓ `"compromise-suspected"`
+- ✗ a worker rep's name, phone number, or identifying narrative ("phone-confirmed identity of Alice at home")
+- ✗ free-form sentences that reveal third-party content
+
+If the reason genuinely requires PII to be intelligible, write the reason as an opaque ticket ID (`incident-2026-05-29-001`) and keep the narrative in a separately-encrypted ops journal. The chain references the ID; the narrative stays out of the chain.
+
 ---
 
 ## 3. JWT key rotation (annual cadence + on suspected compromise)
@@ -122,6 +132,61 @@ If the second call does **not** 404, the singleton was not flipped and the gate 
 **On suspected compromise:** skip the 35-min wait. Immediately rotate the active kid and call `/api/auth/logout-all` for every active user from the API (single-tenant: one user, so a single curl). Then revoke the old kid.
 
 **Implemented in Milestone 1.3** (security-reviewer F6 closure). The verifier walks a kid registry built from `AUTH_JWT_ED25519_PRIVATE_KEY_B64_K1` through `_K4` plus the legacy bare-form keys (mapped to `kid='legacy'`). Issuance reads the keypair for `AUTH_JWT_ACTIVE_KID`, falling back to `legacy` when the active kid has no keypair. Sessions issued under `k1` keep validating after a flip to `k2` because both kids' public keys are present in the registry until `flyctl secrets unset` removes `k1`.
+
+---
+
+## 3a. Master-key (KEK) rotation
+
+**Why:** The `MASTER_KEY` is the workplace KEK. It seals every sensitive field (`user_profiles.email_ciphertext`, `display_name_ciphertext`, `totp_credentials.secret_ciphertext`) and every `dek_sealed` row in the 1.5+ envelope-encryption tables. It also keys the BLAKE2b email-lookup hash (`emailLookupHash`). SECURITY.md §3 calls for annual rotation; do it sooner if compromise is suspected. Per ADR-0002 §"Envelope encryption (heavyweight tables — 1.5+)", KEK rotation re-seals DEKs without touching ciphertexts; auth-surface tables (small, single co-chair) get re-encrypted in place.
+
+**Sequence relative to JWT key rotation:** independent. KEK rotation does not invalidate access JWTs. Sessions stay live across the rotation window.
+
+**Procedure:**
+
+1. Generate a fresh KEK on a workstation with no shell history capture:
+
+   ```sh
+   node -e "console.log(require('crypto').randomBytes(32).toString('base64'))"
+   ```
+
+   Pipe the value into a clipboard manager or directly into the `flyctl secrets set` call — never `echo` it into the terminal log.
+
+2. Stage the new KEK in Fly Secrets without flipping the active reference yet:
+
+   ```sh
+   flyctl secrets set MASTER_KEY_NEW='<base64>'
+   ```
+
+3. Run the re-encrypt sweep against production (read-only browser sessions stay live; writes briefly pause):
+
+   ```sh
+   bun run /app/apps/api/scripts/kek-rotate.ts --apply
+   ```
+
+   The script:
+   - reads every row in `user_profiles`, `totp_credentials`, and (1.5+) any table with a `dek_sealed` column;
+   - calls `open()` with the old KEK, `seal()` (or `rewrapEnvelopeDek()` for envelope rows) with the new KEK;
+   - rewrites `email_lookup_hash` rows under the new keyed-BLAKE2b key (the lookup-hash window in T-AI3);
+   - appends `audit.kek.rotation` with `{fromKid:'master-old', toKid:'master-new'}` into the chain.
+
+4. Flip the active reference:
+
+   ```sh
+   flyctl secrets set MASTER_KEY="$(flyctl secrets get MASTER_KEY_NEW)"
+   flyctl secrets unset MASTER_KEY_NEW
+   ```
+
+   Fly Machine restarts pick up the new value. The kek-rotate script's `audit.kek.rotation` row was written under the OLD key (since the script ran before the flip), which is correct — the chain hash binds the row context at write time, not at read time. `audit-log-verify` continues to pass.
+
+5. Verify:
+   ```sh
+   bun run /app/apps/api/scripts/audit-log-verify.ts --check-backfill
+   ```
+   The chain must still PASS. Any new auth event after step 4 lands in the chain under the new KEK transparently (the chain's `this_hash` is independent of the KEK).
+
+**On suspected KEK compromise:** skip step 1's pre-stage; replace `MASTER_KEY` in Fly Secrets immediately, then run the kek-rotate sweep with the new value. Any auth_events written between the compromise and rotation are still encrypted under the old KEK in their stored ciphertexts — the sweep re-seals them. Rotate the JWT signing key alongside (runbook §3).
+
+> **TODO (1.12 hardening):** `apps/api/scripts/kek-rotate.ts` does not yet exist. Until it lands, KEK rotation is a manual `psql` exercise: SELECT every sensitive row, open with old KEK in a one-shot Bun script, re-seal with new KEK, UPDATE in place. The procedure above is the target shape; track the script as a 1.12 line item.
 
 ---
 

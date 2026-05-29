@@ -123,6 +123,8 @@ Threats specific to the `packages/audit` tamper-evident chain and the `packages/
 | T-AC8 | KEK leak via subprocess argv | Operational | The new master-key rotation runbook (§3a) uses Fly Secrets only; the KEK never appears in argv to any rotation script. `packages/crypto` takes a `KeyProvider` interface so neither tests nor scripts need to env-read directly. | Operator error remains the residual; runbook calls it out. |
 | T-AC9 | Payload PI leak | Implementer error | `packages/shared-types` exports per-`kind` discriminated unions for audit payloads. PI fields (email, displayName, plaintext body) are not declared on any union — the typechecker rejects them at every `append()` site. Runtime safety net: a JSON-schema reject layer (1.12 hardening) backs up the type-only check. | Without the runtime check (deferred to 1.12) a `kind` not yet typed could pass a PI string; type discipline catches the common case. |
 | T-AC10 | Multi-kid JWT verifier rejects valid token at rotation | Operational | The kid registry accepts `legacy` for tokens without a kid suffix (1.2-compat). Rotation runbook §3 sequences `flyctl secrets set` for the new kid BEFORE flipping `AUTH_JWT_ACTIVE_KID`. | A misconfigured rotation that forgets the new public key still rejects in-flight tokens. Documented. |
+| T-AC11 | `operator` field in `lockout.cleared` / `session.revoked` payloads leaks PI by linkage | Operational | The `operator` field carries `$(whoami)` from the admin CLI. In a single-tenant, single-co-chair deployment the OS user IS the co-chair, so the field is a self-identifier (not third-party PI). A future multi-rep scope (1.12+) revisits. Documented. | Privacy posture depends on the operator's account naming. Tracked. |
+| T-AC12 | `audit_log` IP/UA retention exceeds PIPEDA P5 floor | Operational | Documented in `.context/decisions.md` 2026-05-29 entry: indefinite chain retention with annual IP/UA redaction sweep + `audit.ip_redacted` chain anchor. Sweep script is a 1.12 hardening line item. Until it lands, IP/UA persist for the full chain age. | Documented residual; 1.12. |
 
 ### 2.3 Auth + crypto-chain integration threats
 
@@ -170,7 +172,11 @@ User-level access controls still apply:
 - **Tamper-evident audit log** (hash chain, HMAC-seeded).
 - **What gets logged:** all writes to sensitive tables, all reads of decrypted sensitive fields, all exports, all auth events, all config changes, **all Excel import lifecycle events, all action item section moves**.
 - **What does NOT get logged:** sensitive field contents, encryption keys, passwords, full request bodies for sensitive endpoints. Logs contain identifiers and metadata only.
-- **Log retention:** 90 days hot, 1 year cold. Audit log entries are immutable.
+- **Log retention:**
+  - **`audit_log` (tamper-evident chain):** rows retained **indefinitely** (the chain is the evidentiary record). The `ip` and `user_agent` columns redact to `NULL` at 1 year via the annual sweep + `audit.ip_redacted` chain anchor — see `.context/decisions.md` 2026-05-29 entry and `docs/runbooks/auth.md` §4a/§7. The redaction script lands in 1.12 hardening; until then, IP/UA persist for the full chain age (documented residual).
+  - **`auth_events` (1.2 flat table):** read-only legacy preserved for hash-anchored reference from the 1.3 backfill anchor. Same retention posture as `audit_log`.
+  - **`login_attempts` and `webauthn_challenges`:** operational; pruned by `auth-retention.ts` (2× hard-tier window for `login_attempts`, expires_at + 1h grace for `webauthn_challenges`).
+  - **Application logs (Pino):** 90 days hot, 1 year cold per the pre-1.3 baseline.
 - **Verification:** `scripts/audit-log-verify.ts` runs nightly via cron.
 
 ### Headers & Transport
