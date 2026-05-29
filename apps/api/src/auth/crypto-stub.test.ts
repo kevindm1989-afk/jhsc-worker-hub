@@ -23,7 +23,10 @@ describe('seal / open', () => {
     const sealed = seal(pt);
     // version byte (1) + nonce (24) + ct (pt.length + 16 MAC) = 48
     expect(sealed.length).toBe(1 + 24 + pt.length + 16);
-    expect(sealed[0]).toBe(0x01);
+    // Production wire format under @jhsc/crypto delegation
+    // (ADR-0002 — XChaCha20-Poly1305). The 1.2 v=0x01 stub still
+    // reads on `open()` but new writes are v=0x02.
+    expect(sealed[0]).toBe(0x02);
     expect(open(sealed)).toEqual(pt);
   });
 
@@ -60,12 +63,12 @@ describe('seal / open', () => {
   it('rejects an unknown version byte', () => {
     const pt = new Uint8Array([0x01]);
     const sealed = seal(pt);
-    sealed[0] = 0x02;
-    expect(() => open(sealed)).toThrow(/unsupported version/);
+    sealed[0] = 0x99; // 0x01 and 0x02 are both real now — pick something else
+    expect(() => open(sealed)).toThrow(/unsupported_version/);
   });
 
   it('rejects truncated input', () => {
-    expect(() => open(new Uint8Array([0x01, 0x02]))).toThrow(/too short/);
+    expect(() => open(new Uint8Array([0x02, 0x00]))).toThrow(/too_short/);
   });
 });
 
