@@ -1,16 +1,22 @@
-// Access-token JWT (EdDSA over Ed25519) per SECURITY.md §3.
+// Access-token JWT (EdDSA over Ed25519) per SECURITY.md §3 + ADR-0002.
 //
 // The access token rides in `__Host-access` (HttpOnly, Secure,
 // SameSite=Strict, Path=/). 30-minute TTL. Carries `sub` (user id),
 // `sid` (session row id), and `step_up_until` (epoch seconds, null
 // when no step-up is active).
 //
-// Signing uses `jose` with `EdDSA` (Ed25519). Keys are PKCS8/SPKI base64
-// in env. The verifier accepts the active kid and (optionally) the
-// previous kid during rotation grace windows.
+// Multi-kid registry (security-reviewer F6, closed in 1.3):
+// - Issuance reads the keypair for env.AUTH_JWT_ACTIVE_KID.
+// - Verification reads the JWT header's `kid` and looks up the
+//   matching public key. Unknown kids return null (treated as
+//   invalid token).
+// - Legacy 1.2 tokens (signed with the bare-form key, kid="legacy"
+//   on the header) verify against the legacy public key during the
+//   rotation grace window.
 
-import { jwtVerify, SignJWT, importPKCS8, importSPKI, type JWTPayload, type KeyLike } from 'jose';
-import { requireAuthEnv } from '../env';
+import { importPKCS8, importSPKI, jwtVerify, SignJWT, type JWTPayload, type KeyLike } from 'jose';
+import { decodeProtectedHeader } from 'jose';
+import { env, loadJwtKeyPairs, requireAuthEnv } from '../env';
 
 const ACCESS_TTL_SECONDS = 30 * 60;
 const ISSUER = 'jhsc-worker-hub';
@@ -29,23 +35,33 @@ export interface AccessClaims {
   readonly stepUpUntil: number | null;
 }
 
-let cachedPrivate: KeyLike | null = null;
-let cachedPublic: KeyLike | null = null;
+interface ImportedKey {
+  readonly priv: KeyLike;
+  readonly pub: KeyLike;
+}
 
-async function loadKeys(): Promise<{ priv: KeyLike; pub: KeyLike }> {
-  if (cachedPrivate && cachedPublic) {
-    return { priv: cachedPrivate, pub: cachedPublic };
+// Map<kid, ImportedKey>. Built once at first use, cached for the
+// process lifetime. Hot-reload on rotation requires a restart — Fly
+// Machine restarts on secrets change.
+let cache: Map<string, ImportedKey> | null = null;
+
+async function loadRegistry(): Promise<Map<string, ImportedKey>> {
+  if (cache) return cache;
+  requireAuthEnv();
+  const pairs = loadJwtKeyPairs();
+  const map = new Map<string, ImportedKey>();
+  for (const p of pairs) {
+    const privPem = b64DerToPem(p.privateKeyB64, 'PRIVATE KEY');
+    const pubPem = b64DerToPem(p.publicKeyB64, 'PUBLIC KEY');
+    const priv = await importPKCS8(privPem, 'EdDSA');
+    const pub = await importSPKI(pubPem, 'EdDSA');
+    map.set(p.kid, { priv, pub });
   }
-  const env = requireAuthEnv();
-  const privPem = b64DerToPem(env.AUTH_JWT_ED25519_PRIVATE_KEY_B64, 'PRIVATE KEY');
-  const pubPem = b64DerToPem(env.AUTH_JWT_ED25519_PUBLIC_KEY_B64, 'PUBLIC KEY');
-  cachedPrivate = await importPKCS8(privPem, 'EdDSA');
-  cachedPublic = await importSPKI(pubPem, 'EdDSA');
-  return { priv: cachedPrivate, pub: cachedPublic };
+  cache = map;
+  return cache;
 }
 
 function b64DerToPem(b64: string, label: string): string {
-  // Wrap to 64-char lines per RFC 7468.
   const wrapped = b64.replace(/(.{64})/g, '$1\n');
   return `-----BEGIN ${label}-----\n${wrapped}\n-----END ${label}-----\n`;
 }
@@ -57,26 +73,41 @@ export interface SignAccessInput {
 }
 
 export async function signAccessToken(input: SignAccessInput): Promise<string> {
-  const { priv } = await loadKeys();
-  const env = requireAuthEnv();
+  const registry = await loadRegistry();
+  const activeKid = env.AUTH_JWT_ACTIVE_KID;
+  // Fall back to "legacy" if the configured active kid does not exist
+  // AND only the bare-form key is set — common during the 1.2 → 1.3
+  // window where the operator hasn't run the rotation yet.
+  const issuerKid = registry.has(activeKid) ? activeKid : 'legacy';
+  const key = registry.get(issuerKid);
+  if (!key) {
+    throw new Error(
+      `signAccessToken: AUTH_JWT_ACTIVE_KID="${activeKid}" has no keypair and no legacy fallback`,
+    );
+  }
   const payload: JWTPayload & { sid: string; step_up_until: number | null } = {
     sub: input.sub,
     sid: input.sid,
     step_up_until: input.stepUpUntil,
   };
   return new SignJWT(payload)
-    .setProtectedHeader({ alg: 'EdDSA', kid: env.AUTH_JWT_ACTIVE_KID, typ: 'JWT' })
+    .setProtectedHeader({ alg: 'EdDSA', kid: issuerKid, typ: 'JWT' })
     .setIssuer(ISSUER)
     .setAudience(AUDIENCE)
     .setIssuedAt()
     .setExpirationTime(`${ACCESS_TTL_SECONDS}s`)
-    .sign(priv);
+    .sign(key.priv);
 }
 
 export async function verifyAccessToken(jwt: string): Promise<AccessClaims | null> {
   try {
-    const { pub } = await loadKeys();
-    const { payload } = await jwtVerify(jwt, pub, {
+    const registry = await loadRegistry();
+    // Read the kid from the header. A missing kid maps to "legacy".
+    const header = decodeProtectedHeader(jwt);
+    const kid = typeof header.kid === 'string' ? header.kid : 'legacy';
+    const key = registry.get(kid);
+    if (!key) return null;
+    const { payload } = await jwtVerify(jwt, key.pub, {
       issuer: ISSUER,
       audience: AUDIENCE,
       algorithms: ['EdDSA'],
@@ -105,8 +136,7 @@ export async function verifyAccessToken(jwt: string): Promise<AccessClaims | nul
 }
 
 export function _resetKeyCacheForTests(): void {
-  cachedPrivate = null;
-  cachedPublic = null;
+  cache = null;
 }
 
 export const _internals = { ACCESS_TTL_SECONDS, ISSUER, AUDIENCE };

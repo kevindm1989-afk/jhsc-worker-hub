@@ -121,7 +121,7 @@ If the second call does **not** 404, the singleton was not flipped and the gate 
 
 **On suspected compromise:** skip the 35-min wait. Immediately rotate the active kid and call `/api/auth/logout-all` for every active user from the API (single-tenant: one user, so a single curl). Then revoke the old kid.
 
-> **TODO (1.3+):** the multi-kid verifier path described above is not yet implemented in Slice 2 (`jwt.ts` only reads `AUTH_JWT_ED25519_*` without a kid suffix). Until that lands, rotation is a hard cut: set the new keys, accept that all sessions break, and reps must sign in again. Track in `.context/decisions.md` when fixing.
+**Implemented in Milestone 1.3** (security-reviewer F6 closure). The verifier walks a kid registry built from `AUTH_JWT_ED25519_PRIVATE_KEY_B64_K1` through `_K4` plus the legacy bare-form keys (mapped to `kid='legacy'`). Issuance reads the keypair for `AUTH_JWT_ACTIVE_KID`, falling back to `legacy` when the active kid has no keypair. Sessions issued under `k1` keep validating after a flip to `k2` because both kids' public keys are present in the registry until `flyctl secrets unset` removes `k1`.
 
 ---
 

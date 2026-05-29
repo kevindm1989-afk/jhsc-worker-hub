@@ -22,11 +22,24 @@ const envSchema = z
     API_PORT: z.coerce.number().int().positive().default(3001),
     NODE_ENV: z.enum(['development', 'test', 'production']).default('development'),
 
-    // Auth (ADR-0001, SECURITY.md §3).
+    // Auth (ADR-0001, SECURITY.md §3). The bare AUTH_JWT_ED25519_*_B64
+    // pair is the 1.2 legacy form. 1.3 adds AUTH_JWT_ED25519_*_B64_K1
+    // through _K4 so the verifier accepts multiple kids during
+    // rotation grace windows (ADR-0002 + docs/runbooks/auth.md §3).
+    // requireAuthEnv() at first use asserts the active kid resolves to
+    // a real keypair.
     MASTER_KEY: b64.optional(),
     AUTH_JWT_ED25519_PRIVATE_KEY_B64: b64.optional(),
     AUTH_JWT_ED25519_PUBLIC_KEY_B64: b64.optional(),
-    AUTH_JWT_ACTIVE_KID: z.string().trim().default('k1'),
+    AUTH_JWT_ED25519_PRIVATE_KEY_B64_K1: b64.optional(),
+    AUTH_JWT_ED25519_PUBLIC_KEY_B64_K1: b64.optional(),
+    AUTH_JWT_ED25519_PRIVATE_KEY_B64_K2: b64.optional(),
+    AUTH_JWT_ED25519_PUBLIC_KEY_B64_K2: b64.optional(),
+    AUTH_JWT_ED25519_PRIVATE_KEY_B64_K3: b64.optional(),
+    AUTH_JWT_ED25519_PUBLIC_KEY_B64_K3: b64.optional(),
+    AUTH_JWT_ED25519_PRIVATE_KEY_B64_K4: b64.optional(),
+    AUTH_JWT_ED25519_PUBLIC_KEY_B64_K4: b64.optional(),
+    AUTH_JWT_ACTIVE_KID: z.string().trim().default('legacy'),
     WEBAUTHN_RP_ID: z.string().trim().default('localhost'),
     WEBAUTHN_RP_ORIGIN: z.string().url().default('http://localhost:5173'),
     WEBAUTHN_RP_NAME: z.string().trim().default('JHSC Worker Hub'),
@@ -72,8 +85,17 @@ export type Env = typeof env;
 
 export interface AuthEnv {
   readonly MASTER_KEY: string;
-  readonly AUTH_JWT_ED25519_PRIVATE_KEY_B64: string;
-  readonly AUTH_JWT_ED25519_PUBLIC_KEY_B64: string;
+  /** Legacy bare-form (1.2). Either this OR a *_K* pair must be set. */
+  readonly AUTH_JWT_ED25519_PRIVATE_KEY_B64?: string;
+  readonly AUTH_JWT_ED25519_PUBLIC_KEY_B64?: string;
+  readonly AUTH_JWT_ED25519_PRIVATE_KEY_B64_K1?: string;
+  readonly AUTH_JWT_ED25519_PUBLIC_KEY_B64_K1?: string;
+  readonly AUTH_JWT_ED25519_PRIVATE_KEY_B64_K2?: string;
+  readonly AUTH_JWT_ED25519_PUBLIC_KEY_B64_K2?: string;
+  readonly AUTH_JWT_ED25519_PRIVATE_KEY_B64_K3?: string;
+  readonly AUTH_JWT_ED25519_PUBLIC_KEY_B64_K3?: string;
+  readonly AUTH_JWT_ED25519_PRIVATE_KEY_B64_K4?: string;
+  readonly AUTH_JWT_ED25519_PUBLIC_KEY_B64_K4?: string;
   readonly AUTH_JWT_ACTIVE_KID: string;
   readonly WEBAUTHN_RP_ID: string;
   readonly WEBAUTHN_RP_ORIGIN: string;
@@ -92,10 +114,64 @@ export interface AuthEnv {
 export function requireAuthEnv(): AuthEnv {
   const missing: string[] = [];
   if (!env.MASTER_KEY) missing.push('MASTER_KEY');
-  if (!env.AUTH_JWT_ED25519_PRIVATE_KEY_B64) missing.push('AUTH_JWT_ED25519_PRIVATE_KEY_B64');
-  if (!env.AUTH_JWT_ED25519_PUBLIC_KEY_B64) missing.push('AUTH_JWT_ED25519_PUBLIC_KEY_B64');
+  const kids = collectJwtKids();
+  if (kids.length === 0) {
+    missing.push('AUTH_JWT_ED25519_*_B64 (legacy bare form OR _K1/_K2/_K3/_K4 suffixed)');
+  }
   if (missing.length > 0) {
     throw new Error(`Auth env missing required secrets: ${missing.join(', ')}`);
   }
+  // Allow falling back to legacy when the active kid isn't resolvable —
+  // jwt.ts's signAccessToken degrades to "legacy" issuance in that case
+  // so the 1.2 → 1.3 transition stays smooth. Only fail loud if NO kid
+  // (including legacy) exists.
+  if (!kids.includes(env.AUTH_JWT_ACTIVE_KID) && !kids.includes('legacy')) {
+    throw new Error(
+      `AUTH_JWT_ACTIVE_KID="${env.AUTH_JWT_ACTIVE_KID}" has no keypair and no legacy fallback (kids configured: [${kids.join(', ')}])`,
+    );
+  }
   return env as AuthEnv;
+}
+
+export interface JwtKeyPair {
+  readonly kid: string;
+  readonly privateKeyB64: string;
+  readonly publicKeyB64: string;
+}
+
+/**
+ * Walks the env for every JWT kid pair (legacy bare form maps to kid
+ * "legacy"; the suffixed forms keep their kid). Returns only kids
+ * with BOTH halves of the pair present. Used by jwt.ts to build the
+ * verifier registry, and by requireAuthEnv() to validate the active
+ * kid resolves.
+ */
+export function loadJwtKeyPairs(): ReadonlyArray<JwtKeyPair> {
+  // Read process.env directly so tests + ops scripts that set
+  // additional kids after module load see them. The snapshotted `env`
+  // covers boot-time required vars; this function covers the dynamic
+  // rotation surface.
+  const pairs: JwtKeyPair[] = [];
+  const e = process.env;
+  if (e.AUTH_JWT_ED25519_PRIVATE_KEY_B64 && e.AUTH_JWT_ED25519_PUBLIC_KEY_B64) {
+    pairs.push({
+      kid: 'legacy',
+      privateKeyB64: e.AUTH_JWT_ED25519_PRIVATE_KEY_B64,
+      publicKeyB64: e.AUTH_JWT_ED25519_PUBLIC_KEY_B64,
+    });
+  }
+  const slots: ReadonlyArray<[string, string | undefined, string | undefined]> = [
+    ['k1', e.AUTH_JWT_ED25519_PRIVATE_KEY_B64_K1, e.AUTH_JWT_ED25519_PUBLIC_KEY_B64_K1],
+    ['k2', e.AUTH_JWT_ED25519_PRIVATE_KEY_B64_K2, e.AUTH_JWT_ED25519_PUBLIC_KEY_B64_K2],
+    ['k3', e.AUTH_JWT_ED25519_PRIVATE_KEY_B64_K3, e.AUTH_JWT_ED25519_PUBLIC_KEY_B64_K3],
+    ['k4', e.AUTH_JWT_ED25519_PRIVATE_KEY_B64_K4, e.AUTH_JWT_ED25519_PUBLIC_KEY_B64_K4],
+  ];
+  for (const [kid, priv, pub] of slots) {
+    if (priv && pub) pairs.push({ kid, privateKeyB64: priv, publicKeyB64: pub });
+  }
+  return pairs;
+}
+
+function collectJwtKids(): string[] {
+  return loadJwtKeyPairs().map((p) => p.kid);
 }
