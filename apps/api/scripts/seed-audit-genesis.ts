@@ -61,13 +61,19 @@ async function main(): Promise<void> {
   );
 
   // Backfill anchor over the current auth_events table.
+  //
+  // drizzle-orm/postgres-js's `db.execute()` returns the row array
+  // DIRECTLY — there is no `.rows` wrapper. An earlier version of this
+  // script read `.rows` and silently fell back to `[]`, locking the
+  // anchor to `rowsSha256 = SHA-256('[]')` regardless of how many
+  // real auth_events rows existed. Same bug as the one fixed inside
+  // packages/audit/src/index.ts in slice 3 (security-reviewer F1).
   const db = getDb();
-  const eventRows = (await db.execute(sql`
+  const rows = (await db.execute(sql`
     SELECT id, ts, actor_id, kind, ip, user_agent, metadata
     FROM ${authEvents}
     ORDER BY ts ASC, id ASC
-  `)) as unknown as { rows: AuthEventRow[] };
-  const rows = eventRows.rows ?? [];
+  `)) as unknown as AuthEventRow[];
   const canonical = canonicalJsonStringify(
     rows.map((r) => ({
       id: r.id,

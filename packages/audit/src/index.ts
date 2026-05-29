@@ -104,16 +104,28 @@ export interface AppendedRow {
   readonly thisHash: Uint8Array;
 }
 
+// Transaction-scoped advisory-lock key. Picked once for the chain;
+// FOR UPDATE on a moving "latest" row does NOT actually serialize
+// concurrent appenders under READ COMMITTED — Postgres' EvalPlanQual
+// can return a stale row to a blocked transaction after the lock
+// holder commits, leading both to compute the same nextIdx and one
+// to hit the audit_log_pkey collision. The advisory lock serializes
+// the entire critical section (SELECT-MAX → compute hash → INSERT)
+// across all appenders for the duration of the transaction.
+const AUDIT_APPEND_LOCK_KEY = 0x6175_6469_745f_6c6fn; // ascii "audi" "t_lo" — arbitrary stable key
+
 export async function append(db: DrizzlePg, input: AppendInput): Promise<AppendedRow> {
   const kind = (input.kind ?? input.payload.kind) as AuditEventKind;
   return db.transaction(async (tx) => {
-    // Latest row, locked. `SELECT ... ORDER BY idx DESC LIMIT 1 FOR UPDATE`.
+    // Serialize concurrent appenders via a transaction-scoped advisory
+    // lock. Releases on commit/rollback automatically (no UNLOCK call
+    // needed — that's the `_xact_` variant).
+    await tx.execute(sql`SELECT pg_advisory_xact_lock(${AUDIT_APPEND_LOCK_KEY})`);
     const latest = (await tx.execute(sql`
       SELECT idx, this_hash
       FROM ${auditLog}
       ORDER BY idx DESC
       LIMIT 1
-      FOR UPDATE
     `)) as unknown as Array<{ idx: string | number; this_hash: Uint8Array | Buffer }>;
     const prev = latest[0];
     const nextIdx = prev ? Number(prev.idx) + 1 : 0;
