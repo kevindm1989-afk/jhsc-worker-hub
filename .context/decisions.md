@@ -43,6 +43,16 @@ The locked tech stack and non-negotiables in `CLAUDE.md` are the canonical proje
 - **Alternatives ruled out:** Substrate-first (the retracted entry) — defensible on security grounds, but rewriting the ROADMAP sequencing belongs to a ROADMAP edit + approval cycle, not a `.context/` ledger entry that hides the change.
 - **ADR:** none. The previous "pending ADR 0001-security-substrate-first" is cancelled. If, when 1.3 lands, the genesis-backfill design needs an ADR, the architect will draft one then.
 
+## 2026-05-29 — Milestone 1.4: legal corpus — versioned statute schema, `<CitationRef />`, FTS-backed `/legal`
+
+- **Decision:** Land `packages/legal-corpus` per ADR-0003 with two tables (`statutes` + `clauses`) and a `corpus_versions` ledger. Hash-anchored historical citations: every recommendation/hazard/minute records the `body_hash` of the clause it cites at draft time; a future re-seed inserts a new clause row (new id, same citation, new version_date) while the old row stays addressable so 2025-era drafts continue to cite the 2025 text. `<CitationRef />` ships in `packages/ui` and uses a shadcn Popover (desktop hover) / bottom sheet (mobile long-press). Legal Reference screen at `/legal` uses Postgres FTS (`tsvector`) over the loaded corpus. Corpus mutation is migration-only — no API write endpoints. Audit-chain anchors every seed (`audit.corpus.seeded`) and every amendment (`audit.corpus.amended`).
+- **Why:** Closes CLAUDE.md non-negotiable #5 ("legal citations must be accurate") and the §"Legal Reference Module Rules" — the schema is structurally incapable of generating a citation outside the corpus or of overwriting historical text in place. The hash anchor satisfies "generated documents record the corpus entry hash in provenance metadata." The seed script's structural copyright guard rejects `body_kind='full_text'` for `third_party_restricted` statutes (CSA / ISO / ACGIH).
+- **Seed scope (per ROADMAP):** OHSA core sections (R.S.O. 1990, c. O.1), O. Reg. 851 subset, CLC Part II (RSC 1985, c. L-2 Pt. II), COHSR subset. All crown_copyright_open — full text seedable per the federal Reproduction of Federal Law Order and the Ontario equivalent.
+- **Alternatives ruled out:**
+  - Single denormalized `legal_citations` table — statute metadata repeats per row; per-statute copyright policy becomes a per-row check.
+  - Flat JSON files inside the package — no FTS without re-implementing; corpus entry hashes drift with file formatting; sync to Dexie (1.10) becomes bespoke.
+- **ADR:** [`docs/adr/0003-legal-corpus.md`](../docs/adr/0003-legal-corpus.md).
+
 ## 2026-05-29 — `audit_log` retention: chain rows are permanent; IP/UA columns redact to NULL at 1 year (privacy-reviewer F1)
 
 - **Decision:** `audit_log` rows are retained **indefinitely**. The chain is the durable evidentiary record for OHSA / OLRB / PIPEDA s.10.1 scenarios — deleting rows would invalidate every downstream `this_hash` and destroy the chain's value. SECURITY.md §3's "90 days hot, 1 year cold" is hereby SUPERSEDED for `audit_log` specifically and applies only to the operational tables (`login_attempts`, `webauthn_challenges`, application logs).
