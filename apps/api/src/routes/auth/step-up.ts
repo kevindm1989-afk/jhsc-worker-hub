@@ -14,7 +14,7 @@
 // All three require an authenticated session.
 
 import { eq } from 'drizzle-orm';
-import { Hono } from 'hono';
+import { Hono, type Context } from 'hono';
 import { initCrypto, open as openSealed } from '../../auth/crypto-stub';
 import { setAuthCookies } from '../../auth/cookies';
 import { emitAuthEvent } from '../../auth/events';
@@ -111,7 +111,7 @@ stepUpRoute.post('/totp', async (c) => {
   return await grantAndIssue(c, auth.sessionId);
 });
 
-async function grantAndIssue(c: import('hono').Context, sessionId: string) {
+async function grantAndIssue(c: Context, sessionId: string) {
   const fresh = await grantStepUp({ sessionId });
   if (!fresh) {
     return c.json({ error: 'step_up_denied' }, 401);

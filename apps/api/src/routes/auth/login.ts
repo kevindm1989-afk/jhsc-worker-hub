@@ -19,7 +19,7 @@
 // secret material rides in it.
 
 import { eq, sql } from 'drizzle-orm';
-import { Hono } from 'hono';
+import { Hono, type Context } from 'hono';
 import { z } from 'zod';
 import {
   CryptoOpenError,
@@ -352,7 +352,7 @@ async function identifierHashForUser(userId: string): Promise<Uint8Array> {
 }
 
 async function completeLogin(
-  c: import('hono').Context,
+  c: Context,
   userId: string,
   kind: 'login.password' | 'login.passkey' | 'login.recovery',
 ) {
@@ -367,7 +367,7 @@ async function completeLogin(
 }
 
 function lockoutResponse(
-  c: import('hono').Context,
+  c: Context,
   tier: 'short' | 'long' | 'hard',
   retryAfterSeconds: number | undefined,
 ) {
