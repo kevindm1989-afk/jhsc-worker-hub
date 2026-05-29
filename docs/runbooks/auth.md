@@ -45,42 +45,38 @@ If the second call does **not** 404, the singleton was not flipped and the gate 
 **Procedure when a rep reports being locked out:**
 
 1. Confirm identity out-of-band (phone, in-person — never trust the locked-out account's email).
-2. Confirm the lockout from the API host:
+2. Confirm the lockout from the API host. The script reads the email at a silent prompt — never typed in argv:
+
    ```sh
-   # Use the rep's email as input. The script hashes it with the master
-   # key the same way the auth path does; only the hash hits the table.
    bun run /app/apps/api/scripts/auth-unlock.ts --check --email-from-stdin
    ```
 
-# (paste the rep's email at the silent prompt — never typed in argv)
+   Expected output:
 
-```
-Output:
-```
+   ```
+   identifier_hash: <hex>
+   failures in the last 24h: 23
+   tier: hard
+   action required: confirm with the rep, then run --unlock
+   ```
 
-identifier_hash: <hex>
-failures in the last 24h: 23
-tier: hard
-action required: confirm with the rep, then run --unlock
+3. Clear the hard-tier failures only (short/long tiers self-clear in their windows). Either pass a precomputed identifier hash (preferred — compute it on a separate workstation), or read the email at a silent prompt:
 
-````
-3. Clear the hard-tier failures only (short/long tiers self-clear in their windows):
-```sh
-# Preferred: compute the hash on a separate workstation, then pass it.
-bun run /app/apps/api/scripts/auth-unlock.ts --unlock \
-  --identifier-hash 35e614f525803925f520750a5c8ca7467d395c848594c248d49caba74d800cfa \
-  --reason "phone-confirmed identity 2026-05-29 14:02 EDT" \
-  --operator "$(whoami)"
-# Or: read the email at a silent prompt (no argv exposure).
-bun run /app/apps/api/scripts/auth-unlock.ts --unlock --email-from-stdin \
-  --reason "phone-confirmed identity 2026-05-29 14:02 EDT" \
-  --operator "$(whoami)"
-````
+   ```sh
+   # Preferred: hash computed offline.
+   bun run /app/apps/api/scripts/auth-unlock.ts --unlock \
+     --identifier-hash 35e614f525803925f520750a5c8ca7467d395c848594c248d49caba74d800cfa \
+     --reason "phone-confirmed identity 2026-05-29 14:02 EDT" \
+     --operator "$(whoami)"
+   # Fallback: read the email at a silent prompt (no argv exposure).
+   bun run /app/apps/api/scripts/auth-unlock.ts --unlock --email-from-stdin \
+     --reason "phone-confirmed identity 2026-05-29 14:02 EDT" \
+     --operator "$(whoami)"
+   ```
 
-The script:
-
-- Deletes the failure rows in the hard-tier window for the identifier hash.
-- Emits a `lockout.cleared` row into `auth_events` carrying the reason and operator strings (metadata only — no PI).
+   The script:
+   - Deletes the failure rows in the hard-tier window for the identifier hash.
+   - Emits a `lockout.cleared` row into `auth_events` carrying the reason and operator strings (metadata only — no PI).
 
 4. Tell the rep to try again. If they still see a 423/429, wait the short-tier window (15 min default) and they will recover automatically.
 

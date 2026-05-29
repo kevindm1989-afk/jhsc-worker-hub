@@ -43,6 +43,29 @@ The locked tech stack and non-negotiables in `CLAUDE.md` are the canonical proje
 - **Alternatives ruled out:** Substrate-first (the retracted entry) — defensible on security grounds, but rewriting the ROADMAP sequencing belongs to a ROADMAP edit + approval cycle, not a `.context/` ledger entry that hides the change.
 - **ADR:** none. The previous "pending ADR 0001-security-substrate-first" is cancelled. If, when 1.3 lands, the genesis-backfill design needs an ADR, the architect will draft one then.
 
+## 2026-05-29 — Defer per-IP auth rate-limit middleware (security-reviewer F3)
+
+- **Decision:** Ship Milestone 1.2 without the SECURITY.md §3 "10 req/min/IP on auth endpoints" rate-limit middleware. Track as a Milestone 1.12 (Release 1 Hardening) follow-up.
+- **Why:** Three layers already hold the line in the pre-Release 1 window: (a) the lockout ladder (slice 2, `auth/lockout.ts`) trips at 5/10/20 failures across per-id OR per-IP; (b) Argon2id at SECURITY.md §3 params (64 MB / 3 ops) caps the per-attempt CPU at ~50 ms per IP; (c) the CSRF header guard (security-reviewer F1, shipped) blocks the simple form-spray case. A distributed attacker can still grind ~20 tries/s, but cannot avoid tripping the per-identifier ladder for a targeted account. Adding a Postgres-or-memory rate-limiter mid-milestone introduces a new dep + a per-request DB hop that wasn't planned for 1.2; better to land it during 1.12's hardening pass when the threat-modeler reviews against expected production traffic shape.
+- **Alternatives ruled out:**
+  - Hand-rolled in-memory ring buffer per Hono process — restarts and multi-machine deploys silently drop the counter; not honest.
+  - Add `hono-rate-limiter` now — small dep but a meaningful behavioral change one milestone before the hardening pass that would re-evaluate the limits anyway.
+- **ADR:** none. Follow-up tracked as a ROADMAP 1.12 line item: "Add per-IP auth-endpoint rate-limit middleware (closes security-reviewer Milestone 1.2 F3)."
+
+## 2026-05-29 — Defer multi-kid JWT verifier (security-reviewer F6)
+
+- **Decision:** `apps/api/src/auth/jwt.ts` continues to consult exactly one Ed25519 keypair via the bare `AUTH_JWT_ED25519_PRIVATE_KEY_B64` / `_PUBLIC_KEY_B64` env vars. The `kid` header is set on issuance but the verifier does not consult a registry. JWT key rotation therefore remains a hard cut in 1.2 (every in-flight session breaks; reps re-sign-in).
+- **Why:** Multi-kid verification is operationally only useful when there's nontrivial active-session volume; with a single co-chair in 1.2 the calendar cost of "re-sign-in once" during the annual rotation is ~30 seconds. Adding the per-kid env-var convention now would push churn into the runbook (`docs/runbooks/auth.md` §3 already documents the multi-kid path as a TODO so the procedure does not pretend it exists). Land the registry alongside the 1.3 `packages/crypto` work where key-handling churn is already on the docket.
+- **Alternatives ruled out:** Ship multi-kid now — risk/value trade is poor against an audience-of-one for the rotation window.
+- **ADR:** none. Follow-up tracked as part of Milestone 1.3 "Encryption + Audit" alongside `packages/crypto` and the chain backfill.
+
+## 2026-05-29 — Defer recovery-code generation endpoint (security-reviewer F9)
+
+- **Decision:** Ship 1.2 without `POST /api/auth/recovery-codes/regenerate` and without the matching Account → Security UI panel. The primitives (`auth/recovery-codes.ts`, the `recovery_codes` table, the `password/recovery` login endpoint) all land in 1.2; only the generation path is deferred. The 1.2 setup-view "done" copy was updated in the same Slice-9-fixup commit to not promise the missing endpoint — reps are told to keep the authenticator backed up and that an administrator can reset access via the runbook.
+- **Why:** Generation is gated by step-up auth. Step-up requires either a passkey assertion or a TOTP — both of which the rep already has in 1.2. The forgot-everything path is the admin-CLI logout-all + re-enrollment runbook (auth.md §4). Recovery codes are an additional convenience layer the project can land in 1.12 hardening alongside passkey rename/delete and TOTP reset UI, all of which need the same step-up wiring.
+- **Alternatives ruled out:** Ship the endpoint without UI — half-finished; violates CLAUDE.md "no half-finished implementations." Ship the endpoint AND a minimal UI now — adds ≥ 1 day to the milestone, plus a step-up modal component (deferred from Slice 6) it would need first.
+- **ADR:** none. Follow-up tracked as a ROADMAP 1.12 line item: "Recovery-code regeneration endpoint + Account → Security UI (closes security-reviewer Milestone 1.2 F9). Requires step-up modal component (deferred from Slice 6)."
+
 ---
 
 ## How to add an entry
