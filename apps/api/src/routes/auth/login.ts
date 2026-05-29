@@ -18,6 +18,7 @@
 // provisioning. 60-second TTL. The blob carries the userId only — no
 // secret material rides in it.
 
+import type { AuditPayload } from '@jhsc/shared-types';
 import { eq, sql } from 'drizzle-orm';
 import { Hono, type Context } from 'hono';
 import { z } from 'zod';
@@ -124,13 +125,13 @@ loginRoute.post('/password/login', async (c) => {
   if (lockout.locked) {
     await emitAuthEvent({
       actorId: null,
-      kind: 'lockout.applied',
-      ip,
-      userAgent: ua,
-      metadata: {
+      payload: {
+        kind: 'lockout.applied',
         tier: lockout.tier!,
         retryAfterSeconds: lockout.retryAfterSeconds ?? null,
       },
+      ip,
+      userAgent: ua,
     });
     return lockoutResponse(c, lockout.tier!, lockout.retryAfterSeconds);
   }
@@ -149,7 +150,7 @@ loginRoute.post('/password/login', async (c) => {
     // latency does not betray non-existence.
     await verifyAgainstCanary(parsed.data.password);
     await recordAttempt({ identifierHash, ip, outcome: 'failure' });
-    await emitAuthEvent({ actorId: null, kind: 'login.failed', ip, userAgent: ua });
+    await emitAuthEvent({ actorId: null, payload: { kind: 'login.failed' }, ip, userAgent: ua });
     return c.json({ error: 'invalid_credentials' }, 401);
   }
 
@@ -163,14 +164,24 @@ loginRoute.post('/password/login', async (c) => {
     // User exists but no password set — fall through canary.
     await verifyAgainstCanary(parsed.data.password);
     await recordAttempt({ identifierHash, ip, outcome: 'failure' });
-    await emitAuthEvent({ actorId: profile.userId, kind: 'login.failed', ip, userAgent: ua });
+    await emitAuthEvent({
+      actorId: profile.userId,
+      payload: { kind: 'login.failed' },
+      ip,
+      userAgent: ua,
+    });
     return c.json({ error: 'invalid_credentials' }, 401);
   }
 
   const verify = await verifyPassword(parsed.data.password, pwRow.hash);
   if (!verify.ok) {
     await recordAttempt({ identifierHash, ip, outcome: 'failure' });
-    await emitAuthEvent({ actorId: profile.userId, kind: 'login.failed', ip, userAgent: ua });
+    await emitAuthEvent({
+      actorId: profile.userId,
+      payload: { kind: 'login.failed' },
+      ip,
+      userAgent: ua,
+    });
     return c.json({ error: 'invalid_credentials' }, 401);
   }
 
@@ -222,7 +233,7 @@ loginRoute.post('/password/totp', async (c) => {
     await recordAttempt({ identifierHash: idHash, ip: clientIp(c), outcome: 'failure' });
     await emitAuthEvent({
       actorId: pending.userId,
-      kind: 'login.failed',
+      payload: { kind: 'login.failed' },
       ip: clientIp(c),
       userAgent: userAgent(c),
     });
@@ -269,7 +280,7 @@ loginRoute.post('/password/recovery', async (c) => {
     await recordAttempt({ identifierHash: idHash, ip: clientIp(c), outcome: 'failure' });
     await emitAuthEvent({
       actorId: pending.userId,
-      kind: 'login.failed',
+      payload: { kind: 'login.failed' },
       ip: clientIp(c),
       userAgent: userAgent(c),
     });
@@ -281,10 +292,9 @@ loginRoute.post('/password/recovery', async (c) => {
     .where(eq(recoveryCodes.id, matched.id));
   await emitAuthEvent({
     actorId: pending.userId,
-    kind: 'recovery_codes.consumed',
+    payload: { kind: 'recovery_codes.consumed', codeId: matched.id },
     ip: clientIp(c),
     userAgent: userAgent(c),
-    metadata: { codeId: matched.id },
   });
 
   return await completeLogin(c, pending.userId, 'login.recovery');
@@ -332,10 +342,9 @@ loginRoute.post('/passkey/auth-verify', async (c) => {
   if (!outcome.ok) {
     await emitAuthEvent({
       actorId: null,
-      kind: 'login.failed',
+      payload: { kind: 'login.failed', reason: outcome.reason },
       ip: clientIp(c),
       userAgent: userAgent(c),
-      metadata: { reason: outcome.reason },
     });
     return c.json({ error: 'invalid_credentials' }, 401);
   }
@@ -372,7 +381,15 @@ async function completeLogin(
   await recordAttempt({ identifierHash, ip, outcome: 'success' });
   const tokens = await createSession({ userId, ip, userAgent: ua });
   setAuthCookies(c, tokens);
-  await emitAuthEvent({ actorId: userId, kind, ip, userAgent: ua });
+  await emitAuthEvent({
+    actorId: userId,
+    payload: { kind } as Extract<
+      AuditPayload,
+      { kind: 'login.passkey' | 'login.password' | 'login.recovery' }
+    >,
+    ip,
+    userAgent: ua,
+  });
   return c.json({ userId, sessionId: tokens.sessionId }, 201);
 }
 

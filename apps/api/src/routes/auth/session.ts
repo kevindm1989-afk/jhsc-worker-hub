@@ -8,6 +8,7 @@
 //                              in user_profiles (encrypted); decrypt is
 //                              optional — for now we return id only.
 
+import type { SessionId } from '@jhsc/shared-types';
 import { Hono } from 'hono';
 import { getCookie } from 'hono/cookie';
 import { authMiddleware, REFRESH_COOKIE } from '../../auth/step-up';
@@ -46,10 +47,12 @@ sessionRoute.post('/refresh', async (c) => {
   setAuthCookies(c, outcome.tokens);
   await emitAuthEvent({
     actorId: outcome.tokens.userId,
-    kind: 'session.refreshed',
+    payload: {
+      kind: 'session.refreshed',
+      sessionId: outcome.tokens.sessionId as unknown as SessionId,
+    },
     ip,
     userAgent: ua,
-    metadata: { sessionId: outcome.tokens.sessionId },
   });
   return c.json({ sessionId: outcome.tokens.sessionId });
 });
@@ -60,10 +63,9 @@ sessionRoute.post('/logout', authMiddleware(), async (c) => {
   clearAuthCookies(c);
   await emitAuthEvent({
     actorId: auth.userId,
-    kind: 'logout',
+    payload: { kind: 'logout', sessionId: auth.sessionId as unknown as SessionId },
     ip: clientIp(c),
     userAgent: userAgent(c),
-    metadata: { sessionId: auth.sessionId },
   });
   return c.json({ ok: true });
 });
@@ -74,10 +76,9 @@ sessionRoute.post('/logout-all', authMiddleware(), async (c) => {
   clearAuthCookies(c);
   await emitAuthEvent({
     actorId: auth.userId,
-    kind: 'session.revoked',
+    payload: { kind: 'session.revoked', scope: 'all' },
     ip: clientIp(c),
     userAgent: userAgent(c),
-    metadata: { scope: 'all' },
   });
   return c.json({ ok: true });
 });

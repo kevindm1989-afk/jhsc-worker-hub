@@ -262,19 +262,19 @@ firstRunRoute.post('/confirm', async (c) => {
 
   await emitAuthEvent({
     actorId: userId,
-    kind: 'signup',
+    payload: { kind: 'signup', via: 'first_run' },
     ip: clientIp(c),
     userAgent: userAgent(c),
   });
   await emitAuthEvent({
     actorId: userId,
-    kind: 'totp.enrolled',
+    payload: { kind: 'totp.enrolled' },
     ip: clientIp(c),
     userAgent: userAgent(c),
   });
   await emitAuthEvent({
     actorId: userId,
-    kind: 'first_run.completed',
+    payload: { kind: 'first_run.completed' },
     ip: clientIp(c),
     userAgent: userAgent(c),
   });

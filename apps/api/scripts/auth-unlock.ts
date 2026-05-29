@@ -172,11 +172,11 @@ async function main(): Promise<void> {
       .returning({ id: loginAttempts.id });
     await emitAuthEvent({
       actorId: null,
-      kind: 'lockout.cleared',
-      metadata: {
-        operator: flags.operator,
-        reason: flags.reason,
-        rows_deleted: deleted.length,
+      payload: {
+        kind: 'lockout.cleared',
+        operator: flags.operator!,
+        reason: flags.reason!,
+        rowsDeleted: deleted.length,
       },
     });
     process.stdout.write(`cleared ${deleted.length} failure row(s)\n`);
@@ -199,12 +199,12 @@ async function main(): Promise<void> {
       .returning({ id: sessions.id });
     await emitAuthEvent({
       actorId: userId,
-      kind: 'session.revoked',
-      metadata: {
-        operator: flags.operator,
-        reason: flags.reason,
+      payload: {
+        kind: 'session.revoked',
         scope: 'all',
-        sessions_removed: removed.length,
+        sessionsRemoved: removed.length,
+        operator: flags.operator!,
+        reason: flags.reason!,
       },
     });
     process.stdout.write(`revoked ${removed.length} session(s) for user ${userId}\n`);

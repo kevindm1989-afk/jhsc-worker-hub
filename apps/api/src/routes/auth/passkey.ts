@@ -71,7 +71,7 @@ passkeyRoute.post('/register-verify', async (c) => {
   });
   await emitAuthEvent({
     actorId: auth.userId,
-    kind: 'passkey.registered',
+    payload: { kind: 'passkey.registered' },
     ip: clientIp(c),
     userAgent: userAgent(c),
   });
@@ -126,7 +126,7 @@ passkeyRoute.delete('/:id', requireStepUp({ action: 'passkey.remove' }), async (
     .where(and(eq(passkeyCredentials.id, id), eq(passkeyCredentials.userId, auth.userId)));
   await emitAuthEvent({
     actorId: auth.userId,
-    kind: 'passkey.removed',
+    payload: { kind: 'passkey.removed' },
     ip: clientIp(c),
     userAgent: userAgent(c),
   });

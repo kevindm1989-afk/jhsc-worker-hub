@@ -136,7 +136,7 @@ totpResetRoute.post('/reset-confirm', async (c) => {
 
   await emitAuthEvent({
     actorId: auth.userId,
-    kind: 'totp.reset',
+    payload: { kind: 'totp.reset' },
     ip: clientIp(c),
     userAgent: userAgent(c),
   });

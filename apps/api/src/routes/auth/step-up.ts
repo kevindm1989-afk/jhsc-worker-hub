@@ -52,10 +52,12 @@ stepUpRoute.post('/passkey/verify', async (c) => {
   if (!outcome.ok || outcome.auth.userId !== auth.userId) {
     await emitAuthEvent({
       actorId: auth.userId,
-      kind: 'step_up.denied',
+      payload: {
+        kind: 'step_up.denied',
+        reason: outcome.ok ? 'user_mismatch' : outcome.reason,
+      },
       ip: clientIp(c),
       userAgent: userAgent(c),
-      metadata: outcome.ok ? { reason: 'user_mismatch' } : { reason: outcome.reason },
     });
     return c.json({ error: 'step_up_denied' }, 401);
   }
@@ -85,10 +87,9 @@ stepUpRoute.post('/totp', async (c) => {
   if (!row) {
     await emitAuthEvent({
       actorId: auth.userId,
-      kind: 'step_up.denied',
+      payload: { kind: 'step_up.denied', reason: 'no_totp' },
       ip: clientIp(c),
       userAgent: userAgent(c),
-      metadata: { reason: 'no_totp' },
     });
     return c.json({ error: 'step_up_denied' }, 401);
   }
@@ -97,10 +98,9 @@ stepUpRoute.post('/totp', async (c) => {
   if (!r.ok) {
     await emitAuthEvent({
       actorId: auth.userId,
-      kind: 'step_up.denied',
+      payload: { kind: 'step_up.denied', reason: 'totp_invalid' },
       ip: clientIp(c),
       userAgent: userAgent(c),
-      metadata: { reason: 'totp_invalid' },
     });
     return c.json({ error: 'step_up_denied' }, 401);
   }
@@ -128,10 +128,12 @@ async function grantAndIssue(c: Context, sessionId: string) {
   const validated = await validateAccess(fresh);
   await emitAuthEvent({
     actorId: validated?.userId ?? null,
-    kind: 'step_up.granted',
+    payload: {
+      kind: 'step_up.granted',
+      until: validated?.stepUpUntil?.toISOString() ?? null,
+    },
     ip: clientIp(c),
     userAgent: userAgent(c),
-    metadata: validated?.stepUpUntil ? { until: validated.stepUpUntil.toISOString() } : {},
   });
   return c.json({
     stepUp: {

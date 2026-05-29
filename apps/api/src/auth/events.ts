@@ -6,39 +6,39 @@
 // (idx=1) locks the pre-1.3 rows into the chain by hash, and
 // `auth_events` is preserved read-only.
 //
-// Call sites continue to use the existing `emitAuthEvent(args)`
-// signature with kind + ip + userAgent + metadata. This module
-// builds the typed AuditPayload from kind + metadata at the boundary.
+// privacy-reviewer F2 fix: call sites pass a `payload: AuditPayload`
+// (typed discriminated union from @jhsc/shared-types). The typechecker
+// rejects any field that isn't declared on the matching kind's
+// variant — including any drifted PI key. The previous (kind +
+// metadata) signature bypassed the typechecker at the spread.
 
 import { append } from '@jhsc/audit';
-import type { AuditEventKind, AuditPayload } from '@jhsc/shared-types';
+import type { AuditPayload } from '@jhsc/shared-types';
 import { getDb } from '../db/client';
 
 export interface AuthEventInput {
   readonly actorId?: string | null;
-  readonly kind: AuditEventKind;
+  /**
+   * Typed audit payload — kind discriminant + the fields declared on
+   * its AuditPayload variant. The typechecker rejects unknown fields
+   * here, including any future PI drift.
+   */
+  readonly payload: AuditPayload;
   readonly ip?: string | null;
   readonly userAgent?: string | null;
-  readonly metadata?: Readonly<Record<string, unknown>>;
+  readonly resourceType?: string | null;
+  readonly resourceId?: string | null;
 }
 
-/**
- * Append an auth event to the audit chain. The metadata object is
- * merged into the typed payload under `kind`; the typechecker
- * on the @jhsc/shared-types AuditPayload union enforces the field
- * shape at the call sites that build typed payloads. Routes that
- * pass an untyped metadata bag (the historical 1.2 pattern) get a
- * runtime-shaped object; the verifier hashes whatever was stored,
- * so the chain integrity holds regardless.
- */
 export async function emitAuthEvent(input: AuthEventInput): Promise<void> {
   const db = getDb();
-  const payload = { kind: input.kind, ...(input.metadata ?? {}) } as AuditPayload;
   await append(db, {
     actorId: input.actorId ?? null,
-    payload,
-    kind: input.kind,
+    payload: input.payload,
+    kind: input.payload.kind,
     ip: input.ip ?? null,
     userAgent: input.userAgent ?? null,
+    resourceType: input.resourceType ?? null,
+    resourceId: input.resourceId ?? null,
   });
 }

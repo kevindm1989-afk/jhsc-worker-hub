@@ -105,6 +105,10 @@ export type AuditPayload =
       readonly kind: 'session.revoked';
       readonly scope: 'single' | 'all';
       readonly sessionsRemoved?: number;
+      /** Operator OS username when revocation came from the admin CLI (auth-unlock --logout-all). */
+      readonly operator?: string;
+      /** Free-text reason from the admin CLI. Runbook §2 / §4 limit this to event-class strings — never PI. */
+      readonly reason?: string;
     }
   | { readonly kind: 'step_up.granted'; readonly until: string | null }
   | { readonly kind: 'step_up.denied'; readonly reason: string }
