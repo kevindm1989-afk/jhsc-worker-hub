@@ -27,12 +27,14 @@ const REFRESH_TTL_SECONDS = 14 * 24 * 60 * 60;
 export interface IssuedTokens {
   /** Short-lived EdDSA JWT for the __Host-access cookie. */
   readonly accessJwt: string;
-  /** Opaque base64url string for the __Host-refresh cookie. */
+  /** Opaque base64url string for the __Secure-refresh cookie. */
   readonly refreshToken: string;
   /** Mirrors sessions.refresh_expires_at — Set-Cookie Max-Age source. */
   readonly refreshExpiresAt: Date;
   /** The newly-created (or rotated) session id. Useful for logging. */
   readonly sessionId: string;
+  /** Owner of the session — emitted into auth_events.actor_id. */
+  readonly userId: string;
 }
 
 export interface CreateSessionInput {
@@ -70,7 +72,7 @@ export async function createSession(input: CreateSessionInput): Promise<IssuedTo
     sid: sessionId,
     stepUpUntil: toEpochSecondsOrNull(input.stepUpUntil ?? null),
   });
-  return { accessJwt, refreshToken, refreshExpiresAt, sessionId };
+  return { accessJwt, refreshToken, refreshExpiresAt, sessionId, userId: input.userId };
 }
 
 function toEpochSecondsOrNull(d: Date | null): number | null {
@@ -149,6 +151,7 @@ export async function refreshSession(
       refreshToken: newRefreshToken,
       refreshExpiresAt: newRefreshExpiresAt,
       sessionId: row.id,
+      userId: row.userId,
     },
   };
 }

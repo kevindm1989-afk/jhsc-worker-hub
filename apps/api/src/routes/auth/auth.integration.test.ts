@@ -37,7 +37,7 @@ describe.skipIf(SKIP)('auth round-trip', () => {
     // 2. Setup returns the provisioning blob + TOTP URI.
     const setupRes = await app.request('/api/auth/first-run/setup', {
       method: 'POST',
-      headers: { 'content-type': 'application/json' },
+      headers: { 'content-type': 'application/json', 'x-requested-with': 'jhsc-web' },
       body: JSON.stringify({
         email: EMAIL,
         password: PASSWORD,
@@ -60,7 +60,7 @@ describe.skipIf(SKIP)('auth round-trip', () => {
     // 3. Confirm — flips the singleton and sets auth cookies.
     const confirmRes = await app.request('/api/auth/first-run/confirm', {
       method: 'POST',
-      headers: { 'content-type': 'application/json' },
+      headers: { 'content-type': 'application/json', 'x-requested-with': 'jhsc-web' },
       body: JSON.stringify({ provisioning: setupBody.provisioning, totpCode: code }),
     });
     expect(confirmRes.status).toBe(201);
@@ -96,7 +96,7 @@ describe.skipIf(SKIP)('auth round-trip', () => {
     // 6. Trying setup again is 404 — gate is closed.
     const setupAgain = await app.request('/api/auth/first-run/setup', {
       method: 'POST',
-      headers: { 'content-type': 'application/json' },
+      headers: { 'content-type': 'application/json', 'x-requested-with': 'jhsc-web' },
       body: JSON.stringify({ email: EMAIL, password: PASSWORD, displayName: DISPLAY_NAME }),
     });
     expect(setupAgain.status).toBe(404);
@@ -104,14 +104,14 @@ describe.skipIf(SKIP)('auth round-trip', () => {
     // 7. Logout clears the cookies (Max-Age=0).
     const logoutRes = await app.request('/api/auth/logout', {
       method: 'POST',
-      headers: { cookie: authCookieHeader },
+      headers: { cookie: authCookieHeader, 'x-requested-with': 'jhsc-web' },
     });
     expect(logoutRes.status).toBe(200);
 
     // 8. Password login (stage 1) returns the pending blob.
     const pwLogin = await app.request('/api/auth/password/login', {
       method: 'POST',
-      headers: { 'content-type': 'application/json' },
+      headers: { 'content-type': 'application/json', 'x-requested-with': 'jhsc-web' },
       body: JSON.stringify({ email: EMAIL, password: PASSWORD }),
     });
     expect(pwLogin.status).toBe(200);
@@ -137,7 +137,7 @@ describe.skipIf(SKIP)('auth round-trip', () => {
 
     const refreshRes = await app.request('/api/auth/refresh', {
       method: 'POST',
-      headers: { cookie: authCookieHeader },
+      headers: { cookie: authCookieHeader, 'x-requested-with': 'jhsc-web' },
     });
     // After logout the refresh cookie is gone — refresh should 401.
     expect([401, 200]).toContain(refreshRes.status);
@@ -150,7 +150,7 @@ describe.skipIf(SKIP)('auth round-trip', () => {
   it('rejects setup with a weak password', async () => {
     const res = await app.request('/api/auth/first-run/setup', {
       method: 'POST',
-      headers: { 'content-type': 'application/json' },
+      headers: { 'content-type': 'application/json', 'x-requested-with': 'jhsc-web' },
       body: JSON.stringify({ email: EMAIL, password: 'short', displayName: 'X' }),
     });
     expect(res.status).toBe(400);
@@ -161,7 +161,7 @@ describe.skipIf(SKIP)('auth round-trip', () => {
   it('confirm rejects a tampered provisioning blob', async () => {
     const setupRes = await app.request('/api/auth/first-run/setup', {
       method: 'POST',
-      headers: { 'content-type': 'application/json' },
+      headers: { 'content-type': 'application/json', 'x-requested-with': 'jhsc-web' },
       body: JSON.stringify({ email: EMAIL, password: PASSWORD, displayName: DISPLAY_NAME }),
     });
     const setupBody = (await setupRes.json()) as { provisioning: string };
@@ -169,10 +169,25 @@ describe.skipIf(SKIP)('auth round-trip', () => {
     const tampered = setupBody.provisioning.slice(0, 20) + 'A' + setupBody.provisioning.slice(21);
     const confirmRes = await app.request('/api/auth/first-run/confirm', {
       method: 'POST',
-      headers: { 'content-type': 'application/json' },
+      headers: { 'content-type': 'application/json', 'x-requested-with': 'jhsc-web' },
       body: JSON.stringify({ provisioning: tampered, totpCode: '123456' }),
     });
     expect(confirmRes.status).toBe(400);
+  });
+
+  it('rejects mutating requests without X-Requested-With (CSRF guard)', async () => {
+    const res = await app.request('/api/auth/first-run/setup', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' }, // no x-requested-with
+      body: JSON.stringify({ email: EMAIL, password: PASSWORD, displayName: DISPLAY_NAME }),
+    });
+    expect(res.status).toBe(403);
+    expect(await res.json()).toEqual({ error: 'csrf_blocked' });
+  });
+
+  it('allows safe (GET) requests without X-Requested-With', async () => {
+    const res = await app.request('/api/auth/first-run/status');
+    expect(res.status).toBe(200);
   });
 });
 

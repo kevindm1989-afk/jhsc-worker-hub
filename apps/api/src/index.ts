@@ -1,10 +1,17 @@
 import { Hono } from 'hono';
 import { env } from './env';
+import { csrfHeaderGuard, securityHeaders } from './middleware/security';
 import { authRoute } from './routes/auth';
 import { healthRoute } from './routes/health';
 import { workplaceRoute } from './routes/workplace';
 
 export const app = new Hono();
+
+// Root middlewares — every request passes through these before any route
+// matches. securityHeaders applies CSP/HSTS/etc. csrfHeaderGuard rejects
+// mutating requests without X-Requested-With (security-reviewer F1, F7).
+app.use('*', securityHeaders);
+app.use('*', csrfHeaderGuard());
 
 app.route('/health', healthRoute);
 app.route('/api/auth', authRoute);

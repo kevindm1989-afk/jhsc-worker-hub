@@ -25,7 +25,7 @@
 // Once setup_state.first_run_completed_at is set, both endpoints 404.
 
 import { encodeBase32UpperCaseNoPadding } from '@oslojs/encoding';
-import { eq } from 'drizzle-orm';
+import { and, eq, isNull } from 'drizzle-orm';
 import { Hono } from 'hono';
 import { z } from 'zod';
 import {
@@ -53,6 +53,13 @@ import {
 import { env } from '../../env';
 
 export const firstRunRoute = new Hono();
+
+class ConcurrentFirstRunError extends Error {
+  constructor() {
+    super('first-run/confirm: concurrent claim race-lost');
+    this.name = 'ConcurrentFirstRunError';
+  }
+}
 
 const PROVISIONING_TTL_MS = 5 * 60 * 1000;
 const PROVISIONING_TAG = 'first-run-provisioning:v1';
@@ -207,31 +214,51 @@ firstRunRoute.post('/confirm', async (c) => {
   }
 
   const db = getDb();
-  const userId = await db.transaction(async (tx) => {
-    const inserted = await tx.insert(users).values({}).returning({ id: users.id });
-    const userRow = inserted[0];
-    if (!userRow) throw new Error('first-run/confirm: users insert returned no row');
-    await tx.insert(userProfiles).values({
-      userId: userRow.id,
-      displayNameCiphertext: fromB64(payload.nameCtB64),
-      emailCiphertext: fromB64(payload.emailCtB64),
-      emailLookupHash: fromB64(payload.emailLookupB64),
+  // Atomic claim — security-reviewer F2. Insert the user FIRST, then
+  // try to flip the singleton with `WHERE first_run_completed_at IS NULL`.
+  // If RETURNING comes back empty, a concurrent /confirm beat us; we
+  // roll the transaction back and signal "already completed."
+  let userId: string;
+  try {
+    userId = await db.transaction(async (tx) => {
+      const inserted = await tx.insert(users).values({}).returning({ id: users.id });
+      const userRow = inserted[0];
+      if (!userRow) throw new Error('first-run/confirm: users insert returned no row');
+      await tx.insert(userProfiles).values({
+        userId: userRow.id,
+        displayNameCiphertext: fromB64(payload.nameCtB64),
+        emailCiphertext: fromB64(payload.emailCtB64),
+        emailLookupHash: fromB64(payload.emailLookupB64),
+      });
+      await tx.insert(passwordCredentials).values({
+        userId: userRow.id,
+        hash: payload.passwordHash,
+      });
+      await tx.insert(totpCredentials).values({
+        userId: userRow.id,
+        secretCiphertext: seal(totpSecret),
+        lastUsedStep: verifyResult.step,
+      });
+      // Atomic singleton claim. The race-loser sees an empty RETURNING
+      // and rolls back below.
+      const claimed = await tx
+        .update(setupState)
+        .set({ firstRunCompletedAt: new Date(), firstRunCompletedBy: userRow.id })
+        .where(and(eq(setupState.id, 1), isNull(setupState.firstRunCompletedAt)))
+        .returning({ id: setupState.id });
+      if (claimed.length === 0) {
+        // Throw to trigger rollback. The catch below maps it to 404
+        // so the response shape matches the closed-gate path.
+        throw new ConcurrentFirstRunError();
+      }
+      return userRow.id;
     });
-    await tx.insert(passwordCredentials).values({
-      userId: userRow.id,
-      hash: payload.passwordHash,
-    });
-    await tx.insert(totpCredentials).values({
-      userId: userRow.id,
-      secretCiphertext: seal(totpSecret),
-      lastUsedStep: verifyResult.step,
-    });
-    await tx
-      .update(setupState)
-      .set({ firstRunCompletedAt: new Date(), firstRunCompletedBy: userRow.id })
-      .where(eq(setupState.id, 1));
-    return userRow.id;
-  });
+  } catch (e) {
+    if (e instanceof ConcurrentFirstRunError) {
+      return c.json({ error: 'not_found' }, 404);
+    }
+    throw e;
+  }
 
   await emitAuthEvent({
     actorId: userId,

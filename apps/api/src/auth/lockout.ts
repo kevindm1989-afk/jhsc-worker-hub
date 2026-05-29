@@ -13,7 +13,7 @@
 // with the master key. The plaintext email never lands in this table —
 // the table itself would otherwise be an enumeration target.
 
-import { and, count, eq, gte, sql } from 'drizzle-orm';
+import { and, count, eq, gte, or, sql } from 'drizzle-orm';
 import { getDb } from '../db/client';
 import { loginAttempts } from '../db/schema';
 import { env } from '../env';
@@ -68,41 +68,21 @@ async function countFailures(
 ): Promise<number> {
   const db = getDb();
   const since = new Date(sinceMs);
-  // SELECT COUNT(*) FROM login_attempts WHERE outcome='failure'
-  //   AND ts >= $since
-  //   AND (identifier_hash = $h OR ip = $ip)
-  // We OR identifier OR ip, but Drizzle 0.45's typings make a clean OR
-  // awkward when ip is null; we run two queries and add — same algorithmic
-  // cost (both use indexes; the small overcount when both match the
-  // same row is conservative for the user's benefit, not the attacker's).
-  const byIdQuery = db
+  // SECURITY.md §3 ladder counts rows where the identifier OR the IP
+  // matches. A naive sum-of-two-queries double-counts the common case
+  // (same rep failing N times from the same browser → 2N counted),
+  // tripping the threshold at half the documented count
+  // (security-reviewer F5). Use a single OR'd query so the math is what
+  // the spec says: distinct row count under (id OR ip).
+  const predicates =
+    ip != null
+      ? or(eq(loginAttempts.identifierHash, identifierHash), sql`${loginAttempts.ip} = ${ip}::inet`)
+      : eq(loginAttempts.identifierHash, identifierHash);
+  const rows = await db
     .select({ n: count() })
     .from(loginAttempts)
-    .where(
-      and(
-        eq(loginAttempts.outcome, 'failure'),
-        gte(loginAttempts.ts, since),
-        eq(loginAttempts.identifierHash, identifierHash),
-      ),
-    );
-  const byIdRows = await byIdQuery;
-  const byId = (byIdRows[0]?.n ?? 0) as number;
-  if (!ip) return byId;
-  const byIpRows = await db
-    .select({ n: count() })
-    .from(loginAttempts)
-    .where(
-      and(
-        eq(loginAttempts.outcome, 'failure'),
-        gte(loginAttempts.ts, since),
-        sql`${loginAttempts.ip}::text = ${ip}`,
-      ),
-    );
-  const byIp = (byIpRows[0]?.n ?? 0) as number;
-  // Overlap (same row counted in both) is conservative: it pushes the
-  // user toward lockout slightly sooner than strict OR would. Acceptable
-  // and documented.
-  return byId + byIp;
+    .where(and(eq(loginAttempts.outcome, 'failure'), gte(loginAttempts.ts, since), predicates));
+  return (rows[0]?.n ?? 0) as number;
 }
 
 export async function checkLockout(input: CheckLockoutInput): Promise<LockoutState> {

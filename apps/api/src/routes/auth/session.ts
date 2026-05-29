@@ -45,7 +45,7 @@ sessionRoute.post('/refresh', async (c) => {
   }
   setAuthCookies(c, outcome.tokens);
   await emitAuthEvent({
-    actorId: null, // refresh path doesn't carry an authenticated user yet
+    actorId: outcome.tokens.userId,
     kind: 'session.refreshed',
     ip,
     userAgent: ua,

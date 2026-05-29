@@ -122,6 +122,16 @@ loginRoute.post('/password/login', async (c) => {
 
   const lockout = await checkLockout({ identifierHash, ip });
   if (lockout.locked) {
+    await emitAuthEvent({
+      actorId: null,
+      kind: 'lockout.applied',
+      ip,
+      userAgent: ua,
+      metadata: {
+        tier: lockout.tier!,
+        retryAfterSeconds: lockout.retryAfterSeconds ?? null,
+      },
+    });
     return lockoutResponse(c, lockout.tier!, lockout.retryAfterSeconds);
   }
 
