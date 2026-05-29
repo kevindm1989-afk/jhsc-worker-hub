@@ -101,6 +101,50 @@ describe('LegalView — clause deep link', () => {
   });
 });
 
+describe('LegalView — search — XSS regression (sec-F1)', () => {
+  it('renders a snippet containing a literal <script> as text, not as a DOM script node', async () => {
+    mockLegalFetch((url) => {
+      if (url.includes('/api/legal/search?')) {
+        return jsonResponse({
+          query: 'evil',
+          activeVersion: 'v-test',
+          items: [
+            {
+              id: OHSA_CLAUSE_920.id,
+              statuteCode: 'OHSA',
+              citation: 's.9(20)',
+              heading: 'Recommendations',
+              bodyKind: 'full_text',
+              versionDate: '2020-07-01',
+              rank: 0.5,
+              // Simulate a worst-case ts_headline output where the corpus
+              // body somehow contains script-tag text. The renderer must
+              // emit it as literal text, NOT as a DOM node.
+              snippet: 'A committee shall <script>alert("xss")</script> <mark>recommend</mark>.',
+            },
+          ],
+        });
+      }
+      return undefined;
+    });
+    render(
+      <MemoryRouter initialEntries={['/legal?q=evil']}>
+        <LegalView />
+      </MemoryRouter>,
+    );
+    await screen.findByText(/1 match/);
+    // No script element ever in the DOM.
+    expect(document.querySelector('script[src*="alert"]')).toBeNull();
+    expect(document.querySelectorAll('script').length).toBe(0);
+    // The literal text WAS rendered (so we know the renderer didn't drop
+    // it -- it just rendered it as text).
+    expect(document.body.textContent).toContain('<script>alert("xss")</script>');
+    // The <mark> survived as a real DOM mark element.
+    const mark = document.querySelector('mark');
+    expect(mark?.textContent).toBe('recommend');
+  });
+});
+
 describe('LegalView — search', () => {
   it('renders FTS hits with mark snippets from /api/legal/search', async () => {
     mockLegalFetch((url) => {

@@ -18,7 +18,7 @@ heading = "Lighting"
 body = "Lighting at a workplace shall be sufficient so that work may be performed safely."
 body_kind = "full_text"
 version_date = "2020-07-01"
-verified_by = "kdm"
+verified_by = "corpus-operator"
 source_url = "https://www.ontario.ca/laws/regulation/900851#BK10"
 
 [[clauses]]
@@ -28,7 +28,7 @@ heading = "Housekeeping"
 body = "The workplace shall be kept clean and free of obstructions and slipping or tripping hazards."
 body_kind = "full_text"
 version_date = "2020-07-01"
-verified_by = "kdm"
+verified_by = "corpus-operator"
 source_url = "https://www.ontario.ca/laws/regulation/900851#BK12"
 
 [[clauses]]
@@ -38,7 +38,7 @@ heading = "Lockout"
 body = "Where the starting of a machine, transmission machinery, device or thing may endanger the safety of any worker, control switches or other control mechanisms shall be locked out and other effective precautions necessary to prevent any starting shall be taken."
 body_kind = "full_text"
 version_date = "2020-07-01"
-verified_by = "kdm"
+verified_by = "corpus-operator"
 source_url = "https://www.ontario.ca/laws/regulation/900851#BK41"
 
 [[clauses]]
@@ -48,7 +48,7 @@ heading = "Personal protective equipment"
 body = "A worker exposed to the hazard of head injury shall wear head protection appropriate in the circumstances."
 body_kind = "full_text"
 version_date = "2020-07-01"
-verified_by = "kdm"
+verified_by = "corpus-operator"
 source_url = "https://www.ontario.ca/laws/regulation/900851#BK78"
 
 [[clauses]]
@@ -58,5 +58,5 @@ heading = "Eye protection"
 body = "A worker exposed to the hazard of eye injury shall wear eye protection appropriate in the circumstances."
 body_kind = "full_text"
 version_date = "2020-07-01"
-verified_by = "kdm"
+verified_by = "corpus-operator"
 source_url = "https://www.ontario.ca/laws/regulation/900851#BK80"

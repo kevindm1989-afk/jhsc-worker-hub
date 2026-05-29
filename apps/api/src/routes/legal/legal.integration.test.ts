@@ -9,6 +9,7 @@ import { app } from '../../index';
 import { getDb } from '../../db/client';
 import { bootAuthTestEnv } from '../../auth/test-setup';
 import { cleanAuthTables, hasDb } from '../../auth/test-db';
+import { _resetRateLimitForTests } from '../../middleware/rate-limit';
 
 const SKIP = !hasDb();
 const VERSION = 'v-legal-routes-test';
@@ -20,6 +21,7 @@ beforeAll(async () => {
 
 beforeEach(async () => {
   if (SKIP) return;
+  _resetRateLimitForTests();
   await cleanAuthTables();
   await seedThreeStatutes();
 });
@@ -192,29 +194,48 @@ describe.skipIf(SKIP)('GET /api/legal/search', () => {
     expect(res.status).toBe(400);
   });
 
-  it('T-LC8: search snippet for restricted statute uses body_summary, not body', async () => {
-    // The test fixture's summary contains "plan-do-check-act". If the
-    // snippet pulled from the raw body, it would still match because we
-    // duplicate the paraphrase into `body`. So instead we verify the
-    // route does not echo a forbidden token. Insert a marker into the
-    // restricted statute's body that is NOT in the summary, then search
-    // for it — should return nothing because the FTS column is built
-    // from heading+body (so the marker is indexed), but the snippet
-    // returned must come from body_summary which lacks the marker.
+  it('T-LC8 + sec-F6: restricted body text is neither indexed nor in the snippet', async () => {
+    // Mark the restricted statute's body with a token that does NOT
+    // appear in body_summary. Pre-migration-0003 the FTS index was built
+    // from body, so this token was an oracle (search returns the clause
+    // id; attacker confirms presence). Migration 0003 makes search_tsv
+    // licence-aware: restricted rows are indexed from body_summary, so
+    // the token is no longer queryable. Both defences should hold:
+    //   (a) the token does not match the FTS query (sec-F6); AND
+    //   (b) even if a future regression breaks (a), the snippet must
+    //       still pull from body_summary, never body (T-LC8).
     const db = getDb();
     await db.execute(sql`
       UPDATE clauses
-      SET body = body || ' XYZZYFORBIDDEN',
-          body_summary = body_summary
+      SET body = body || ' XYZZYFORBIDDEN'
       WHERE statute_id = (SELECT id FROM statutes WHERE code = 'CSA-Z1000')
     `);
     const res = await app.request('/api/legal/search?q=XYZZYFORBIDDEN&statute=CSA-Z1000');
     const body = (await res.json()) as { items: Array<{ snippet: string }> };
-    // The clause matches the FTS query (token is in indexed body), but
-    // the snippet must come from body_summary which never contains the
-    // marker — so the snippet must NOT include XYZZYFORBIDDEN.
+    // (a) sec-F6: no FTS match because the index is built from body_summary only.
+    expect(body.items).toHaveLength(0);
+    // (b) T-LC8 belt-and-braces: any future match must not echo the body.
     for (const item of body.items) {
       expect(item.snippet).not.toContain('XYZZYFORBIDDEN');
     }
+  });
+});
+
+describe.skipIf(SKIP)('rate limit (sec-F4)', () => {
+  it('returns 429 after the /search bucket is drained', async () => {
+    // The /search bucket capacity is 20; the 21st consecutive request
+    // from the same IP (the test driver has no IP header, so the
+    // limiter keys on the 'unknown' bucket) should be rejected.
+    _resetRateLimitForTests();
+    let firstRejection: Response | null = null;
+    for (let i = 0; i < 25; i++) {
+      const res = await app.request('/api/legal/search?q=committee');
+      if (res.status === 429) {
+        firstRejection = res;
+        break;
+      }
+    }
+    expect(firstRejection).not.toBeNull();
+    expect(firstRejection!.headers.get('retry-after')).toMatch(/^\d+$/);
   });
 });

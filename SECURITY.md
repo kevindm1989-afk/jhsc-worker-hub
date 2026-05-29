@@ -151,6 +151,22 @@ The legal corpus (OHSA, O. Reg. 851, CLC Part II, COHSR) underlies citation rend
 
 **Audit hooks for corpus changes.** The audit-chain emits two corpus event kinds (`audit.corpus.seeded`, `audit.corpus.amended`) with no payload fields containing PI. Payload schema is fixed in `packages/shared-types` and enforced at the typed-emit boundary (priv-F2 design from Milestone 1.3 extends to corpus events). Verification: `audit-log-verify --check-corpus` cross-checks every `corpus.seeded` event's `fixture_sha256` against the live `corpus_versions` row.
 
+**Close-out review findings (Milestone 1.4 slice 5).**
+
+| Finding | Where landed |
+|---|---|
+| sec-F1 — XSS via fixture body → `ts_headline` snippet | Web renderer switched off `dangerouslySetInnerHTML` to a strict `<mark>`-split renderer (`apps/web/src/views/legal-view.tsx` `SnippetRenderer`); Zod fixture schema rejects `<` `>` in `body` / `heading` / `body_summary` (`packages/legal-corpus/src/fixtures.ts`). |
+| sec-F2 — statute UPDATE flipping licence orphans full_text clauses | `statutes_copyright_guard_trigger` added in migration 0003 — refuses the UPDATE when matching clauses exist. |
+| sec-F3 — `sql.raw` for `hierarchy_path` | Seeder switched to `sql.join` over parameter-bound elements (`apps/api/scripts/seed-legal-corpus.ts`). |
+| sec-F4 — no rate limit on `/api/legal/search` | Token-bucket middleware (`apps/api/src/middleware/rate-limit.ts`): `/search` 20 burst / 5 rps, `/clauses` + `/statutes` 60 burst / 20 rps, keyed by `Fly-Client-IP`. |
+| sec-F5 — partial re-seed orphans existing statutes | Read routes now filter `superseded_by IS NULL` instead of `corpus_version = active`; seeder refuses to drop a previously-loaded statute without `--allow-statute-removal`. |
+| sec-F6 — restricted body text reachable via FTS oracle | `search_tsv` rebuilt in migration 0003 as licence-aware (`body_summary` for `summary` rows; `body` for `full_text`); DB CHECK `body_kind='full_text' OR body_summary IS NOT NULL`. |
+| priv-F1 — referrer policy on web origin | `<meta name="referrer" content="no-referrer">` added to `apps/web/index.html` as defence-in-depth for the existing `rel="noreferrer"` anchors. |
+| priv-F2 — `verified_by="kdm"` is operator initials | All four seed fixtures + Zod test fixture changed to `verified_by="corpus-operator"`; out-of-band operator log in `docs/runbooks/legal-corpus.md` §3. |
+| priv-F3 — OHSA s.9(20) text may be mislabelled | Privacy reviewer flagged a possible swap between s.9(18) and s.9(20); reviewer could not independently fetch e-Laws (network policy blocks it). Mandatory 2-person verification gate now blocks Milestone 1.9 ship — `docs/runbooks/legal-corpus.md` §2. |
+| priv-F5 — `corpus_versions.operator` column dropped from ADR | Implementation divergence documented in ADR-0003 §"Implementation divergences"; runbook §3 records operator identity out-of-band. |
+| priv-F6 — `/api/legal/*` rode auth cookies | Web client `apps/web/src/legal/api.ts` switched to `credentials: 'omit'`. |
+
 ---
 
 ## 3. Security Controls

@@ -412,20 +412,51 @@ function SearchResultsInner({ query }: { query: string }): JSX.Element {
               {hit.heading ? (
                 <div className="mb-1 text-xs text-muted-foreground">{hit.heading}</div>
               ) : null}
-              <div
-                className="text-sm leading-relaxed text-foreground"
-                // Server-rendered ts_headline uses <mark> tags only — no
-                // attributes, no script. The corpus input has been validated
-                // and the API response is bounded to (id, citation, snippet,
-                // heading) so this is safe even though it routes through
-                // dangerouslySetInnerHTML.
-                dangerouslySetInnerHTML={{ __html: hit.snippet }}
-              />
+              <div className="text-sm leading-relaxed text-foreground">
+                <SnippetRenderer snippet={hit.snippet} />
+              </div>
             </Link>
           </li>
         ))}
       </ul>
     </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Snippet renderer — safe replacement for dangerouslySetInnerHTML.
+// ---------------------------------------------------------------------------
+//
+// ts_headline produces snippets like
+//   "An employer shall <mark>take</mark> every <mark>precaution</mark>."
+// We split on the literal <mark>...</mark> markers and emit text nodes for
+// the surrounding spans + a <mark> React element for the highlighted runs.
+// Any other tag in the input is treated as text. This closes sec-review F1
+// (XSS via fixture-author-controlled body text), because nothing in the
+// snippet path can construct a DOM node we did not authorize.
+
+const MARK_SEGMENT = /<mark>([\s\S]*?)<\/mark>/g;
+
+function SnippetRenderer({ snippet }: { snippet: string }): JSX.Element {
+  const segments: Array<{ kind: 'text' | 'mark'; value: string }> = [];
+  let cursor = 0;
+  for (const match of snippet.matchAll(MARK_SEGMENT)) {
+    if (match.index === undefined) continue;
+    if (match.index > cursor) {
+      segments.push({ kind: 'text', value: snippet.slice(cursor, match.index) });
+    }
+    segments.push({ kind: 'mark', value: match[1] ?? '' });
+    cursor = match.index + match[0].length;
+  }
+  if (cursor < snippet.length) {
+    segments.push({ kind: 'text', value: snippet.slice(cursor) });
+  }
+  return (
+    <>
+      {segments.map((s, i) =>
+        s.kind === 'mark' ? <mark key={i}>{s.value}</mark> : <span key={i}>{s.value}</span>,
+      )}
+    </>
   );
 }
 

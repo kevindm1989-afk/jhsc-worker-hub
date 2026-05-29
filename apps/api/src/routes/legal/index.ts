@@ -10,16 +10,39 @@ import { sql } from 'drizzle-orm';
 import { Hono } from 'hono';
 import { z } from 'zod';
 import { getDb } from '../../db/client';
+import { rateLimit } from '../../middleware/rate-limit';
 
 export const legalRoute = new Hono();
+
+// sec-F4: /api/legal/* is public — no auth, no CSRF gating on GETs.
+// ts_headline on /search is the most expensive query in the API, so
+// the limit is the tightest. /clauses and /statutes are cheaper but
+// share the same trust posture, so they get a more generous bucket.
+legalRoute.use('/search', rateLimit({ name: 'legal.search', capacity: 20, refillPerSecond: 5 }));
+legalRoute.use(
+  '/clauses/*',
+  rateLimit({ name: 'legal.clauses', capacity: 60, refillPerSecond: 20 }),
+);
+legalRoute.use('/clauses', rateLimit({ name: 'legal.clauses', capacity: 60, refillPerSecond: 20 }));
+legalRoute.use(
+  '/statutes',
+  rateLimit({ name: 'legal.statutes', capacity: 60, refillPerSecond: 20 }),
+);
 
 // ---------------------------------------------------------------------------
 // Active-version resolver
 // ---------------------------------------------------------------------------
-// Active version = MAX(activated_at) WHERE retired_at IS NULL. Cached per
-// request via Hono context; cheap enough to look up on every request and
-// the only thing the cache buys us is avoiding a duplicate read inside the
-// same handler that touches both statutes and clauses.
+// Active corpus version = MAX(activated_at) WHERE retired_at IS NULL. The
+// version tag is reported in responses so clients can pin a recommendation
+// against the corpus state that was current at draft time, but the
+// *filtering* of clauses below is keyed on `superseded_by IS NULL` not on
+// the version tag — see sec-review F5. Filtering on corpus_version turned
+// a partial re-seed (operator forgets to copy CLC-II/COHSR fixtures) into
+// silent invisibility of every clause under those statutes, with every
+// recommendation that cites them rendering MissingCitation. Filtering on
+// `superseded_by IS NULL` matches the hash-anchored historical model
+// (ADR-0003): old fixtures stay readable; an amendment supersedes the
+// prior row by pointer, not by version-tag aging.
 
 async function activeVersion(): Promise<string | null> {
   const db = getDb();
@@ -37,13 +60,19 @@ async function activeVersion(): Promise<string | null> {
 
 legalRoute.get('/statutes', async (c) => {
   const version = await activeVersion();
-  if (!version) return c.json({ items: [], activeVersion: null });
   const db = getDb();
+  // List every statute that has at least one non-superseded clause. This
+  // is the correct "active" definition under the hash-anchored model
+  // (sec-F5) — statutes whose corpus_version tag aged out but whose
+  // clauses are still current stay visible.
   const rows = (await db.execute(sql`
-    SELECT id, code, jurisdiction, title, licence, source_url
-    FROM statutes
-    WHERE corpus_version = ${version}
-    ORDER BY jurisdiction, code
+    SELECT s.id, s.code, s.jurisdiction, s.title, s.licence, s.source_url
+    FROM statutes s
+    WHERE EXISTS (
+      SELECT 1 FROM clauses c
+      WHERE c.statute_id = s.id AND c.superseded_by IS NULL
+    )
+    ORDER BY s.jurisdiction, s.code
   `)) as unknown as Array<{
     id: string;
     code: string;
@@ -88,10 +117,12 @@ legalRoute.get('/clauses', async (c) => {
   if (!parsed.success) {
     return c.json({ error: 'invalid_query', issues: parsed.error.flatten() }, 400);
   }
-  const version = await activeVersion();
-  if (!version) return c.json({ items: [] });
   const { statute, citation } = parsed.data;
   const db = getDb();
+  // Filter on superseded_by IS NULL rather than corpus_version = active
+  // tag — sec-review F5. A re-seed that drops a fixture file leaves its
+  // clauses alive (no superseded_by pointer) so /api/legal stays
+  // consistent across partial re-seeds.
   const rows = citation
     ? ((await db.execute(sql`
         SELECT c.id, c.citation, c.hierarchy_path, c.heading, c.body, c.body_summary,
@@ -103,7 +134,7 @@ legalRoute.get('/clauses', async (c) => {
         JOIN statutes s ON s.id = c.statute_id
         WHERE s.code = ${statute}
           AND c.citation = ${citation}
-          AND c.corpus_version = ${version}
+          AND c.superseded_by IS NULL
         LIMIT 1
       `)) as unknown as Array<RawClauseRow>)
     : ((await db.execute(sql`
@@ -115,7 +146,7 @@ legalRoute.get('/clauses', async (c) => {
         FROM clauses c
         JOIN statutes s ON s.id = c.statute_id
         WHERE s.code = ${statute}
-          AND c.corpus_version = ${version}
+          AND c.superseded_by IS NULL
         ORDER BY c.citation
       `)) as unknown as Array<RawClauseRow>);
   return c.json({ items: rows.map(projectClause) });
@@ -176,13 +207,25 @@ legalRoute.get('/search', async (c) => {
     return c.json({ error: 'invalid_query', issues: parsed.error.flatten() }, 400);
   }
   const version = await activeVersion();
-  if (!version) return c.json({ items: [] });
   const { q, statute, limit } = parsed.data;
   const db = getDb();
   // plainto_tsquery handles arbitrary user text safely (no injection into
   // the query language) and returns AND-ed lexemes. We use the simple
   // form rather than websearch_to_tsquery so the user input pattern
   // matches what postgres builds for the GIN-indexed `english` config.
+  //
+  // ts_headline echoes its input verbatim around the <mark>...</mark>
+  // markers; if a fixture body ever contains `<` or `>` it would round-trip
+  // into the snippet HTML. The Zod fixture schema (sec-F1) rejects those
+  // chars at seed time AND the web renderer parses on the literal
+  // <mark>...</mark> markers via a strict regex (not raw innerHTML), so
+  // both layers have to fail for XSS to land.
+  //
+  // ts_headline source is licence-aware: crown_copyright_open uses
+  // (heading || body), third_party_restricted uses (heading || body_summary)
+  // — T-LC8. The search_tsv column itself is now licence-aware too
+  // (migration 0003 / sec-F6) so the FTS index for restricted rows does
+  // not embed the verbatim body lexemes.
   const rows = (await db.execute(sql`
     SELECT c.id, s.code AS statute_code, c.citation, c.heading, c.body_kind,
            c.version_date::text AS version_date,
@@ -199,7 +242,7 @@ legalRoute.get('/search', async (c) => {
            END AS snippet
     FROM clauses c
     JOIN statutes s ON s.id = c.statute_id
-    WHERE c.corpus_version = ${version}
+    WHERE c.superseded_by IS NULL
       AND c.search_tsv @@ plainto_tsquery('english', ${q})
       ${statute ? sql`AND s.code = ${statute}` : sql``}
     ORDER BY rank DESC, s.code, c.citation

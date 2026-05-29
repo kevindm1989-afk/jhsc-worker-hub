@@ -38,15 +38,18 @@ const FIXTURE_DIR = join(import.meta.dir, '..', '..', '..', 'packages', 'legal-c
 interface CliArgs {
   readonly version: string;
   readonly note: string | null;
+  readonly allowStatuteRemoval: boolean;
 }
 
 function parseArgs(argv: ReadonlyArray<string>): CliArgs {
   let version: string | null = null;
   let note: string | null = null;
+  let allowStatuteRemoval = false;
   for (let i = 2; i < argv.length; i++) {
     const a = argv[i]!;
     if (a === '--version') version = argv[++i] ?? null;
     else if (a === '--note') note = argv[++i] ?? null;
+    else if (a === '--allow-statute-removal') allowStatuteRemoval = true;
   }
   if (!version) {
     // Default version tag = today's ISO date prefixed with v.
@@ -56,7 +59,7 @@ function parseArgs(argv: ReadonlyArray<string>): CliArgs {
     const dd = String(d.getUTCDate()).padStart(2, '0');
     version = `v${yyyy}-${mm}-${dd}`;
   }
-  return { version, note };
+  return { version, note, allowStatuteRemoval };
 }
 
 async function loadFixtures(): Promise<ReadonlyArray<StatuteFixture>> {
@@ -137,6 +140,28 @@ async function main(): Promise<void> {
         `corpus_versions already has version ${args.version}; pass --version with a new tag`,
       );
     }
+
+    // sec-F5: refuse a re-seed that drops a previously-loaded statute
+    // unless the operator passed --allow-statute-removal. The read
+    // routes filter on superseded_by IS NULL so old clauses stay alive
+    // either way; this catch is for the more common operator mistake
+    // (forgetting to copy a fixture file into the seed/ dir).
+    const priorStatuteCodes = (await tx.execute(sql`
+      SELECT DISTINCT s.code FROM statutes s
+      WHERE EXISTS (
+        SELECT 1 FROM clauses c
+        WHERE c.statute_id = s.id AND c.superseded_by IS NULL
+      )
+    `)) as unknown as Array<{ code: string }>;
+    const newCodes = new Set(fixtures.map((f) => f.code));
+    const missing = priorStatuteCodes.map((r) => r.code).filter((code) => !newCodes.has(code));
+    if (missing.length > 0 && !args.allowStatuteRemoval) {
+      throw new Error(
+        `seed fixture set is missing statutes that are currently active: ${missing.join(', ')}; ` +
+          `re-run with --allow-statute-removal if this is intentional`,
+      );
+    }
+
     await tx.insert(corpusVersions).values({
       version: args.version,
       fixtureSha256: Buffer.from(fxSha, 'hex') as unknown as Uint8Array,
@@ -192,13 +217,22 @@ async function main(): Promise<void> {
           ORDER BY version_date DESC LIMIT 1
         `)) as unknown as Array<{ id: string; version_date: string }>;
 
+        // hierarchy_path is parameter-bound element-by-element via sql.join
+        // (sec-F3) — earlier versions used sql.raw with ad-hoc single-quote
+        // escaping, which worked for the current Zod-validated input but
+        // was a tarpit for future contributors who allow ` ` or
+        // backslash escapes through the schema.
+        const hierarchySql = sql`ARRAY[${sql.join(
+          c.hierarchy_path.map((p) => sql`${p}`),
+          sql`, `,
+        )}]::text[]`;
         const inserted = (await tx.execute(sql`
           INSERT INTO ${clauses} (
             statute_id, citation, hierarchy_path, heading, body, body_summary,
             body_kind, body_hash, version_date, verified_by, source_url, corpus_version
           )
           VALUES (
-            ${statuteId}, ${c.citation}, ${sql.raw(`ARRAY[${c.hierarchy_path.map((p) => `'${p.replace(/'/g, "''")}'`).join(',')}]::text[]`)},
+            ${statuteId}, ${c.citation}, ${hierarchySql},
             ${c.heading ?? null}, ${c.body}, ${c.body_summary ?? null},
             ${c.body_kind}, ${Buffer.from(bodyHash) as unknown as Uint8Array},
             ${versionDate}, ${c.verified_by}, ${c.source_url}, ${args.version}

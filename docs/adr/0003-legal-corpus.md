@@ -251,10 +251,19 @@ Re-seeding the same `version` is rejected (PK conflict). Re-seeding with a new `
 - **Re-seed accidentally overwriting historical text.** Mitigation: unique constraint on `(statute_id, citation, version_date)` plus migration-only mutation forces an INSERT path even for amendments. There's no UPDATE path in the API.
 - **Copyright violation by seeding CSA full text.** Mitigation: the seeder's structural guard rejects `body_kind='full_text'` for `third_party_restricted` statutes. Test fixture asserts the guard fires.
 
+## Implementation divergences
+
+Captured during the Milestone 1.4 close-out reviews so future readers of this ADR are not surprised when reading the migration:
+
+- **`corpus_versions.operator` column dropped.** Privacy review priv-F5 (1.4) flagged that persisting the seed operator's identity in the DB was unnecessary — the audit-chain anchor already records the seed event with `fixture_sha256`, and the operator's identity belongs in the out-of-band runbook log, not in the DB row. The migration creates `corpus_versions(version, activated_at, retired_at, fixture_sha256, note)`. The seeder writes `note` for human-readable context.
+- **Read filter is `superseded_by IS NULL`, not `corpus_version = active`.** Security review sec-F5 (1.4) flagged that filtering by the active version tag turned a partial re-seed into silent invisibility of every clause under a missing fixture. The API filters by `superseded_by IS NULL` so old fixtures stay readable; partial re-seed requires `--allow-statute-removal` from the operator.
+- **Search FTS column is licence-aware.** Security review sec-F6 (1.4): `search_tsv` now builds from `(heading, citation, body_summary)` for `body_kind='summary'` rows and `(heading, citation, body)` for `full_text` — preventing the verbatim third-party text from becoming a search oracle when the projection layer redacts the body.
+- **Statute UPDATE guard.** Security review sec-F2 (1.4): a Postgres trigger on `statutes` blocks any UPDATE that flips `licence` to non-`crown_copyright_open` while `clauses.body_kind='full_text'` rows depend on the statute. Closes the bypass path the original `clauses`-only trigger missed.
+
 ## Compliance check
 
 - [x] Aligns with `.context/constraints.md` — no cross-border transfer, no new subprocessor; Ontario residency unchanged.
-- [ ] Threat model updated — **follow-up: threat-modeler appends SECURITY.md §2.4 "Corpus integrity" with T-LC1..T-LCn (wrong clause served, FTS index poison, hash-anchor mismatch on recommendation read).**
+- [x] Threat model updated — SECURITY.md §2.4 T-LC1..T-LC8 (corpus-integrity threats + mitigations) landed in the architect+threat-modeler commit.
 - [x] No new subprocessor (statute URLs link out; no scraping).
 - [x] CLAUDE.md §"Legal Reference Module Rules" honored end-to-end.
 

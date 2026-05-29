@@ -39,7 +39,10 @@ export interface LegalSearchHit {
 }
 
 async function json<T>(path: string): Promise<T> {
-  const res = await fetch(`${BASE}${path}`, { credentials: 'same-origin' });
+  // priv-F6: /api/legal is intentionally public; we don't want the auth
+  // cookies riding these requests where they have no effect but show up
+  // in any header capture downstream of the request pipeline.
+  const res = await fetch(`${BASE}${path}`, { credentials: 'omit' });
   if (!res.ok) {
     throw new Error(`legal api ${res.status}: ${path}`);
   }

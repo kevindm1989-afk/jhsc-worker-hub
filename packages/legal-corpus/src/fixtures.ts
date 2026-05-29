@@ -16,13 +16,26 @@ const httpsUrl = z
   .url()
   .refine((u) => u.startsWith('https://'), 'source_url must be https://');
 
+// Reject `<` `>` in any text field that flows into the FTS search snippet
+// (heading, body, body_summary). ts_headline echoes its input verbatim
+// around the <mark>...</mark> tags it injects; without this guard, a
+// fixture author could land a body containing `<script>` and the server
+// would emit it inside the snippet HTML. The web renderer parses on
+// `<mark>` markers and treats everything else as text, so this guard is
+// defence-in-depth -- both layers have to fail for XSS to land.
+// Closes sec-review F1.
+const fixtureText = z
+  .string()
+  .min(1)
+  .refine((s) => !/[<>]/.test(s), 'text fields must not contain `<` or `>`');
+
 export const clauseFixtureSchema = z
   .object({
     citation: z.string().min(1),
     hierarchy_path: z.array(z.string().min(1)).min(1),
-    heading: z.string().min(1).optional(),
-    body: z.string().min(1),
-    body_summary: z.string().min(1).optional(),
+    heading: fixtureText.optional(),
+    body: fixtureText,
+    body_summary: fixtureText.optional(),
     body_kind: z.enum(clauseBodyKind),
     version_date: versionDateSchema,
     verified_by: z.string().min(1),

@@ -66,6 +66,42 @@ describe('statuteFixtureSchema', () => {
     };
     expect(statuteFixtureSchema.safeParse(bad).success).toBe(false);
   });
+
+  // sec-F1 XSS guard: text fields must not carry `<` `>` so a fixture
+  // author can't smuggle markup that ts_headline echoes verbatim into
+  // the search snippet.
+  it('rejects a body containing `<`', () => {
+    const bad: StatuteFixture = {
+      ...ohsa,
+      clauses: [{ ...ohsa.clauses[0]!, body: 'foo <script>x</script> bar' }],
+    };
+    expect(statuteFixtureSchema.safeParse(bad).success).toBe(false);
+  });
+
+  it('rejects a heading containing `>`', () => {
+    const bad: StatuteFixture = {
+      ...ohsa,
+      clauses: [{ ...ohsa.clauses[0]!, heading: 'A > B' }],
+    };
+    expect(statuteFixtureSchema.safeParse(bad).success).toBe(false);
+  });
+
+  it('rejects a body_summary containing `<`', () => {
+    const bad: StatuteFixture = {
+      ...ohsa,
+      licence: 'third_party_restricted',
+      source_url: 'https://example.org/x',
+      clauses: [
+        {
+          ...ohsa.clauses[0]!,
+          body_kind: 'summary',
+          body: 'paraphrase',
+          body_summary: 'a <b> tag is here',
+        },
+      ],
+    };
+    expect(statuteFixtureSchema.safeParse(bad).success).toBe(false);
+  });
 });
 
 describe('checkCopyrightGuard (T-LC4)', () => {
