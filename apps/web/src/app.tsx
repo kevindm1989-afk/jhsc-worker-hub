@@ -6,6 +6,7 @@ import { AuthRouter } from './auth/route-guard';
 import { StepUpModal } from './auth/step-up-modal';
 import { HazardsView } from './views/hazards-view';
 import { InspectionsView } from './views/inspections-view';
+import { LegalView } from './views/legal-view';
 import { MinutesView } from './views/minutes-view';
 import { MoreView } from './views/more-view';
 import { RecommendationsView } from './views/recommendations-view';
@@ -37,6 +38,7 @@ export function App(): JSX.Element {
                 <Route path="/inspections" element={<InspectionsView />} />
                 <Route path="/recommendations" element={<RecommendationsView />} />
                 <Route path="/more" element={<MoreView />} />
+                <Route path="/legal" element={<LegalView />} />
                 <Route path="/account/security" element={<SecurityView />} />
                 <Route path="*" element={<Navigate to="/minutes" replace />} />
               </Routes>

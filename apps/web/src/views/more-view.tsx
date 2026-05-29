@@ -45,9 +45,10 @@ const ITEMS: readonly MoreItem[] = [
   {
     id: 'legal',
     label: 'Legal Reference',
-    desc: 'OHSA, CLC Part II, CSA standards',
+    desc: 'OHSA, O. Reg. 851, CLC Part II, COHSR — full text + search',
     icon: BookOpen,
-    milestone: 'Lands in Milestone 1.4',
+    milestone: 'Milestone 1.4',
+    href: '/legal',
   },
   {
     id: 'calculators',
