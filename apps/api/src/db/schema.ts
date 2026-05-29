@@ -304,6 +304,16 @@ export const authEvents = pgTable(
 );
 
 // ---------------------------------------------------------------------------
+// Audit chain (1.3+, packages/@jhsc/audit)
+// ---------------------------------------------------------------------------
+
+// Re-export so drizzle-kit picks up `audit_log` when generating
+// migrations from this file. The canonical definition lives in
+// `packages/audit/src/schema.ts`.
+export { auditLog } from '@jhsc/audit';
+import { auditLog } from '@jhsc/audit';
+
+// ---------------------------------------------------------------------------
 // Re-export for Drizzle adapters
 // ---------------------------------------------------------------------------
 
@@ -319,6 +329,7 @@ export const schema = {
   setupState,
   webauthnChallenges,
   authEvents,
+  auditLog,
   loginAttemptOutcome,
   authEventKind,
   webauthnPurpose,

@@ -14,6 +14,7 @@
     "db:migrate": "drizzle-kit migrate"
   },
   "dependencies": {
+    "@jhsc/audit": "workspace:*",
     "@jhsc/crypto": "workspace:*",
     "@jhsc/shared-types": "workspace:*",
     "@lucia-auth/adapter-drizzle": "^1.1.0",

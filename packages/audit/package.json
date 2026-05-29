@@ -1,0 +1,33 @@
+{
+  "name": "@jhsc/audit",
+  "version": "0.0.0",
+  "private": true,
+  "description": "JHSC Worker Hub — tamper-evident hash-chain audit log (ADR-0002).",
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./src/index.ts",
+      "default": "./src/index.ts"
+    },
+    "./schema": {
+      "types": "./src/schema.ts",
+      "default": "./src/schema.ts"
+    },
+    "./canonical-json": {
+      "types": "./src/canonical-json.ts",
+      "default": "./src/canonical-json.ts"
+    }
+  },
+  "scripts": {
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@jhsc/shared-types": "workspace:*",
+    "drizzle-orm": "^0.45.2"
+  },
+  "devDependencies": {
+    "typescript": "^5.7.2",
+    "vitest": "^3.2.4"
+  }
+}
