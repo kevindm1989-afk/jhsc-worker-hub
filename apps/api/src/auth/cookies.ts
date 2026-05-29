@@ -41,6 +41,19 @@ export function setAuthCookies(c: Context, tokens: IssuedTokens): void {
 }
 
 export function clearAuthCookies(c: Context): void {
-  deleteCookie(c, ACCESS_COOKIE, { path: '/' });
-  deleteCookie(c, REFRESH_COOKIE, { path: '/api/auth' });
+  // Hono's deleteCookie just emits a Max-Age=0 Set-Cookie; the __Host-
+  // and __Secure- prefixes still require Secure to be set, so we pass
+  // the same flag set the issue path used.
+  deleteCookie(c, ACCESS_COOKIE, {
+    path: '/',
+    secure: true,
+    httpOnly: true,
+    sameSite: 'Strict',
+  });
+  deleteCookie(c, REFRESH_COOKIE, {
+    path: '/api/auth',
+    secure: true,
+    httpOnly: true,
+    sameSite: 'Strict',
+  });
 }

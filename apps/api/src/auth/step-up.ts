@@ -16,8 +16,12 @@ import type { Context, MiddlewareHandler } from 'hono';
 import { getCookie } from 'hono/cookie';
 import { validateAccess, type ValidatedAccess } from './session';
 
+// __Host- forces Path=/ at the browser layer; the access cookie wants
+// site-wide coverage so it qualifies. Refresh is path-scoped to
+// /api/auth, which the __Host- prefix would reject, so it uses
+// __Secure- — same Secure-only guarantee without the Path=/ constraint.
 export const ACCESS_COOKIE = '__Host-access';
-export const REFRESH_COOKIE = '__Host-refresh';
+export const REFRESH_COOKIE = '__Secure-refresh';
 
 declare module 'hono' {
   // Augment Hono's variables so c.get('auth') is typed everywhere.
