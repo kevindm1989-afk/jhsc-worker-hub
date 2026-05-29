@@ -3,6 +3,7 @@ import { AppShell } from './components/app-shell/app-shell';
 import { ThemeProvider } from './components/theme-provider';
 import { AuthProvider } from './auth/auth-context';
 import { AuthRouter } from './auth/route-guard';
+import { StepUpModal } from './auth/step-up-modal';
 import { HazardsView } from './views/hazards-view';
 import { InspectionsView } from './views/inspections-view';
 import { MinutesView } from './views/minutes-view';
@@ -40,6 +41,8 @@ export function App(): JSX.Element {
                 <Route path="*" element={<Navigate to="/minutes" replace />} />
               </Routes>
             </AppShell>
+            {/* Global modal — listens for 401-StepUp responses. */}
+            <StepUpModal />
           </AuthRouter>
         </AuthProvider>
       </BrowserRouter>

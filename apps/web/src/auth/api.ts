@@ -227,4 +227,13 @@ export const api = {
         body,
       }),
   },
+  totp: {
+    resetStart: () =>
+      call<{ provisioning: string; totpUri: string; totpSecretB32: string }>(
+        '/auth/totp/reset-start',
+        { method: 'POST' },
+      ),
+    resetConfirm: (body: { provisioning: string; totpCode: string }) =>
+      call<{ ok: boolean }>('/auth/totp/reset-confirm', { method: 'POST', body }),
+  },
 };
