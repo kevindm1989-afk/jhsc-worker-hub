@@ -314,6 +314,13 @@ export { auditLog } from '@jhsc/audit';
 import { auditLog } from '@jhsc/audit';
 
 // ---------------------------------------------------------------------------
+// Legal corpus (1.4, packages/@jhsc/legal-corpus)
+// ---------------------------------------------------------------------------
+
+export { clauses, corpusVersions, statutes } from '@jhsc/legal-corpus';
+import { clauses, corpusVersions, statutes } from '@jhsc/legal-corpus';
+
+// ---------------------------------------------------------------------------
 // Re-export for Drizzle adapters
 // ---------------------------------------------------------------------------
 
@@ -330,6 +337,9 @@ export const schema = {
   webauthnChallenges,
   authEvents,
   auditLog,
+  corpusVersions,
+  statutes,
+  clauses,
   loginAttemptOutcome,
   authEventKind,
   webauthnPurpose,

@@ -1,0 +1,62 @@
+# Industrial Establishments, R.R.O. 1990, Reg. 851
+#
+# Crown copyright (Ontario). The regulation covers the general
+# duties for industrial workplaces — guarding, housekeeping, PPE,
+# lockout. We seed the JHSC-relevant procedural sections plus the
+# high-traffic safety provisions cited in committee recommendations.
+
+code = "O.REG.851"
+jurisdiction = "ON"
+title = "R.R.O. 1990, Reg. 851: Industrial Establishments"
+licence = "crown_copyright_open"
+source_url = "https://www.ontario.ca/laws/regulation/900851"
+
+[[clauses]]
+citation = "s.11"
+hierarchy_path = ["Industrial Establishments", "Lighting", "s.11"]
+heading = "Lighting"
+body = "Lighting at a workplace shall be sufficient so that work may be performed safely."
+body_kind = "full_text"
+version_date = "2020-07-01"
+verified_by = "kdm"
+source_url = "https://www.ontario.ca/laws/regulation/900851#BK10"
+
+[[clauses]]
+citation = "s.13"
+hierarchy_path = ["Industrial Establishments", "Housekeeping", "s.13"]
+heading = "Housekeeping"
+body = "The workplace shall be kept clean and free of obstructions and slipping or tripping hazards."
+body_kind = "full_text"
+version_date = "2020-07-01"
+verified_by = "kdm"
+source_url = "https://www.ontario.ca/laws/regulation/900851#BK12"
+
+[[clauses]]
+citation = "s.42"
+hierarchy_path = ["Industrial Establishments", "Industrial Hygiene", "s.42"]
+heading = "Lockout"
+body = "Where the starting of a machine, transmission machinery, device or thing may endanger the safety of any worker, control switches or other control mechanisms shall be locked out and other effective precautions necessary to prevent any starting shall be taken."
+body_kind = "full_text"
+version_date = "2020-07-01"
+verified_by = "kdm"
+source_url = "https://www.ontario.ca/laws/regulation/900851#BK41"
+
+[[clauses]]
+citation = "s.79"
+hierarchy_path = ["Industrial Establishments", "Personal Protective Equipment", "s.79"]
+heading = "Personal protective equipment"
+body = "A worker exposed to the hazard of head injury shall wear head protection appropriate in the circumstances."
+body_kind = "full_text"
+version_date = "2020-07-01"
+verified_by = "kdm"
+source_url = "https://www.ontario.ca/laws/regulation/900851#BK78"
+
+[[clauses]]
+citation = "s.81"
+hierarchy_path = ["Industrial Establishments", "Personal Protective Equipment", "s.81"]
+heading = "Eye protection"
+body = "A worker exposed to the hazard of eye injury shall wear eye protection appropriate in the circumstances."
+body_kind = "full_text"
+version_date = "2020-07-01"
+verified_by = "kdm"
+source_url = "https://www.ontario.ca/laws/regulation/900851#BK80"

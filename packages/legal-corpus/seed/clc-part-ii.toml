@@ -1,0 +1,52 @@
+# Canada Labour Code, R.S.C. 1985, c. L-2, Part II
+#
+# Federal jurisdiction. Crown copyright (Canada), open licence (laws.justice.gc.ca).
+# Covers federally-regulated workplaces (banks, telecoms, interprovincial
+# transport). Mirrors OHSA's JHSC structure with the "policy committee" /
+# "workplace committee" split.
+
+code = "CLC-II"
+jurisdiction = "CA"
+title = "Canada Labour Code, R.S.C. 1985, c. L-2, Part II"
+licence = "crown_copyright_open"
+source_url = "https://laws-lois.justice.gc.ca/eng/acts/L-2/"
+
+[[clauses]]
+citation = "s.124"
+hierarchy_path = ["Part II", "General Duties", "s.124"]
+heading = "General duty of employer"
+body = "Every employer shall ensure that the health and safety at work of every person employed by the employer is protected."
+body_kind = "full_text"
+version_date = "2020-07-01"
+verified_by = "kdm"
+source_url = "https://laws-lois.justice.gc.ca/eng/acts/L-2/section-124.html"
+
+[[clauses]]
+citation = "s.125(1)(z.07)"
+hierarchy_path = ["Part II", "Specific Duties of Employer", "s.125", "(1)", "(z.07)"]
+heading = "Specific duties — work place committee"
+body = "Without restricting the generality of section 124, every employer shall, in respect of every work place controlled by the employer and, in respect of every work activity carried out by an employee in a work place that is not controlled by the employer, to the extent that the employer controls the activity, cooperate with the policy and work place committees or the health and safety representative in the execution of their duties under this Part."
+body_kind = "full_text"
+version_date = "2020-07-01"
+verified_by = "kdm"
+source_url = "https://laws-lois.justice.gc.ca/eng/acts/L-2/section-125.html"
+
+[[clauses]]
+citation = "s.135(7)"
+hierarchy_path = ["Part II", "Work Place Committees", "s.135", "(7)"]
+heading = "Duties of work place committee"
+body = "A work place committee, in respect of the work place for which it is established, shall consider and expeditiously dispose of complaints relating to the health and safety of employees; participate in the implementation and monitoring of a program for the prevention of hazards in the work place; where there is no policy committee, participate in the development, implementation and monitoring of a program for the prevention of hazards in the work place; where there is no policy committee, participate in the development, implementation and monitoring of programs to prevent hazards in the work place; participate in the development, implementation and monitoring of changes that might affect occupational health and safety, including work processes and procedures; participate in the development, implementation and monitoring of a program for the provision of personal protective equipment, clothing, devices or materials; participate in inquiries, investigations, studies and inspections pertaining to the health and safety of employees, including any consultations that may be necessary with persons who are professionally or technically qualified to advise the committee on those matters; participate in the implementation and monitoring of programs for the provision of personal protective equipment, clothing, devices or materials; cooperate with the Accident Investigation and Prevention Service; participate in the implementation of changes that might affect occupational health and safety, including work processes and procedures; inspect each month all or part of the work place, so that every part of the work place is inspected at least once each year; participate in the development of health and safety policies and programs; monitor data relating to occupational health and safety; and maintain records pertaining to the disposition of complaints and the implementation of recommendations."
+body_kind = "full_text"
+version_date = "2020-07-01"
+verified_by = "kdm"
+source_url = "https://laws-lois.justice.gc.ca/eng/acts/L-2/section-135.html"
+
+[[clauses]]
+citation = "s.128(1)"
+hierarchy_path = ["Part II", "Internal Complaint Resolution", "s.128", "(1)"]
+heading = "Refusal to work if danger"
+body = "Subject to this section, an employee may refuse to use or operate a machine or thing, to work in a place or to perform an activity, if the employee while at work has reasonable cause to believe that the use or operation of the machine or thing constitutes a danger to the employee or to another employee; a condition exists in the place that constitutes a danger to the employee; or the performance of the activity constitutes a danger to the employee or to another employee."
+body_kind = "full_text"
+version_date = "2020-07-01"
+verified_by = "kdm"
+source_url = "https://laws-lois.justice.gc.ca/eng/acts/L-2/section-128.html"

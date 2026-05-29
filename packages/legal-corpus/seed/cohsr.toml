@@ -1,0 +1,41 @@
+# Canada Occupational Health and Safety Regulations, SOR/86-304
+#
+# Federal regulation under CLC Part II. Crown copyright (Canada), open
+# licence (laws.justice.gc.ca). Seeds the high-traffic procedural and
+# PPE sections.
+
+code = "COHSR"
+jurisdiction = "CA"
+title = "Canada Occupational Health and Safety Regulations, SOR/86-304"
+licence = "crown_copyright_open"
+source_url = "https://laws-lois.justice.gc.ca/eng/regulations/sor-86-304/"
+
+[[clauses]]
+citation = "s.12.1"
+hierarchy_path = ["Part XII", "Safety Materials, Equipment, Devices and Clothing", "s.12.1"]
+heading = "Application of Part XII"
+body = "This Part does not apply in respect of employees on board ships, trains or aircraft, where the safety of the ship, train or aircraft is governed by an Act of Parliament."
+body_kind = "full_text"
+version_date = "2020-07-01"
+verified_by = "kdm"
+source_url = "https://laws-lois.justice.gc.ca/eng/regulations/sor-86-304/section-12.1.html"
+
+[[clauses]]
+citation = "s.12.2"
+hierarchy_path = ["Part XII", "Safety Materials, Equipment, Devices and Clothing", "s.12.2"]
+heading = "General duty — protective equipment"
+body = "Where it is not reasonably practicable to eliminate or control a safety or health hazard in a work place within safe limits and where the use of protection equipment may prevent or reduce injury from that hazard, every person granted access to the work place who is exposed to that hazard shall use the protection equipment prescribed by this Part."
+body_kind = "full_text"
+version_date = "2020-07-01"
+verified_by = "kdm"
+source_url = "https://laws-lois.justice.gc.ca/eng/regulations/sor-86-304/section-12.2.html"
+
+[[clauses]]
+citation = "s.14.46"
+hierarchy_path = ["Part XIV", "Materials Handling", "s.14.46"]
+heading = "Inspection and maintenance — materials handling equipment"
+body = "Every employer shall ensure that, before a materials handling equipment is used by an employee in a work place, every part of the equipment is inspected and tested in accordance with the manufacturer's specifications, the standard to which it was designed and manufactured, and any applicable provision of this Part."
+body_kind = "full_text"
+version_date = "2020-07-01"
+verified_by = "kdm"
+source_url = "https://laws-lois.justice.gc.ca/eng/regulations/sor-86-304/section-14.46.html"

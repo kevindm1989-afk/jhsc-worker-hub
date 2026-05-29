@@ -13,6 +13,9 @@ export function hasDb(): boolean {
 }
 
 const TABLES_TO_TRUNCATE = [
+  'clauses',
+  'statutes',
+  'corpus_versions',
   'audit_log',
   'auth_events',
   'login_attempts',
