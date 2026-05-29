@@ -43,6 +43,16 @@ The locked tech stack and non-negotiables in `CLAUDE.md` are the canonical proje
 - **Alternatives ruled out:** Substrate-first (the retracted entry) — defensible on security grounds, but rewriting the ROADMAP sequencing belongs to a ROADMAP edit + approval cycle, not a `.context/` ledger entry that hides the change.
 - **ADR:** none. The previous "pending ADR 0001-security-substrate-first" is cancelled. If, when 1.3 lands, the genesis-backfill design needs an ADR, the architect will draft one then.
 
+## 2026-05-29 — Milestone 1.3: production XChaCha20-Poly1305 envelope + tamper-evident audit chain
+
+- **Decision:** Land `packages/shared-types`, `packages/crypto`, `packages/audit` per ADR-0002. `packages/crypto` adds the wire-format v=0x02 (XChaCha20-Poly1305) writer + v=0x01 backward-read + lazy `rewrap()` migration. Envelope encryption (per-record DEK sealed by workplace KEK) lands for heavyweight tables (1.5+); auth-surface tables stay on the single-key path. `packages/audit` provides hash-chained `append()` and `verify()`. The `audit_log` migration preseeds genesis (idx=0) and the 1.2 `auth_events` backfill anchor (idx=1) so the chain is verifiable from the first deploy of 1.3.
+- **Why:** Closes CLAUDE.md non-negotiables #2 (tamper-evident logging) and #4 (encryption with operator-controlled keys), retires the 1.2 crypto stub on the documented version-byte path, and locks the 1.2 auth_events table into the chain by hash — addressing the Slice 9 reviewers' "documented residual" on the 1.2 → 1.3 audit gap.
+- **Also closes:** security-reviewer F6 (multi-kid JWT verifier via kid-suffix env-var registry), runbook §4-step-3 gap (TOTP reset endpoint + UI), and the step-up modal that was deferred from Slice 6 (lands as a side effect of TOTP-reset's step-up requirement).
+- **Alternatives ruled out:**
+  - Single `packages/security` bundling crypto + audit — conflates two review surfaces with different protocols; legal-corpus (1.4) would pull a security blob it doesn't need.
+  - Stay inline in `apps/api` — violates CLAUDE.md's "shared-types/crypto/audit are packages" lock and forces the AI proxy (3.2) to duplicate the primitives.
+- **ADR:** [`docs/adr/0002-encryption-and-audit-chain.md`](../docs/adr/0002-encryption-and-audit-chain.md).
+
 ## 2026-05-29 — Defer per-IP auth rate-limit middleware (security-reviewer F3)
 
 - **Decision:** Ship Milestone 1.2 without the SECURITY.md §3 "10 req/min/IP on auth endpoints" rate-limit middleware. Track as a Milestone 1.12 (Release 1 Hardening) follow-up.

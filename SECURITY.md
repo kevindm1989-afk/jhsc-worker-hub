@@ -107,6 +107,31 @@ No PI in transit beyond what the rep types (email at first-run, optional display
 - **API ↔ Postgres:** API-side validates and authorizes every query; the DB role used by `apps/api` cannot read `auth_events` from a non-API session (enforced by row-level controls + a separate read-only role for the audit-verify script in 1.3).
 - **API ↔ Fly Secrets:** read-only; the API never writes secrets. Secrets never appear in logs (the Pino redactor's allowlist already strips known secret keys; an additional regex catches `AUTH_JWT_*` and `MASTER_KEY`).
 
+### 2.2 Audit-chain and crypto threats (Milestone 1.3)
+
+Threats specific to the `packages/audit` tamper-evident chain and the `packages/crypto` wire format introduced in 1.3 (per ADR-0002).
+
+| # | Threat | Adversary | Mitigation in 1.3 | Residual risk |
+|---|---|---|---|---|
+| T-AC1 | Tampered `audit_log` row body | Insider / compelled disclosure | `this_hash` covers every column in canonical-JSON order via SHA-256(`prev_hash || canonical_json(headers + payload)`). `scripts/audit-log-verify.ts` recomputes the full chain nightly via cron + on-demand via runbook §7. | Tamper is detected, not prevented; runbook §7 covers the response. |
+| T-AC2 | Inserted "phantom" row breaks the chain | Insider / compelled disclosure | Every row's `prev_hash` is the previous row's `this_hash`. A row inserted out of band by SQL would have `prev_hash` matching its real predecessor and `this_hash` self-consistent for its own body, but the row AFTER it (next legit `append()`) would compute `prev_hash` from the phantom's `this_hash` and the chain integrity holds — except that `verify()` walks `idx` order and the phantom's `idx` must fit. A phantom with no later legit appends is detected by the next nightly verify when the table is empty downstream. | A clever insider could replace ALL downstream rows AND the phantom; mitigated only by off-host archival (1.3 §3a + 1.12 hardening). |
+| T-AC3 | Gap (missing `idx`) | Insider / DB corruption | `idx` is `bigint primary key`, monotonic. `verify()` walks `idx ASC` and reports a gap as `firstDivergence`. Gaps are not crashes — operations continue but verify reports tamper, triggering runbook §7. | None at the application layer. |
+| T-AC4 | Race between concurrent `append()` calls | n/a (operational) | `append()` runs `SELECT … ORDER BY idx DESC LIMIT 1 FOR UPDATE` inside the transaction, serializing appenders. Throughput is single-machine — fine for single-tenant. | Multi-rep concurrent writes (a future scope) would need an advisory lock or a single appender process. Documented in ADR-0002. |
+| T-AC5 | Genesis-row replacement | Compromised migration | `idx=0` is inserted by the migration in an idempotent script that fails if `idx=0` already exists. `prev_hash` for genesis is `\x00 × 32`; `verify()` requires this at chain start. Replacement of genesis requires admin access AND would invalidate every subsequent `this_hash`. | None at the application layer. |
+| T-AC6 | 1.2 → 1.3 backfill anchor tamper | Insider / compelled disclosure | Anchor row at `idx=1` carries `rows_sha256` over the canonical JSON of `auth_events` in `(ts, id)` order. A re-run of `verify()` recomputes that SHA-256 from the live `auth_events` and matches it. Tampering `auth_events` rows post-1.3 is detected at next verify. | Tamper between the 1.3 deploy and the first nightly verify is possible — narrow window, accepted. |
+| T-AC7 | Crypto stub forward-read on a v=0x02 ciphertext | Misconfigured rollback | `open()` rejects unknown version bytes with `CryptoOpenError(unsupported_version)`. A rollback that re-runs 1.2 binaries against 1.3-written rows fails loud, not silent. | A rollback strategy must be paired with a re-encrypt-to-v0x01 dump — but rolling back from 1.3 to 1.2 is not supported anyway. |
+| T-AC8 | KEK leak via subprocess argv | Operational | The new master-key rotation runbook (§3a) uses Fly Secrets only; the KEK never appears in argv to any rotation script. `packages/crypto` takes a `KeyProvider` interface so neither tests nor scripts need to env-read directly. | Operator error remains the residual; runbook calls it out. |
+| T-AC9 | Payload PI leak | Implementer error | `packages/shared-types` exports per-`kind` discriminated unions for audit payloads. PI fields (email, displayName, plaintext body) are not declared on any union — the typechecker rejects them at every `append()` site. Runtime safety net: a JSON-schema reject layer (1.12 hardening) backs up the type-only check. | Without the runtime check (deferred to 1.12) a `kind` not yet typed could pass a PI string; type discipline catches the common case. |
+| T-AC10 | Multi-kid JWT verifier rejects valid token at rotation | Operational | The kid registry accepts `legacy` for tokens without a kid suffix (1.2-compat). Rotation runbook §3 sequences `flyctl secrets set` for the new kid BEFORE flipping `AUTH_JWT_ACTIVE_KID`. | A misconfigured rotation that forgets the new public key still rejects in-flight tokens. Documented. |
+
+### 2.3 Auth + crypto-chain integration threats
+
+| # | Threat | Mitigation | Residual |
+|---|---|---|---|
+| T-AI1 | TOTP reset endpoint abused to reset a victim's TOTP | TOTP reset is step-up-gated. Step-up requires either passkey or current TOTP. The attacker would need to already control one of these factors. | None material. |
+| T-AI2 | Step-up modal bypass | Modal opens on a 401-StepUp from `stepUpEmitter`. Server is the source of truth; modal cannot self-claim grant. Server re-issues the access JWT with `step_up_until` claim only after a verified factor. | None material. |
+| T-AI3 | KEK rotation while sessions are live | Session refresh re-derives email lookup hashes from the NEW KEK. Tokens issued before rotation continue to validate (access JWT signing keys are independent); first refresh after rotation pins the new KEK. Runbook §3a sequences rotation during a low-traffic window. | Sessions issued just before rotation may see one transient lookup failure during the rotation window. Acceptable; documented. |
+
 ---
 
 ## 3. Security Controls
