@@ -1,24 +1,36 @@
 #!/usr/bin/env bun
 // Admin CLI for the auth runbook (docs/runbooks/auth.md).
 //
-// Subcommands:
-//   --check       --email <addr>
-//        Report the current lockout state for an identifier (without
-//        touching the table).
-//   --unlock      --email <addr> --reason <text> --operator <text>
-//        Clear the hard-tier failure rows for an identifier and emit a
-//        `lockout.cleared` audit event.
-//   --logout-all  --email <addr> --reason <text> --operator <text>
-//        Delete every sessions row for the user and emit a
-//        `session.revoked` audit event (scope=all).
-//   --lookup-hash --email <addr>
-//        Print the BLAKE2b email lookup hash (hex) so the operator can
-//        cross-reference user_profiles without decrypting columns.
+// Identity selection — pass ONE of:
+//   --email-from-stdin            Reads the email on stdin (prompt
+//                                 silently with `read`, never lands in
+//                                 argv / ps / shell history).
+//   --identifier-hash <hex>       Skips identity collection entirely;
+//                                 use this when the operator computed
+//                                 the keyed BLAKE2b hash on a separate
+//                                 workstation via --lookup-hash.
 //
-// All actions write to `auth_events` with metadata-only context
-// (operator, reason, scope) — never PI. PI columns stay encrypted.
+// Subcommands (exactly one):
+//   --check
+//        Report current lockout state (no DB write).
+//   --unlock      --reason <text> --operator <text>
+//        Clear hard-tier failure rows for the identifier and emit
+//        `lockout.cleared` into auth_events (metadata only).
+//   --logout-all  --reason <text> --operator <text>
+//        Resolve the user via the lookup hash, delete every sessions
+//        row, emit `session.revoked` (scope=all).
+//   --lookup-hash
+//        Print the BLAKE2b email lookup hash (hex). Use this on a
+//        workstation OUTSIDE production to avoid landing the
+//        plaintext email anywhere indexable.
+//
+// Security note (privacy-reviewer F1, security-reviewer F8):
+// `--email <addr>` is intentionally NOT accepted. Process argv is
+// observable to other UIDs via `ps`, captured by Fly Machine start
+// logs, and lands in shell history. Read stdin or pass the hash.
 
 import { and, eq, gte } from 'drizzle-orm';
+import { createInterface } from 'node:readline';
 import { initCrypto } from '../src/auth/crypto-stub';
 import { emitAuthEvent } from '../src/auth/events';
 import { lookupHashForEmail } from '../src/auth/identifier';
@@ -31,7 +43,8 @@ interface Flags {
   readonly unlock: boolean;
   readonly logoutAll: boolean;
   readonly lookupHash: boolean;
-  readonly email?: string;
+  readonly emailFromStdin: boolean;
+  readonly identifierHashHex?: string;
   readonly reason?: string;
   readonly operator?: string;
 }
@@ -47,7 +60,8 @@ function parseArgs(argv: ReadonlyArray<string>): Flags {
     unlock: argv.includes('--unlock'),
     logoutAll: argv.includes('--logout-all'),
     lookupHash: argv.includes('--lookup-hash'),
-    email: get('email'),
+    emailFromStdin: argv.includes('--email-from-stdin'),
+    identifierHashHex: get('identifier-hash'),
     reason: get('reason'),
     operator: get('operator'),
   };
@@ -62,19 +76,50 @@ function toHex(b: Uint8Array): string {
   return Buffer.from(b).toString('hex');
 }
 
+function fromHex(hex: string): Uint8Array {
+  if (!/^[0-9a-fA-F]+$/.test(hex) || hex.length % 2 !== 0) {
+    fail('--identifier-hash must be an even-length hex string');
+  }
+  return new Uint8Array(Buffer.from(hex, 'hex'));
+}
+
+function readLineSilent(prompt: string): Promise<string> {
+  return new Promise((resolve) => {
+    const rl = createInterface({ input: process.stdin, output: process.stderr, terminal: true });
+    // stderr-side prompt so a future `| tee` capture of stdout does not
+    // catch the prompt string.
+    rl.question(prompt, (answer) => {
+      rl.close();
+      resolve(answer.trim());
+    });
+  });
+}
+
+async function resolveIdentifierHash(flags: Flags): Promise<Uint8Array> {
+  if (flags.identifierHashHex) {
+    return fromHex(flags.identifierHashHex);
+  }
+  if (!flags.emailFromStdin) {
+    fail('one of --email-from-stdin or --identifier-hash is required');
+  }
+  const email = await readLineSilent('rep email (will not echo to history): ');
+  if (email.length === 0) fail('email is empty');
+  await initCrypto();
+  return lookupHashForEmail(email);
+}
+
 async function main(): Promise<void> {
   const flags = parseArgs(process.argv.slice(2));
   const actions = [flags.check, flags.unlock, flags.logoutAll, flags.lookupHash].filter(Boolean);
   if (actions.length !== 1) {
     fail('exactly one of --check, --unlock, --logout-all, --lookup-hash is required');
   }
-  if (!flags.email) fail('--email is required');
   if ((flags.unlock || flags.logoutAll) && (!flags.reason || !flags.operator)) {
     fail('--reason and --operator are required for write actions');
   }
 
   await initCrypto();
-  const identifierHash = await lookupHashForEmail(flags.email);
+  const identifierHash = await resolveIdentifierHash(flags);
   process.stdout.write(`identifier_hash: ${toHex(identifierHash)}\n`);
 
   if (flags.lookupHash) {
@@ -139,8 +184,6 @@ async function main(): Promise<void> {
   }
 
   if (flags.logoutAll) {
-    // Resolve the user via the keyed lookup hash so PI never lands in
-    // argv (and the SQL query has no plaintext email either).
     const userRows = await db
       .select({ userId: userProfiles.userId })
       .from(userProfiles)
@@ -148,7 +191,7 @@ async function main(): Promise<void> {
       .limit(1);
     const userId = userRows[0]?.userId;
     if (!userId) {
-      fail('no user matches that email');
+      fail('no user matches that identifier');
     }
     const removed = await db
       .delete(sessions)
@@ -168,8 +211,6 @@ async function main(): Promise<void> {
     process.exit(0);
   }
 
-  // Suppress "value never used" warnings on the schema imports during
-  // typecheck if a code path is later removed.
   void authEvents;
 }
 

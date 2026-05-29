@@ -49,24 +49,39 @@ If the second call does **not** 404, the singleton was not flipped and the gate 
    ```sh
    # Use the rep's email as input. The script hashes it with the master
    # key the same way the auth path does; only the hash hits the table.
-   bun run /app/apps/api/scripts/auth-unlock.ts --check --email cochair@workplace.invalid
+   bun run /app/apps/api/scripts/auth-unlock.ts --check --email-from-stdin
    ```
-   Output:
-   ```
-   identifier_hash: <hex>
-   failures in the last 24h: 23
-   tier: hard
-   action required: confirm with the rep, then run --unlock
-   ```
+
+# (paste the rep's email at the silent prompt — never typed in argv)
+
+```
+Output:
+```
+
+identifier_hash: <hex>
+failures in the last 24h: 23
+tier: hard
+action required: confirm with the rep, then run --unlock
+
+````
 3. Clear the hard-tier failures only (short/long tiers self-clear in their windows):
-   ```sh
-   bun run /app/apps/api/scripts/auth-unlock.ts --unlock --email cochair@workplace.invalid \
-     --reason "phone-confirmed identity 2026-05-29 14:02 EDT" \
-     --operator "$(whoami)"
-   ```
-   The script:
-   - Deletes the failure rows in the hard-tier window for the identifier hash.
-   - Emits a `lockout.cleared` row into `auth_events` carrying the reason and operator strings (metadata only — no PI).
+```sh
+# Preferred: compute the hash on a separate workstation, then pass it.
+bun run /app/apps/api/scripts/auth-unlock.ts --unlock \
+  --identifier-hash 35e614f525803925f520750a5c8ca7467d395c848594c248d49caba74d800cfa \
+  --reason "phone-confirmed identity 2026-05-29 14:02 EDT" \
+  --operator "$(whoami)"
+# Or: read the email at a silent prompt (no argv exposure).
+bun run /app/apps/api/scripts/auth-unlock.ts --unlock --email-from-stdin \
+  --reason "phone-confirmed identity 2026-05-29 14:02 EDT" \
+  --operator "$(whoami)"
+````
+
+The script:
+
+- Deletes the failure rows in the hard-tier window for the identifier hash.
+- Emits a `lockout.cleared` row into `auth_events` carrying the reason and operator strings (metadata only — no PI).
+
 4. Tell the rep to try again. If they still see a 423/429, wait the short-tier window (15 min default) and they will recover automatically.
 
 **Do not** simply `DELETE FROM login_attempts` from a SQL console — the action would not be audit-logged, and you would lose the chain-of-custody evidence that the lockout was intentional.
@@ -125,7 +140,7 @@ Use case: lost device, suspected device compromise, suspected credential capture
 **From a CLI when the browser isn't available** (lost device path):
 
 ```sh
-bun run /app/apps/api/scripts/auth-unlock.ts --logout-all --email cochair@workplace.invalid \
+bun run /app/apps/api/scripts/auth-unlock.ts --logout-all --email-from-stdin \
   --reason "device lost 2026-05-29 09:15 EDT — reissue passkey on arrival" \
   --operator "$(whoami)"
 ```
@@ -139,6 +154,36 @@ If the device was lost **and** the password is suspected to be exposed, follow u
 3. (1.3+ scope) Reset the TOTP secret. Until 1.3 lands the rotation endpoint, the operator can DELETE FROM `totp_credentials` for the user and walk them back through the `/setup`-style enrollment via a future endpoint. Track this gap in `.context/decisions.md`.
 
 ---
+
+## 4a. Retention sweep
+
+Run nightly to keep `webauthn_challenges` and `login_attempts` from
+growing unboundedly. Both are operational tables — pruning them does
+not destroy audit evidence.
+
+```sh
+# Dry-run — print what would be deleted, write nothing.
+bun run /app/apps/api/scripts/auth-retention.ts
+
+# Apply the sweep. Output is one line per table; pair with `--quiet`
+# for a single syslog-friendly line when invoking from cron / pg-boss.
+bun run /app/apps/api/scripts/auth-retention.ts --apply
+bun run /app/apps/api/scripts/auth-retention.ts --apply --quiet
+```
+
+What it prunes:
+
+- `webauthn_challenges` past `expires_at + 1 hour` grace.
+- `login_attempts` older than `2 × AUTH_LOCKOUT_HARD_WINDOW_SECONDS`
+  (default ≈ 48 h). The lockout module only ever reads the most
+  recent hard-tier window; rows older than that have no operational
+  use.
+
+What it does NOT prune:
+
+- `auth_events` — pre-1.3 the flat audit table is the only
+  tamper-evident substitute for the to-be-chain. ADR-0001's 1.3
+  backfill anchor is the safe point to start culling.
 
 ## 5. Diagnostics: inspecting auth_events and login_attempts
 
@@ -172,7 +217,10 @@ LIMIT 50;
 **Never** decrypt sensitive columns from a SQL console. Email addresses live encrypted in `user_profiles.email_ciphertext`; the lookup hash exists precisely so audit queries don't need the plaintext. If you need to confirm an email matches a row, compute the lookup hash locally and compare:
 
 ```sh
-bun run /app/apps/api/scripts/auth-unlock.ts --lookup-hash --email cochair@workplace.invalid
+bun run /app/apps/api/scripts/auth-unlock.ts --lookup-hash --email-from-stdin
+# (paste the rep's email at the silent prompt; print the hash; never
+# typed in argv on the production host. Run this on a workstation OUTSIDE
+# production, then pass --identifier-hash to the production-side commands.)
 ```
 
 ---

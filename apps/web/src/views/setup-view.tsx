@@ -347,10 +347,11 @@ function DoneScreen({ onFinish }: { onFinish: () => Promise<void> }): JSX.Elemen
         Account → Security so you can sign in without typing your password.
       </p>
 
-      <div className="mt-6 rounded-md border border-status-info/30 bg-status-info/8 p-3 text-xs leading-relaxed text-status-info">
-        <strong>Recovery codes</strong> are issued from Account → Security on demand. We did not
-        generate any during setup; do it now if you want a backup before you rely on the
-        authenticator.
+      <div className="mt-6 rounded-md border border-status-pending/30 bg-status-pending/8 p-3 text-xs leading-relaxed">
+        <strong>Recovery codes are not yet available.</strong> The generation endpoint lands in
+        Release 1 alongside Account → Security polish. Until then, keep your authenticator backed up
+        (1Password / Authy / Aegis sync). If you lose it, an administrator can reset access via the
+        documented runbook.
       </div>
 
       <button
