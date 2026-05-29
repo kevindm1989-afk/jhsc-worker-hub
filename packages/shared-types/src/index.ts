@@ -74,6 +74,8 @@ export type AuditEventKind =
   | 'audit.backfill.1_2_auth_events'
   | 'audit.crypto.rewrap'
   | 'audit.kek.rotation'
+  | 'audit.corpus.seeded'
+  | 'audit.corpus.amended'
   | AuthEventKind;
 
 /**
@@ -93,6 +95,21 @@ export type AuditPayload =
     }
   | { readonly kind: 'audit.crypto.rewrap'; readonly resource: string }
   | { readonly kind: 'audit.kek.rotation'; readonly fromKid: string; readonly toKid: string }
+  | {
+      readonly kind: 'audit.corpus.seeded';
+      readonly version: string;
+      readonly statutes: ReadonlyArray<string>;
+      readonly clauseCount: number;
+      readonly fixtureSha256: string;
+    }
+  | {
+      readonly kind: 'audit.corpus.amended';
+      readonly version: string;
+      readonly statuteCode: string;
+      readonly citation: string;
+      readonly priorVersionDate: string;
+      readonly newVersionDate: string;
+    }
   | { readonly kind: 'signup'; readonly via: 'first_run' | 'invite' }
   | { readonly kind: 'login.passkey' }
   | { readonly kind: 'login.password' }
