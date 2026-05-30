@@ -95,7 +95,10 @@ jobs:
       - name: Build api image
         uses: docker/build-push-action@v7
         with:
-          context: apps/api
+          # Repo-root context because the api now depends on workspace
+          # packages (@jhsc/audit, @jhsc/crypto, @jhsc/legal-corpus,
+          # @jhsc/shared-types). The Dockerfile is monorepo-aware.
+          context: .
           file: apps/api/Dockerfile
           push: false
           tags: jhsc-worker-hub-api:ci

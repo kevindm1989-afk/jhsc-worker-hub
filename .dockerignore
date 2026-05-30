@@ -1,0 +1,37 @@
+# Bound the docker build context. The api image only needs source +
+# package manifests; node_modules ship as a deps stage layer, dist/
+# build outputs and dev artifacts have no place in the runtime image.
+
+**/node_modules
+**/dist
+**/build
+**/.next
+**/.turbo
+**/.cache
+**/coverage
+
+# Local env + secrets — never enter an image.
+**/.env
+**/.env.*
+!**/.env.example
+
+# Git internals + GitHub
+.git
+.github
+
+# Test outputs + playwright artifacts
+**/playwright-report
+**/test-results
+**/.vitest-cache
+
+# Docs and design assets are not needed at runtime
+docs
+design
+**/*.md
+!**/README.md
+
+# Editor + OS noise
+.vscode
+.idea
+.DS_Store
+**/*.log

@@ -5,9 +5,11 @@ import {
   Calendar,
   ChevronRight,
   FileText,
+  Lock,
   Settings,
   type LucideIcon,
 } from 'lucide-react';
+import { Link } from 'react-router-dom';
 
 // Secondary-nav list mirroring app-shell.tsx:698-735 (MoreView). Each item
 // previews a surface that lands in a later milestone. Items are visually
@@ -21,9 +23,18 @@ interface MoreItem {
   readonly desc: string;
   readonly icon: LucideIcon;
   readonly milestone: string;
+  readonly href?: string;
 }
 
 const ITEMS: readonly MoreItem[] = [
+  {
+    id: 'security',
+    label: 'Security',
+    desc: 'Passkeys, authenticator, sign out',
+    icon: Lock,
+    milestone: 'Milestone 1.2',
+    href: '/account/security',
+  },
   {
     id: 'documents',
     label: 'Documents',
@@ -34,9 +45,10 @@ const ITEMS: readonly MoreItem[] = [
   {
     id: 'legal',
     label: 'Legal Reference',
-    desc: 'OHSA, CLC Part II, CSA standards',
+    desc: 'OHSA, O. Reg. 851, CLC Part II, COHSR — full text + search',
     icon: BookOpen,
-    milestone: 'Lands in Milestone 1.4',
+    milestone: 'Milestone 1.4',
+    href: '/legal',
   },
   {
     id: 'calculators',
@@ -86,13 +98,8 @@ export function MoreView(): JSX.Element {
 
 function MoreRow({ item }: { item: MoreItem }): JSX.Element {
   const Icon = item.icon;
-  return (
-    <button
-      type="button"
-      aria-disabled="true"
-      title={item.milestone}
-      className="group flex w-full items-center gap-3 rounded-lg border border-border bg-card p-3.5 text-left transition-colors hover:bg-muted/30 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background"
-    >
+  const inner = (
+    <>
       <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-secondary">
         <Icon className="h-[18px] w-[18px] text-foreground/70" strokeWidth={2} aria-hidden="true" />
       </div>
@@ -105,6 +112,20 @@ function MoreRow({ item }: { item: MoreItem }): JSX.Element {
         strokeWidth={2}
         aria-hidden="true"
       />
+    </>
+  );
+  const cls =
+    'group flex w-full items-center gap-3 rounded-lg border border-border bg-card p-3.5 text-left transition-colors hover:bg-muted/30 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background';
+  if (item.href) {
+    return (
+      <Link to={item.href} className={cls}>
+        {inner}
+      </Link>
+    );
+  }
+  return (
+    <button type="button" aria-disabled="true" title={item.milestone} className={cls}>
+      {inner}
     </button>
   );
 }

@@ -1,0 +1,82 @@
+# Occupational Health and Safety Act, R.S.O. 1990, c. O.1
+#
+# Crown copyright (Ontario), open licence. We may reproduce verbatim
+# text. Provisions captured here are the JHSC-relevant duties plus the
+# committee-specific section (s.9). version_date is the consolidation
+# date noted on e-Laws at the time the row was verified.
+
+code = "OHSA"
+jurisdiction = "ON"
+title = "Occupational Health and Safety Act, R.S.O. 1990, c. O.1"
+licence = "crown_copyright_open"
+source_url = "https://www.ontario.ca/laws/statute/90o01"
+
+[[clauses]]
+citation = "s.9(20)"
+hierarchy_path = ["Part II", "Joint Health and Safety Committees", "s.9", "(20)"]
+heading = "Recommendations"
+body = "A committee shall make recommendations to the constructor or employer for the improvement of the health and safety of workers and shall make recommendations to the constructor, employer and the workers for the establishment, maintenance and monitoring of programs, measures and procedures respecting the health and safety of workers."
+body_kind = "full_text"
+version_date = "2020-07-01"
+verified_by = "corpus-operator"
+source_url = "https://www.ontario.ca/laws/statute/90o01#BK14"
+
+[[clauses]]
+citation = "s.9(21)"
+hierarchy_path = ["Part II", "Joint Health and Safety Committees", "s.9", "(21)"]
+heading = "Response to recommendations"
+body = "A constructor or employer who receives written recommendations from a committee shall respond in writing within twenty-one days. A response of the constructor or employer that disagrees with any of the recommendations shall contain the reasons why the recommendations are not accepted, and shall contain a timetable for implementing the recommendations the constructor or employer accepts."
+body_kind = "full_text"
+version_date = "2020-07-01"
+verified_by = "corpus-operator"
+source_url = "https://www.ontario.ca/laws/statute/90o01#BK14"
+
+[[clauses]]
+citation = "s.9(18)"
+hierarchy_path = ["Part II", "Joint Health and Safety Committees", "s.9", "(18)"]
+heading = "Powers of committee"
+body = "It is the function of a committee and it has power to, (a) identify situations that may be a source of danger or hazard to workers; (b) make recommendations to the constructor or employer and the workers for the improvement of the health and safety of workers; (c) recommend to the constructor or employer and the workers the establishment, maintenance and monitoring of programs, measures and procedures respecting the health and safety of workers; (d) obtain information from the constructor or employer respecting, (i) the identification of potential or existing hazards of materials, processes or equipment, and (ii) health and safety experience and work practices and standards in similar or other industries of which the constructor or employer has knowledge; (e) obtain information from the constructor or employer concerning the conducting or taking of tests of any equipment, machine, device, article, thing, material or biological, chemical or physical agent in or about a workplace for the purpose of occupational health and safety; and (f) be consulted about, and have a designated member representing workers be present at the beginning of, testing referred to in clause (e) conducted in or about the workplace if the designated member believes his or her presence is required to ensure that valid testing procedures are used or to ensure that the test results are valid."
+body_kind = "full_text"
+version_date = "2020-07-01"
+verified_by = "corpus-operator"
+source_url = "https://www.ontario.ca/laws/statute/90o01#BK14"
+
+[[clauses]]
+citation = "s.9(31)"
+hierarchy_path = ["Part II", "Joint Health and Safety Committees", "s.9", "(31)"]
+heading = "Inspection of workplace"
+body = "The members of a committee who represent workers shall designate a member representing workers to inspect the physical condition of the workplace."
+body_kind = "full_text"
+version_date = "2020-07-01"
+verified_by = "corpus-operator"
+source_url = "https://www.ontario.ca/laws/statute/90o01#BK14"
+
+[[clauses]]
+citation = "s.25(2)(h)"
+hierarchy_path = ["Part III", "Duties of Employers and Other Persons", "s.25", "(2)", "(h)"]
+heading = "Duties of employer — reasonable precautions"
+body = "Without limiting the strict duty imposed by subsection (1), an employer shall, take every precaution reasonable in the circumstances for the protection of a worker."
+body_kind = "full_text"
+version_date = "2020-07-01"
+verified_by = "corpus-operator"
+source_url = "https://www.ontario.ca/laws/statute/90o01#BK21"
+
+[[clauses]]
+citation = "s.25(2)(a)"
+hierarchy_path = ["Part III", "Duties of Employers and Other Persons", "s.25", "(2)", "(a)"]
+heading = "Duties of employer — information and instruction"
+body = "Without limiting the strict duty imposed by subsection (1), an employer shall, provide information, instruction and supervision to a worker to protect the health or safety of the worker."
+body_kind = "full_text"
+version_date = "2020-07-01"
+verified_by = "corpus-operator"
+source_url = "https://www.ontario.ca/laws/statute/90o01#BK21"
+
+[[clauses]]
+citation = "s.43(3)"
+hierarchy_path = ["Part V", "Right to Refuse or to Stop Work Where Health and Safety in Danger", "s.43", "(3)"]
+heading = "Refusal to work"
+body = "A worker may refuse to work or do particular work where he or she has reason to believe that, (a) any equipment, machine, device or thing the worker is to use or operate is likely to endanger himself, herself or another worker; (b) the physical condition of the workplace or the part thereof in which he or she works or is to work is likely to endanger himself or herself; (b.1) workplace violence is likely to endanger himself or herself; or (c) any equipment, machine, device or thing he or she is to use or operate or the physical condition of the workplace or the part thereof in which he or she works or is to work is in contravention of this Act or the regulations and such contravention is likely to endanger himself, herself or another worker."
+body_kind = "full_text"
+version_date = "2020-07-01"
+verified_by = "corpus-operator"
+source_url = "https://www.ontario.ca/laws/statute/90o01#BK52"

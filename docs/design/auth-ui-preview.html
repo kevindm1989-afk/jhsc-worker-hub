@@ -1,0 +1,1351 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <title>JHSC Worker Hub — auth UI preview</title>
+    <link rel="preconnect" href="https://rsms.me/" crossorigin />
+    <link rel="stylesheet" href="https://rsms.me/inter/inter.css" />
+    <style>
+      /* ----------------------------------------------------------------- */
+      /* Design tokens — mirror apps/web/src/index.css                      */
+      /* ----------------------------------------------------------------- */
+      :root {
+        --background: 210 40% 98%;
+        --foreground: 222 47% 11%;
+        --card: 0 0% 100%;
+        --card-foreground: 222 47% 11%;
+        --muted: 210 40% 96%;
+        --muted-foreground: 215 16% 47%;
+        --accent: 221 83% 53%;
+        --accent-foreground: 0 0% 100%;
+        --destructive: 0 84% 60%;
+        --destructive-foreground: 0 0% 100%;
+        --border: 214 32% 91%;
+        --input: 214 32% 91%;
+        --ring: 221 83% 53%;
+        --radius: 0.5rem;
+
+        --status-open: 0 84% 60%;
+        --status-pending: 38 92% 50%;
+        --status-resolved: 160 84% 39%;
+        --status-info: 217 91% 60%;
+        --status-neutral: 215 16% 47%;
+      }
+
+      [data-theme='dark'] {
+        --background: 222 47% 4%;
+        --foreground: 210 40% 98%;
+        --card: 217 33% 11%;
+        --card-foreground: 210 40% 98%;
+        --muted: 217 33% 14%;
+        --muted-foreground: 215 20% 65%;
+        --accent: 217 91% 60%;
+        --accent-foreground: 0 0% 100%;
+        --destructive: 0 70% 50%;
+        --destructive-foreground: 0 0% 100%;
+        --border: 217 33% 18%;
+        --input: 217 33% 18%;
+        --ring: 217 91% 60%;
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+      html,
+      body {
+        margin: 0;
+        padding: 0;
+        font-family:
+          'Inter',
+          system-ui,
+          -apple-system,
+          BlinkMacSystemFont,
+          sans-serif;
+        background: hsl(var(--background));
+        color: hsl(var(--foreground));
+        -webkit-font-smoothing: antialiased;
+        font-feature-settings:
+          'ss01' 1,
+          'cv02' 1,
+          'cv11' 1;
+      }
+      ::selection {
+        background: hsl(var(--accent) / 0.25);
+      }
+
+      /* ----------------------------------------------------------------- */
+      /* Layout — phone-first frame                                         */
+      /* ----------------------------------------------------------------- */
+      .stage {
+        min-height: 100vh;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        gap: 24px;
+        padding: 24px 16px 96px;
+        background: linear-gradient(180deg, hsl(var(--background)) 0%, hsl(var(--muted)) 100%);
+      }
+
+      .frame {
+        width: 100%;
+        max-width: 390px;
+        min-height: 760px;
+        background: hsl(var(--background));
+        border: 1px solid hsl(var(--border));
+        border-radius: 28px;
+        box-shadow:
+          0 10px 30px rgba(15, 23, 42, 0.08),
+          0 2px 8px rgba(15, 23, 42, 0.04);
+        overflow: hidden;
+        display: flex;
+        flex-direction: column;
+        position: relative;
+      }
+
+      .frame-bar {
+        height: 30px;
+        background: hsl(var(--card));
+        border-bottom: 1px solid hsl(var(--border));
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        gap: 6px;
+        font-size: 11px;
+        color: hsl(var(--muted-foreground));
+        letter-spacing: 0.02em;
+      }
+
+      .screen {
+        flex: 1;
+        overflow-y: auto;
+        padding: 24px 20px 80px;
+      }
+
+      .screen-header {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        margin-bottom: 24px;
+      }
+      .screen-title {
+        font-size: 13px;
+        font-weight: 500;
+        color: hsl(var(--muted-foreground));
+        letter-spacing: 0.04em;
+        text-transform: uppercase;
+      }
+
+      h1 {
+        font-size: 24px;
+        font-weight: 600;
+        letter-spacing: -0.02em;
+        margin: 0 0 8px;
+      }
+      h2 {
+        font-size: 16px;
+        font-weight: 600;
+        margin: 0 0 6px;
+      }
+      .subtitle {
+        font-size: 14px;
+        color: hsl(var(--muted-foreground));
+        line-height: 1.5;
+        margin: 0 0 24px;
+      }
+
+      /* ----------------------------------------------------------------- */
+      /* Buttons + inputs                                                   */
+      /* ----------------------------------------------------------------- */
+      .btn {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        gap: 8px;
+        height: 44px;
+        padding: 0 16px;
+        border-radius: var(--radius);
+        font-size: 14px;
+        font-weight: 500;
+        cursor: pointer;
+        border: 1px solid transparent;
+        transition:
+          background 120ms,
+          border-color 120ms,
+          color 120ms;
+        text-decoration: none;
+        font-family: inherit;
+      }
+      .btn:focus-visible {
+        outline: 2px solid hsl(var(--ring));
+        outline-offset: 2px;
+      }
+      .btn-primary {
+        background: hsl(var(--accent));
+        color: hsl(var(--accent-foreground));
+      }
+      .btn-primary:hover {
+        background: hsl(var(--accent) / 0.92);
+      }
+      .btn-secondary {
+        background: hsl(var(--card));
+        color: hsl(var(--foreground));
+        border-color: hsl(var(--border));
+      }
+      .btn-secondary:hover {
+        background: hsl(var(--muted));
+      }
+      .btn-ghost {
+        background: transparent;
+        color: hsl(var(--accent));
+      }
+      .btn-ghost:hover {
+        background: hsl(var(--accent) / 0.08);
+      }
+      .btn-danger {
+        background: transparent;
+        color: hsl(var(--destructive));
+        border-color: hsl(var(--destructive) / 0.4);
+      }
+      .btn-danger:hover {
+        background: hsl(var(--destructive) / 0.08);
+      }
+      .btn-full {
+        width: 100%;
+      }
+      .btn[disabled] {
+        opacity: 0.5;
+        cursor: not-allowed;
+      }
+
+      .label {
+        display: block;
+        font-size: 13px;
+        font-weight: 500;
+        margin-bottom: 6px;
+      }
+      .hint {
+        font-size: 12px;
+        color: hsl(var(--muted-foreground));
+        margin-top: 6px;
+        line-height: 1.4;
+      }
+      .input {
+        width: 100%;
+        height: 44px;
+        padding: 0 12px;
+        border: 1px solid hsl(var(--input));
+        border-radius: var(--radius);
+        background: hsl(var(--card));
+        color: hsl(var(--foreground));
+        font-size: 15px;
+        font-family: inherit;
+        transition:
+          border-color 120ms,
+          box-shadow 120ms;
+      }
+      .input:focus-visible {
+        outline: none;
+        border-color: hsl(var(--ring));
+        box-shadow: 0 0 0 3px hsl(var(--ring) / 0.18);
+      }
+      .field {
+        margin-bottom: 16px;
+      }
+      .field-error {
+        color: hsl(var(--destructive));
+        font-size: 12px;
+        margin-top: 6px;
+      }
+
+      .mono {
+        font-family: 'JetBrains Mono', ui-monospace, monospace;
+      }
+      .totp-input {
+        letter-spacing: 0.3em;
+        text-align: center;
+        font-family: 'JetBrains Mono', ui-monospace, monospace;
+        font-size: 20px;
+      }
+
+      /* ----------------------------------------------------------------- */
+      /* Cards / sections                                                   */
+      /* ----------------------------------------------------------------- */
+      .card {
+        background: hsl(var(--card));
+        border: 1px solid hsl(var(--border));
+        border-radius: var(--radius);
+        padding: 16px;
+      }
+      .card-row {
+        display: flex;
+        align-items: center;
+        gap: 12px;
+        padding: 12px 0;
+        border-bottom: 1px solid hsl(var(--border));
+      }
+      .card-row:last-child {
+        border-bottom: 0;
+      }
+      .card-row-content {
+        flex: 1;
+        min-width: 0;
+      }
+      .card-row-title {
+        font-size: 14px;
+        font-weight: 500;
+      }
+      .card-row-meta {
+        font-size: 12px;
+        color: hsl(var(--muted-foreground));
+        margin-top: 2px;
+      }
+
+      .badge {
+        display: inline-flex;
+        align-items: center;
+        gap: 4px;
+        height: 22px;
+        padding: 0 8px;
+        border-radius: 11px;
+        font-size: 11px;
+        font-weight: 500;
+        letter-spacing: 0.02em;
+        background: hsl(var(--muted));
+        color: hsl(var(--muted-foreground));
+      }
+      .badge-success {
+        background: hsl(var(--status-resolved) / 0.12);
+        color: hsl(var(--status-resolved));
+      }
+      .badge-warn {
+        background: hsl(var(--status-pending) / 0.14);
+        color: hsl(38 92% 32%);
+      }
+      .badge-info {
+        background: hsl(var(--status-info) / 0.12);
+        color: hsl(var(--status-info));
+      }
+
+      .stepper {
+        display: flex;
+        gap: 6px;
+        margin-bottom: 24px;
+      }
+      .stepper-dot {
+        flex: 1;
+        height: 3px;
+        border-radius: 2px;
+        background: hsl(var(--border));
+      }
+      .stepper-dot.active {
+        background: hsl(var(--accent));
+      }
+      .stepper-dot.done {
+        background: hsl(var(--accent) / 0.5);
+      }
+
+      .qr {
+        width: 200px;
+        height: 200px;
+        margin: 16px auto 12px;
+        background: hsl(0 0% 100%);
+        border: 1px solid hsl(var(--border));
+        border-radius: 8px;
+        padding: 10px;
+        display: block;
+      }
+      .secret {
+        font-family: 'JetBrains Mono', ui-monospace, monospace;
+        font-size: 12px;
+        background: hsl(var(--muted));
+        padding: 8px 12px;
+        border-radius: 6px;
+        text-align: center;
+        letter-spacing: 0.05em;
+        word-break: break-all;
+        margin-bottom: 16px;
+      }
+
+      .codes {
+        display: grid;
+        grid-template-columns: repeat(2, 1fr);
+        gap: 8px;
+        margin-bottom: 16px;
+      }
+      .code-pill {
+        font-family: 'JetBrains Mono', ui-monospace, monospace;
+        font-size: 13px;
+        background: hsl(var(--muted));
+        padding: 10px 12px;
+        border-radius: 6px;
+        text-align: center;
+        letter-spacing: 0.05em;
+      }
+      .checkbox-row {
+        display: flex;
+        gap: 10px;
+        align-items: flex-start;
+        background: hsl(var(--muted));
+        padding: 12px;
+        border-radius: 6px;
+        margin-bottom: 16px;
+        font-size: 13px;
+        line-height: 1.5;
+        cursor: pointer;
+      }
+      .checkbox-row input {
+        margin-top: 2px;
+      }
+
+      .toast {
+        position: absolute;
+        left: 16px;
+        right: 16px;
+        top: 56px;
+        background: hsl(var(--card));
+        border: 1px solid hsl(var(--accent) / 0.4);
+        border-left: 3px solid hsl(var(--accent));
+        border-radius: 8px;
+        padding: 12px 14px;
+        font-size: 13px;
+        line-height: 1.4;
+        box-shadow: 0 8px 24px hsl(222 47% 11% / 0.08);
+        z-index: 30;
+        animation: slideIn 220ms ease-out;
+      }
+      .toast.is-error {
+        border-color: hsl(var(--destructive) / 0.4);
+        border-left-color: hsl(var(--destructive));
+      }
+      @keyframes slideIn {
+        from {
+          transform: translateY(-6px);
+          opacity: 0;
+        }
+        to {
+          transform: translateY(0);
+          opacity: 1;
+        }
+      }
+
+      .alert {
+        background: hsl(var(--status-pending) / 0.1);
+        border: 1px solid hsl(var(--status-pending) / 0.3);
+        border-radius: 6px;
+        padding: 10px 12px;
+        font-size: 12px;
+        line-height: 1.5;
+        color: hsl(38 92% 25%);
+        margin-bottom: 16px;
+      }
+      .alert-info {
+        background: hsl(var(--status-info) / 0.08);
+        border-color: hsl(var(--status-info) / 0.3);
+        color: hsl(var(--status-info));
+      }
+      [data-theme='dark'] .alert {
+        color: hsl(38 92% 70%);
+      }
+      [data-theme='dark'] .alert-info {
+        color: hsl(217 91% 75%);
+      }
+
+      /* ----------------------------------------------------------------- */
+      /* Step-up modal (overlay on top of any screen)                       */
+      /* ----------------------------------------------------------------- */
+      .modal-overlay {
+        position: absolute;
+        inset: 0;
+        background: hsl(222 47% 11% / 0.5);
+        backdrop-filter: blur(4px);
+        display: flex;
+        align-items: flex-end;
+        z-index: 40;
+        animation: fadeIn 180ms ease-out;
+      }
+      .modal {
+        width: 100%;
+        background: hsl(var(--card));
+        border-top-left-radius: 16px;
+        border-top-right-radius: 16px;
+        padding: 24px 20px 28px;
+        animation: slideUp 220ms cubic-bezier(0.16, 1, 0.3, 1);
+      }
+      @keyframes fadeIn {
+        from {
+          opacity: 0;
+        }
+        to {
+          opacity: 1;
+        }
+      }
+      @keyframes slideUp {
+        from {
+          transform: translateY(40px);
+        }
+        to {
+          transform: translateY(0);
+        }
+      }
+      .modal-handle {
+        width: 32px;
+        height: 4px;
+        background: hsl(var(--border));
+        border-radius: 2px;
+        margin: 0 auto 16px;
+      }
+
+      /* ----------------------------------------------------------------- */
+      /* Bottom tab bar (app-home only)                                     */
+      /* ----------------------------------------------------------------- */
+      .tabbar {
+        position: absolute;
+        bottom: 0;
+        left: 0;
+        right: 0;
+        height: 64px;
+        background: hsl(var(--card));
+        border-top: 1px solid hsl(var(--border));
+        display: flex;
+        align-items: stretch;
+        padding-bottom: env(safe-area-inset-bottom);
+      }
+      .tab {
+        flex: 1;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        gap: 2px;
+        color: hsl(var(--muted-foreground));
+        font-size: 10px;
+        cursor: pointer;
+      }
+      .tab.active {
+        color: hsl(var(--accent));
+      }
+      .tab svg {
+        width: 20px;
+        height: 20px;
+      }
+
+      .skeleton {
+        background: linear-gradient(
+          90deg,
+          hsl(var(--muted)) 0%,
+          hsl(var(--border)) 50%,
+          hsl(var(--muted)) 100%
+        );
+        background-size: 200% 100%;
+        animation: pulse 1.6s linear infinite;
+        border-radius: 4px;
+      }
+      @keyframes pulse {
+        0% {
+          background-position: 200% 0;
+        }
+        100% {
+          background-position: -200% 0;
+        }
+      }
+
+      /* ----------------------------------------------------------------- */
+      /* Top utility — screen switcher + theme toggle                       */
+      /* ----------------------------------------------------------------- */
+      .switcher {
+        width: 100%;
+        max-width: 390px;
+        background: hsl(var(--card));
+        border: 1px solid hsl(var(--border));
+        border-radius: 12px;
+        padding: 12px 14px;
+        font-size: 13px;
+      }
+      .switcher-title {
+        font-size: 11px;
+        font-weight: 500;
+        color: hsl(var(--muted-foreground));
+        text-transform: uppercase;
+        letter-spacing: 0.05em;
+        margin-bottom: 8px;
+      }
+      .switcher-grid {
+        display: grid;
+        grid-template-columns: repeat(2, 1fr);
+        gap: 6px;
+      }
+      .switcher-btn {
+        height: 32px;
+        background: hsl(var(--muted));
+        border: 1px solid transparent;
+        border-radius: 6px;
+        font-size: 12px;
+        color: hsl(var(--foreground));
+        cursor: pointer;
+        font-family: inherit;
+        text-align: left;
+        padding: 0 10px;
+      }
+      .switcher-btn:hover {
+        background: hsl(var(--accent) / 0.08);
+      }
+      .switcher-btn.active {
+        background: hsl(var(--accent) / 0.14);
+        color: hsl(var(--accent));
+        border-color: hsl(var(--accent) / 0.4);
+        font-weight: 500;
+      }
+      .switcher-actions {
+        display: flex;
+        gap: 6px;
+        margin-top: 10px;
+      }
+      .switcher-toggle {
+        height: 28px;
+        padding: 0 10px;
+        border-radius: 6px;
+        border: 1px solid hsl(var(--border));
+        background: hsl(var(--card));
+        font-size: 12px;
+        cursor: pointer;
+        color: hsl(var(--foreground));
+      }
+      .switcher-toggle:hover {
+        background: hsl(var(--muted));
+      }
+
+      .footer-note {
+        max-width: 390px;
+        font-size: 11px;
+        color: hsl(var(--muted-foreground));
+        text-align: center;
+        line-height: 1.5;
+        padding: 0 8px;
+      }
+
+      .row {
+        display: flex;
+        gap: 8px;
+        align-items: center;
+      }
+      .row .input {
+        flex: 1;
+      }
+      .copy-btn {
+        height: 36px;
+        border-radius: 6px;
+        background: hsl(var(--muted));
+        border: 1px solid hsl(var(--border));
+        padding: 0 12px;
+        font-size: 12px;
+        cursor: pointer;
+        color: hsl(var(--foreground));
+        font-family: inherit;
+      }
+
+      .divider {
+        height: 1px;
+        background: hsl(var(--border));
+        margin: 20px 0;
+      }
+      .divider-with-text {
+        position: relative;
+        text-align: center;
+        font-size: 11px;
+        color: hsl(var(--muted-foreground));
+        text-transform: uppercase;
+        letter-spacing: 0.08em;
+        margin: 20px 0;
+      }
+      .divider-with-text::before,
+      .divider-with-text::after {
+        content: '';
+        position: absolute;
+        top: 50%;
+        width: calc(50% - 28px);
+        height: 1px;
+        background: hsl(var(--border));
+      }
+      .divider-with-text::before {
+        left: 0;
+      }
+      .divider-with-text::after {
+        right: 0;
+      }
+
+      .key-row {
+        display: flex;
+        gap: 10px;
+        align-items: center;
+        padding: 14px 0;
+        border-bottom: 1px solid hsl(var(--border));
+      }
+      .key-row:last-child {
+        border-bottom: 0;
+      }
+      .key-icon {
+        width: 36px;
+        height: 36px;
+        background: hsl(var(--muted));
+        border-radius: 8px;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        flex-shrink: 0;
+      }
+      .key-icon svg {
+        width: 18px;
+        height: 18px;
+        color: hsl(var(--accent));
+      }
+
+      .scrollable-list {
+        max-height: 100%;
+      }
+    </style>
+  </head>
+
+  <body>
+    <div class="stage">
+      <!-- The screen switcher — not part of the real app; lets you jump
+           between mock states without simulating the full flow. -->
+      <div class="switcher" id="switcher">
+        <div class="switcher-title">JHSC Worker Hub — UI preview (mock)</div>
+        <div class="switcher-grid" id="switcher-grid"></div>
+        <div class="switcher-actions">
+          <button class="switcher-toggle" id="theme-toggle">◐ theme</button>
+          <button class="switcher-toggle" id="stepup-toggle">⤴ toggle step-up modal</button>
+        </div>
+      </div>
+
+      <div class="frame" id="frame">
+        <div class="frame-bar">
+          <span id="frame-route">/setup</span>
+          <span>·</span>
+          <span>JHSC Worker Hub</span>
+        </div>
+        <div class="screen" id="screen"></div>
+        <div class="modal-overlay" id="modal" style="display: none">
+          <div class="modal">
+            <div class="modal-handle"></div>
+            <h2 style="margin-bottom: 6px">Confirm it's you</h2>
+            <div class="subtitle" style="margin-bottom: 16px; font-size: 13px">
+              You're about to <strong>remove a passkey</strong>. We need a fresh authentication
+              before continuing.
+            </div>
+            <button class="btn btn-primary btn-full" id="modal-passkey">Use a passkey</button>
+            <div class="divider-with-text">or</div>
+            <label class="label" for="modal-totp-input">Authenticator code</label>
+            <input
+              id="modal-totp-input"
+              class="input totp-input"
+              maxlength="6"
+              inputmode="numeric"
+              placeholder="••••••"
+            />
+            <div class="hint" style="margin-bottom: 14px">
+              The 6-digit code from your authenticator app.
+            </div>
+            <div style="display: flex; gap: 8px">
+              <button class="btn btn-secondary btn-full" id="modal-cancel">Cancel</button>
+              <button class="btn btn-primary btn-full" id="modal-confirm">Confirm</button>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="footer-note">
+        Preview of Slice 6 — the React implementation will replace this HTML mock once shipped.
+        State is local to this page; no real API calls are made.
+      </div>
+    </div>
+
+    <script>
+      /* eslint-disable */
+      // ---------------------------------------------------------------
+      // Screen definitions — each returns innerHTML for the frame.
+      // ---------------------------------------------------------------
+      const SCREENS = {
+        'setup-1': {
+          route: '/setup',
+          label: 'Setup · step 1 (account)',
+          render: () => setupStep1(),
+        },
+        'setup-2': {
+          route: '/setup',
+          label: 'Setup · step 2 (TOTP)',
+          render: () => setupStep2(),
+        },
+        'setup-3': {
+          route: '/setup',
+          label: 'Setup · step 3 (recovery)',
+          render: () => setupStep3(),
+        },
+        'login-passkey': {
+          route: '/login',
+          label: 'Login · passkey-primary',
+          render: () => loginPasskey(),
+        },
+        'login-password': {
+          route: '/login',
+          label: 'Login · password',
+          render: () => loginPassword(),
+        },
+        'login-totp': {
+          route: '/login',
+          label: 'Login · TOTP step',
+          render: () => loginTotp(),
+        },
+        'app-home': {
+          route: '/minutes',
+          label: 'App shell · Minutes',
+          render: () => appHome(),
+        },
+        'account-security': {
+          route: '/account/security',
+          label: 'Account · security',
+          render: () => accountSecurity(),
+        },
+      };
+
+      const ICONS = {
+        key: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m21 2-9.6 9.6"/><circle cx="7.5" cy="15.5" r="5.5"/><path d="m21 2-2 2"/><path d="m17 6 2 2"/></svg>',
+        shield:
+          '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 13c0 5-3.5 7.5-7.66 8.95a1 1 0 0 1-.67-.01C7.5 20.5 4 18 4 13V6a1 1 0 0 1 1-1c2 0 4.5-1.2 6.24-2.72a1.17 1.17 0 0 1 1.52 0C14.51 3.81 17 5 19 5a1 1 0 0 1 1 1z"/></svg>',
+        smart:
+          '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="5" y="2" width="14" height="20" rx="2" ry="2"/><line x1="12" y1="18" x2="12" y2="18"/></svg>',
+        check:
+          '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>',
+        copy: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>',
+        clock:
+          '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>',
+        list: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="8" y1="6" x2="21" y2="6"/><line x1="8" y1="12" x2="21" y2="12"/><line x1="8" y1="18" x2="21" y2="18"/><line x1="3" y1="6" x2="3.01" y2="6"/><line x1="3" y1="12" x2="3.01" y2="12"/><line x1="3" y1="18" x2="3.01" y2="18"/></svg>',
+        warning:
+          '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m21.73 18-8-14a2 2 0 0 0-3.46 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3Z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>',
+        find: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>',
+        more: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="3" y1="12" x2="21" y2="12"/><line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="18" x2="21" y2="18"/></svg>',
+        trash:
+          '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6 17.16 19.32a2 2 0 0 1-2 1.68H8.84a2 2 0 0 1-2-1.68L5 6"/></svg>',
+        chevron:
+          '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 18 15 12 9 6"/></svg>',
+      };
+
+      // ---------------------------------------------------------------
+      // Setup wizard
+      // ---------------------------------------------------------------
+      function setupStep1() {
+        return `
+          <div class="stepper">
+            <div class="stepper-dot active"></div>
+            <div class="stepper-dot"></div>
+            <div class="stepper-dot"></div>
+          </div>
+          <h1>Set up your account</h1>
+          <p class="subtitle">
+            One co-chair account per workplace. After this you'll add a
+            second factor and at least one passkey.
+          </p>
+
+          <div class="field">
+            <label class="label" for="setup-email">Work email</label>
+            <input id="setup-email" class="input" type="email"
+              placeholder="cochair@workplace.invalid"
+              value="cochair@workplace.invalid" />
+            <div class="hint">Used to sign in. Stored encrypted at rest.</div>
+          </div>
+
+          <div class="field">
+            <label class="label" for="setup-name">Display name</label>
+            <input id="setup-name" class="input" type="text" placeholder="Worker Co-Chair" />
+            <div class="hint">Shown to other reps on this device only.</div>
+          </div>
+
+          <div class="field">
+            <label class="label" for="setup-pw">Password</label>
+            <input id="setup-pw" class="input" type="password" />
+            <div class="hint">
+              Minimum 12 characters. Must include upper, lower, digit, symbol.
+            </div>
+          </div>
+
+          <button class="btn btn-primary btn-full" data-go="setup-2">
+            Continue → set up second factor
+          </button>
+        `;
+      }
+
+      function setupStep2() {
+        return `
+          <div class="stepper">
+            <div class="stepper-dot done"></div>
+            <div class="stepper-dot active"></div>
+            <div class="stepper-dot"></div>
+          </div>
+          <h1>Scan with an authenticator app</h1>
+          <p class="subtitle">
+            Use any authenticator (1Password, Authy, Aegis, etc.).
+            We never email codes. The QR encodes a TOTP secret that
+            never leaves this device unencrypted.
+          </p>
+
+          ${qrSvg()}
+
+          <div class="secret">JBSWY3DPEHPK3PXP4QDFNFXS6BUGEJ7Q</div>
+          <div class="hint" style="margin-top: -6px; margin-bottom: 24px;">
+            Or enter the secret manually if you can't scan.
+          </div>
+
+          <div class="field">
+            <label class="label" for="setup-totp">Enter the first 6-digit code</label>
+            <input id="setup-totp" class="input totp-input" maxlength="6"
+              inputmode="numeric" placeholder="••••••" />
+          </div>
+
+          <button class="btn btn-primary btn-full" data-go="setup-3">
+            Verify and continue
+          </button>
+          <button class="btn btn-ghost btn-full" style="margin-top: 8px;" data-go="setup-1">
+            Back
+          </button>
+        `;
+      }
+
+      function setupStep3() {
+        const codes = [
+          'M2Q4-XHTR9',
+          'P8N3-K2WVB',
+          'F7DJ-Q9HRM',
+          'B4LZ-T6MGP',
+          'X3WK-Y2DHN',
+          'V6QF-J8MRT',
+          'R7KL-N3FXP',
+          'H5TC-W4QZB',
+        ];
+        return `
+          <div class="stepper">
+            <div class="stepper-dot done"></div>
+            <div class="stepper-dot done"></div>
+            <div class="stepper-dot active"></div>
+          </div>
+          <h1>Save these recovery codes</h1>
+          <p class="subtitle">
+            Use one of these if you lose your authenticator. Each works
+            exactly once. We can't show them to you again.
+          </p>
+
+          <div class="codes">
+            ${codes.map((c) => `<div class="code-pill">${c}</div>`).join('')}
+          </div>
+
+          <button class="btn btn-secondary btn-full" style="margin-bottom: 16px;">
+            Copy all 8 codes
+          </button>
+
+          <label class="checkbox-row">
+            <input type="checkbox" />
+            <span>
+              I've saved these somewhere safe (password manager, printed and
+              stored offline, etc.). I understand I won't see them again.
+            </span>
+          </label>
+
+          <button class="btn btn-primary btn-full" data-go="app-home">
+            Done → enter the app
+          </button>
+
+          <div class="alert-info alert" style="margin-top: 16px;">
+            <strong>Next:</strong> add a passkey from Account → Security so
+            you can sign in without typing your password.
+          </div>
+        `;
+      }
+
+      // ---------------------------------------------------------------
+      // Login flows
+      // ---------------------------------------------------------------
+      function loginPasskey() {
+        return `
+          <div class="screen-header">
+            <div class="screen-title">Sign in</div>
+          </div>
+
+          <h1>Welcome back</h1>
+          <p class="subtitle">
+            Use a passkey on this device — biometric or security key. The
+            phishing-resistant path.
+          </p>
+
+          <button class="btn btn-primary btn-full" data-go="app-home">
+            ${ICONS.key}
+            Sign in with a passkey
+          </button>
+
+          <div class="divider-with-text">or</div>
+
+          <button class="btn btn-secondary btn-full" data-go="login-password">
+            Use password instead
+          </button>
+
+          <div class="alert-info alert" style="margin-top: 24px;">
+            <strong>Why passkeys?</strong> They can't be phished. The browser
+            checks the site's origin before unlocking the key — no fake
+            page can trick it.
+          </div>
+        `;
+      }
+
+      function loginPassword() {
+        return `
+          <div class="screen-header">
+            <div class="screen-title">Sign in · password</div>
+          </div>
+
+          <h1>Sign in</h1>
+          <p class="subtitle">
+            Password + authenticator code. Both must be valid.
+          </p>
+
+          <div class="field">
+            <label class="label" for="login-email">Email</label>
+            <input id="login-email" class="input" type="email"
+              value="cochair@workplace.invalid" />
+          </div>
+
+          <div class="field">
+            <label class="label" for="login-pw">Password</label>
+            <input id="login-pw" class="input" type="password" value="••••••••••" />
+          </div>
+
+          <button class="btn btn-primary btn-full" data-go="login-totp">
+            Continue
+          </button>
+
+          <button class="btn btn-ghost btn-full" style="margin-top: 8px;" data-go="login-passkey">
+            ← Use a passkey instead
+          </button>
+        `;
+      }
+
+      function loginTotp() {
+        return `
+          <div class="screen-header">
+            <div class="screen-title">Sign in · second factor</div>
+          </div>
+
+          <h1>Enter your code</h1>
+          <p class="subtitle">
+            The 6-digit code from your authenticator. Codes expire every
+            30 seconds.
+          </p>
+
+          <div class="field">
+            <label class="label" for="login-totp">Authenticator code</label>
+            <input id="login-totp" class="input totp-input" maxlength="6"
+              inputmode="numeric" placeholder="••••••" />
+          </div>
+
+          <button class="btn btn-primary btn-full" data-go="app-home">
+            Sign in
+          </button>
+
+          <div class="divider-with-text">or</div>
+
+          <button class="btn btn-secondary btn-full">
+            Use a recovery code
+          </button>
+
+          <button class="btn btn-ghost btn-full" style="margin-top: 8px;" data-go="login-password">
+            ← Back
+          </button>
+        `;
+      }
+
+      // ---------------------------------------------------------------
+      // App shell (post-login destination)
+      // ---------------------------------------------------------------
+      function appHome() {
+        return `
+          <div class="screen-header">
+            <div>
+              <div class="screen-title">Minutes</div>
+              <h1 style="margin-top: 4px; font-size: 20px;">May 2026 cycle</h1>
+            </div>
+            <button class="btn btn-secondary" style="height: 36px; padding: 0 12px;">
+              <span style="font-size: 18px; line-height: 1;">+</span>
+            </button>
+          </div>
+
+          <div class="card" style="margin-bottom: 16px;">
+            <div class="card-row">
+              <div class="card-row-content">
+                <div class="card-row-title">Forklift charging area airflow</div>
+                <div class="card-row-meta">REC · 8 days remaining (s.9(21))</div>
+              </div>
+              <span class="badge badge-warn">old business</span>
+            </div>
+            <div class="card-row">
+              <div class="card-row-content">
+                <div class="card-row-title">Loading-bay railings inspection</div>
+                <div class="card-row-meta">INSP · awaiting close-out</div>
+              </div>
+              <span class="badge badge-info">in progress</span>
+            </div>
+            <div class="card-row">
+              <div class="card-row-content">
+                <div class="card-row-title">WHMIS refresher schedule</div>
+                <div class="card-row-meta">TRAIN · raised today</div>
+              </div>
+              <span class="badge">new business</span>
+            </div>
+          </div>
+
+          <div class="screen-title" style="margin-bottom: 12px;">
+            Completed this period
+          </div>
+          <div class="card" style="margin-bottom: 16px;">
+            <div class="card-row">
+              <div class="card-row-content">
+                <div class="card-row-title">Zone 4 floor markings repaint</div>
+                <div class="card-row-meta">PROC · verified by JHSC</div>
+              </div>
+              <span class="badge badge-success">closed</span>
+            </div>
+          </div>
+
+          <div class="skeleton" style="height: 72px; margin-bottom: 12px;"></div>
+          <div class="skeleton" style="height: 72px; margin-bottom: 12px;"></div>
+
+          <div class="tabbar">
+            <div class="tab active">
+              ${ICONS.clock}<span>Minutes</span>
+            </div>
+            <div class="tab">
+              ${ICONS.warning}<span>Hazards</span>
+            </div>
+            <div class="tab">
+              ${ICONS.find}<span>Inspect</span>
+            </div>
+            <div class="tab">
+              ${ICONS.list}<span>Recs</span>
+            </div>
+            <div class="tab">
+              ${ICONS.more}<span>More</span>
+            </div>
+          </div>
+        `;
+      }
+
+      // ---------------------------------------------------------------
+      // Account → Security
+      // ---------------------------------------------------------------
+      function accountSecurity() {
+        return `
+          <div class="screen-header">
+            <div>
+              <div class="screen-title">Account</div>
+              <h1 style="margin-top: 4px; font-size: 20px;">Security</h1>
+            </div>
+          </div>
+
+          <h2 style="margin-top: 8px;">Passkeys</h2>
+          <p class="subtitle" style="margin-bottom: 12px; font-size: 13px;">
+            Phishing-resistant sign-in. We recommend at least two.
+          </p>
+
+          <div class="card" style="margin-bottom: 16px;">
+            <div class="key-row">
+              <div class="key-icon">${ICONS.key}</div>
+              <div class="card-row-content">
+                <div class="card-row-title">iPhone 15</div>
+                <div class="card-row-meta">added Apr 18 · last used 6h ago</div>
+              </div>
+              <button class="btn btn-danger" data-stepup style="height: 32px; padding: 0 10px; font-size: 12px;">
+                Remove
+              </button>
+            </div>
+            <div class="key-row">
+              <div class="key-icon">${ICONS.shield}</div>
+              <div class="card-row-content">
+                <div class="card-row-title">YubiKey 5C</div>
+                <div class="card-row-meta">added Mar 02 · last used 3d ago</div>
+              </div>
+              <button class="btn btn-danger" data-stepup style="height: 32px; padding: 0 10px; font-size: 12px;">
+                Remove
+              </button>
+            </div>
+          </div>
+
+          <button class="btn btn-secondary btn-full" style="margin-bottom: 24px;">
+            ${ICONS.key} Add a passkey
+          </button>
+
+          <h2>Authenticator app (TOTP)</h2>
+          <p class="subtitle" style="margin-bottom: 12px; font-size: 13px;">
+            Fallback for when passkeys aren't available.
+          </p>
+          <div class="card" style="margin-bottom: 24px;">
+            <div class="card-row">
+              <div class="card-row-content">
+                <div class="card-row-title">Enrolled</div>
+                <div class="card-row-meta">since Apr 18</div>
+              </div>
+              <span class="badge badge-success">${ICONS.check} Active</span>
+            </div>
+          </div>
+          <button class="btn btn-secondary btn-full" data-stepup style="margin-bottom: 24px;">
+            Reset authenticator
+          </button>
+
+          <h2>Recovery codes</h2>
+          <p class="subtitle" style="margin-bottom: 12px; font-size: 13px;">
+            6 of 8 unused.
+          </p>
+          <button class="btn btn-secondary btn-full" data-stepup style="margin-bottom: 24px;">
+            Regenerate codes
+          </button>
+
+          <h2>Sessions</h2>
+          <div class="card" style="margin-bottom: 16px;">
+            <div class="card-row">
+              <div class="card-row-content">
+                <div class="card-row-title">This device</div>
+                <div class="card-row-meta">iPhone Safari · YYZ · active now</div>
+              </div>
+              <span class="badge badge-info">current</span>
+            </div>
+            <div class="card-row">
+              <div class="card-row-content">
+                <div class="card-row-title">MacBook Pro</div>
+                <div class="card-row-meta">Chrome · YYZ · 2d ago</div>
+              </div>
+              <button class="btn btn-ghost" style="height: 28px; padding: 0 10px; font-size: 12px;">
+                Revoke
+              </button>
+            </div>
+          </div>
+
+          <button class="btn btn-danger btn-full" style="margin-bottom: 8px;">
+            Sign out everywhere
+          </button>
+        `;
+      }
+
+      // ---------------------------------------------------------------
+      // Helpers
+      // ---------------------------------------------------------------
+      function qrSvg() {
+        // Decorative pseudo-QR (not a real one — the real preview would
+        // encode the otpauth:// URI returned by /first-run/setup).
+        const cells = [];
+        const seed = 0x6a4f;
+        let r = seed;
+        for (let y = 0; y < 21; y++) {
+          for (let x = 0; x < 21; x++) {
+            r = (r * 1103515245 + 12345) & 0xffffffff;
+            const filled = (r >> 16) & 1;
+            // Fixed finder patterns in corners.
+            const inFinder =
+              ((x < 7 && y < 7) || (x > 13 && y < 7) || (x < 7 && y > 13)) &&
+              (x === 0 ||
+                x === 6 ||
+                y === 0 ||
+                y === 6 ||
+                (x >= 2 && x <= 4 && y >= 2 && y <= 4) ||
+                x === 14 ||
+                x === 20 ||
+                y === 0 ||
+                y === 6 ||
+                (x === 16 && y >= 2 && y <= 4) ||
+                (x === 17 && y >= 2 && y <= 4) ||
+                (x === 18 && y >= 2 && y <= 4));
+            const isFinderBlock = (x <= 6 && y <= 6) || (x >= 14 && y <= 6) || (x <= 6 && y >= 14);
+            if (isFinderBlock) {
+              const lx = x % 14 > 6 ? x - 14 : x;
+              const ly = y % 14 > 6 ? y - 14 : y;
+              const onBorder = lx === 0 || lx === 6 || ly === 0 || ly === 6;
+              const onCenter = lx >= 2 && lx <= 4 && ly >= 2 && ly <= 4;
+              if (onBorder || onCenter) cells.push([x, y]);
+            } else if (filled) {
+              cells.push([x, y]);
+            }
+            void inFinder;
+          }
+        }
+        const rects = cells
+          .map(([x, y]) => `<rect x="${x * 8}" y="${y * 8}" width="8" height="8"/>`)
+          .join('');
+        return `
+          <svg class="qr" viewBox="0 0 168 168" xmlns="http://www.w3.org/2000/svg">
+            <g fill="#0f172a">${rects}</g>
+          </svg>
+        `;
+      }
+
+      // ---------------------------------------------------------------
+      // Render + interaction
+      // ---------------------------------------------------------------
+      let currentScreen = 'setup-1';
+
+      function render() {
+        const s = SCREENS[currentScreen];
+        document.getElementById('frame-route').textContent = s.route;
+        document.getElementById('screen').innerHTML = s.render();
+        renderSwitcher();
+        wireScreen();
+      }
+
+      function renderSwitcher() {
+        const grid = document.getElementById('switcher-grid');
+        grid.innerHTML = Object.entries(SCREENS)
+          .map(
+            ([k, v]) =>
+              `<button class="switcher-btn ${k === currentScreen ? 'active' : ''}" data-screen="${k}">${v.label}</button>`,
+          )
+          .join('');
+        grid.querySelectorAll('[data-screen]').forEach((b) =>
+          b.addEventListener('click', () => {
+            currentScreen = b.dataset.screen;
+            render();
+          }),
+        );
+      }
+
+      function wireScreen() {
+        document.querySelectorAll('[data-go]').forEach((el) =>
+          el.addEventListener('click', (e) => {
+            currentScreen = e.currentTarget.dataset.go;
+            render();
+          }),
+        );
+        document
+          .querySelectorAll('[data-stepup]')
+          .forEach((el) => el.addEventListener('click', () => openModal()));
+      }
+
+      function openModal() {
+        document.getElementById('modal').style.display = 'flex';
+      }
+      function closeModal() {
+        document.getElementById('modal').style.display = 'none';
+      }
+      document.getElementById('modal-cancel').addEventListener('click', closeModal);
+      document.getElementById('modal-confirm').addEventListener('click', closeModal);
+      document.getElementById('modal-passkey').addEventListener('click', closeModal);
+      document.getElementById('stepup-toggle').addEventListener('click', () => {
+        const m = document.getElementById('modal');
+        m.style.display = m.style.display === 'none' ? 'flex' : 'none';
+      });
+
+      // Theme toggle — cycles light → dark → system → light.
+      const THEMES = ['light', 'dark'];
+      let themeIdx = 0;
+      document.getElementById('theme-toggle').addEventListener('click', () => {
+        themeIdx = (themeIdx + 1) % THEMES.length;
+        document.documentElement.setAttribute('data-theme', THEMES[themeIdx]);
+      });
+
+      render();
+    </script>
+  </body>
+</html>

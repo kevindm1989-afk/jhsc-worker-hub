@@ -6,6 +6,12 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
     <meta name="color-scheme" content="light dark" />
     <meta name="theme-color" content="#0f172a" />
+    <!-- Privacy-review priv-F1: clamp the web origin to no-referrer so external
+         "source" links in /legal cannot leak the active path+query to
+         ontario.ca / laws-lois.justice.gc.ca / etc. The concrete anchors
+         already carry rel="noreferrer"; this is defence-in-depth against
+         future links that forget the attribute. -->
+    <meta name="referrer" content="no-referrer" />
     <!-- Fonts are loaded via @fontsource-variable in src/main.tsx — no Google Fonts CDN. -->
     <title>JHSC Worker Hub</title>
     <script>

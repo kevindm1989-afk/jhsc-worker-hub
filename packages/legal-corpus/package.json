@@ -1,0 +1,39 @@
+{
+  "name": "@jhsc/legal-corpus",
+  "version": "0.0.0",
+  "private": true,
+  "description": "JHSC Worker Hub — versioned statute corpus + Drizzle schema + seed loader (ADR-0003).",
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./src/index.ts",
+      "default": "./src/index.ts"
+    },
+    "./schema": {
+      "types": "./src/schema.ts",
+      "default": "./src/schema.ts"
+    },
+    "./fixtures": {
+      "types": "./src/fixtures.ts",
+      "default": "./src/fixtures.ts"
+    },
+    "./hash": {
+      "types": "./src/hash.ts",
+      "default": "./src/hash.ts"
+    }
+  },
+  "scripts": {
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@jhsc/shared-types": "workspace:*",
+    "drizzle-orm": "^0.45.2",
+    "smol-toml": "^1.3.4",
+    "zod": "^3.23.8"
+  },
+  "devDependencies": {
+    "typescript": "^5.7.2",
+    "vitest": "^3.2.4"
+  }
+}

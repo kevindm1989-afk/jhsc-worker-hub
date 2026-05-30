@@ -1,0 +1,33 @@
+{
+  "name": "@jhsc/shared-types",
+  "version": "0.0.0",
+  "private": true,
+  "description": "JHSC Worker Hub — shared type definitions (Result, AuditEventKind, AuthEventKind, branded IDs).",
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./src/index.ts",
+      "default": "./src/index.ts"
+    },
+    "./hazard-transitions": {
+      "types": "./src/hazard-transitions.ts",
+      "default": "./src/hazard-transitions.ts"
+    },
+    "./action-item-transitions": {
+      "types": "./src/action-item-transitions.ts",
+      "default": "./src/action-item-transitions.ts"
+    },
+    "./action-item-flag": {
+      "types": "./src/action-item-flag.ts",
+      "default": "./src/action-item-flag.ts"
+    }
+  },
+  "scripts": {
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run"
+  },
+  "devDependencies": {
+    "typescript": "^5.7.2",
+    "vitest": "^3.2.4"
+  }
+}

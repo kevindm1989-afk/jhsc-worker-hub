@@ -1,0 +1,26 @@
+{
+  "name": "@jhsc/crypto",
+  "version": "0.0.0",
+  "private": true,
+  "description": "JHSC Worker Hub — libsodium wrapper. v=0x02 XChaCha20-Poly1305 writer with v=0x01 backward read + lazy rewrap (ADR-0002).",
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./src/index.ts",
+      "default": "./src/index.ts"
+    }
+  },
+  "scripts": {
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@jhsc/shared-types": "workspace:*",
+    "libsodium-wrappers-sumo": "0.7.15"
+  },
+  "devDependencies": {
+    "@types/libsodium-wrappers-sumo": "^0.7.8",
+    "typescript": "^5.7.2",
+    "vitest": "^3.2.4"
+  }
+}
