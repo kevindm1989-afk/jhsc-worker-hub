@@ -111,18 +111,19 @@ const createBody = z
     (b) =>
       // sec-review F7 / priv-AI-F3 1.6: SECURITY.md T-AI8 promises route-
       // level FK validation for hazard / recommendation / inspection /
-      // incident. Only hazards is actually backed by a DB trigger (the
-      // others ship in 1.8 / 1.9 / later). Reject those source types at
-      // the route until their owning migration lands a trigger; that's
-      // fail-closed and matches the documented mitigation. Existing
-      // 'hazard' source rows still flow through the trigger.
+      // incident. Only hazard (1.5) + inspection (1.8 — T-I18 close-out)
+      // are backed by per-source-type DB triggers; recommendation +
+      // incident remain rejected at the route until 1.9 / later. The
+      // 'inspection' branch landed in migration 0007 alongside the
+      // inspections schema, so this refinement opens in lockstep.
       !b.sourceType ||
       b.sourceType === 'manual' ||
       b.sourceType === 'hazard' ||
+      b.sourceType === 'inspection' ||
       b.sourceType === 'excel_import',
     {
       message:
-        'sourceType not yet supported -- recommendation / inspection / incident land in their owning milestones',
+        'sourceType not yet supported -- recommendation / incident land in their owning milestones',
       path: ['sourceType'],
     },
   );
@@ -930,12 +931,10 @@ class ActionItemWriteAborted extends Error {
 // transaction. Uses pg_advisory_xact_lock keyed on the section name so
 // concurrent inserts into the same section serialize but different
 // sections do not contend (T-AI5). Reused on every path that places an
-// action_item INTO a section: create, move, undo. Without re-allocation
-// on move, the (section, sequence_number) UNIQUE index throws when an
-// inbound item's # collides with one already in the destination
-// (sec-review F2 1.6 -- this fixed the move handler).
+// action_item INTO a section: create, move, undo, and (1.8) the
+// inspections-finding promote handler.
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
-async function allocateSequenceNumber(tx: any, section: string): Promise<number> {
+export async function allocateSequenceNumber(tx: any, section: string): Promise<number> {
   await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtext('action_items.seq.' || ${section}))`);
   const seq = (await tx.execute(sql`
     SELECT COALESCE(MAX(sequence_number), 0) + 1 AS n

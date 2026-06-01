@@ -27,7 +27,8 @@
     "db:up": "docker compose up -d postgres",
     "db:down": "docker compose down",
     "db:logs": "docker compose logs -f postgres",
-    "audit": "pnpm audit --audit-level=high"
+    "audit": "pnpm audit --audit-level=high",
+    "seed:inspection-templates": "bun apps/api/scripts/seed-inspection-templates.ts"
   },
   "devDependencies": {
     "@types/node": "^20.14.0",
