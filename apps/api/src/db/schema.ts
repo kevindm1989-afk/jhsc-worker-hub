@@ -22,6 +22,7 @@ import {
   inet,
   integer,
   jsonb,
+  numeric,
   pgEnum,
   pgTable,
   smallint,
@@ -505,6 +506,79 @@ export const actionItemMoves = pgTable(
 );
 
 // ---------------------------------------------------------------------------
+// Evidence (1.7, ADR-0006)
+// ---------------------------------------------------------------------------
+
+// Workplace X25519 key pair. Public key shipped to the browser per
+// session for sealed-box encryption; private key sealed under the
+// workplace KEK and opened only inside the API's evidence decrypt path.
+
+export const workplaceKeys = pgTable(
+  'workplace_keys',
+  {
+    id: uuid('id')
+      .primaryKey()
+      .default(sql`gen_random_uuid()`),
+    active: boolean('active').notNull().default(true),
+    publicKey: bytea('public_key').notNull(),
+    privateKeyCt: bytea('private_key_ct').notNull(),
+    privateKeyDekCt: bytea('private_key_dek_ct').notNull(),
+    createdAt: timestamp('created_at', { withTimezone: true })
+      .notNull()
+      .default(sql`now()`),
+    retiredAt: timestamp('retired_at', { withTimezone: true }),
+  },
+  (t) => ({
+    activeIdx: index('workplace_keys_active_idx').on(t.active),
+  }),
+);
+
+// Evidence files. Polymorphic linked_type/linked_id with allow-listed
+// values; route layer further constrains to 'hazard' and 'action_item'
+// in 1.7 (fail-closed forward seam). GPS precision capped at
+// numeric(8,4) — ~11m, intentionally too coarse to identify a worker's
+// specific station inside an industrial site.
+
+export const evidenceFiles = pgTable(
+  'evidence_files',
+  {
+    id: uuid('id')
+      .primaryKey()
+      .default(sql`gen_random_uuid()`),
+    linkedType: text('linked_type').notNull(),
+    linkedId: uuid('linked_id').notNull(),
+    storageKey: text('storage_key').notNull(),
+    ciphertextSha256: bytea('ciphertext_sha256').notNull(),
+    sealedDek: bytea('sealed_dek').notNull(),
+    workplaceKeyId: uuid('workplace_key_id')
+      .notNull()
+      .references(() => workplaceKeys.id, { onDelete: 'restrict', onUpdate: 'restrict' }),
+    plaintextSha256: bytea('plaintext_sha256').notNull(),
+    mimeType: text('mime_type').notNull(),
+    byteSize: bigint('byte_size', { mode: 'number' }).notNull(),
+    capturedAt: timestamp('captured_at', { withTimezone: true }),
+    gpsLatitude: numeric('gps_latitude', { precision: 8, scale: 4 }),
+    gpsLongitude: numeric('gps_longitude', { precision: 8, scale: 4 }),
+    gpsAccuracyM: numeric('gps_accuracy_m', { precision: 8, scale: 2 }),
+    auditIdx: bigint('audit_idx', { mode: 'number' })
+      .notNull()
+      .references(() => auditLog.idx, { onDelete: 'restrict', onUpdate: 'restrict' }),
+    uploadedByUserId: uuid('uploaded_by_user_id')
+      .notNull()
+      .references(() => users.id, { onDelete: 'restrict', onUpdate: 'restrict' }),
+    uploadedAt: timestamp('uploaded_at', { withTimezone: true })
+      .notNull()
+      .default(sql`now()`),
+  },
+  (t) => ({
+    storageKeyUnique: uniqueIndex('evidence_files_storage_key_unique').on(t.storageKey),
+    linkedIdx: index('evidence_files_linked_idx').on(t.linkedType, t.linkedId),
+    auditIdxUnique: uniqueIndex('evidence_files_audit_idx_unique').on(t.auditIdx),
+    uploadedAtIdx: index('evidence_files_uploaded_at_idx').on(t.uploadedAt),
+  }),
+);
+
+// ---------------------------------------------------------------------------
 // Re-export for Drizzle adapters
 // ---------------------------------------------------------------------------
 
@@ -528,6 +602,8 @@ export const schema = {
   hazardStatusHistory,
   actionItems,
   actionItemMoves,
+  workplaceKeys,
+  evidenceFiles,
   loginAttemptOutcome,
   authEventKind,
   webauthnPurpose,

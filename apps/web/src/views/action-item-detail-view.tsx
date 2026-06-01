@@ -8,6 +8,7 @@ import { cn } from '@/lib/utils';
 import { ActionItemsApiError, actionItemsApi, type ActionItemDetail } from '@/action-items/api';
 import { ActionFlagBadge, RiskDot, SectionBadge, StatusBadge } from '@/action-items/components';
 import { stepUpEmitter } from '@/auth/api';
+import { CaptureFab, EvidenceList } from '@/evidence/components';
 import type { ActionItemSection } from '@jhsc/shared-types';
 import { actionItemTransitionRequiresStepUp } from '@jhsc/shared-types/action-item-transitions';
 
@@ -222,7 +223,21 @@ function DetailInner({ id }: { id: string }): JSX.Element {
         </div>
       ) : null}
 
+      <section
+        aria-labelledby="ai-evidence-heading"
+        className="mb-4 rounded-md border border-border bg-card p-4"
+      >
+        <h2
+          id="ai-evidence-heading"
+          className="mb-2 text-xs font-medium uppercase tracking-wide text-muted-foreground"
+        >
+          Evidence
+        </h2>
+        <EvidenceList linkedType="action_item" linkedId={item.id} />
+      </section>
+
       <HistoryPanel history={item.history} onUndo={applyUndo} pendingUndo={pendingUndo} />
+      <CaptureFab linkedType="action_item" linkedId={item.id} />
 
       <div className="mt-6 text-xs text-muted-foreground">
         Every section move is anchored in the audit chain — the audit row index appears next to each

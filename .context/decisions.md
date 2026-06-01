@@ -43,6 +43,24 @@ The locked tech stack and non-negotiables in `CLAUDE.md` are the canonical proje
 - **Alternatives ruled out:** Substrate-first (the retracted entry) — defensible on security grounds, but rewriting the ROADMAP sequencing belongs to a ROADMAP edit + approval cycle, not a `.context/` ledger entry that hides the change.
 - **ADR:** none. The previous "pending ADR 0001-security-substrate-first" is cancelled. If, when 1.3 lands, the genesis-backfill design needs an ADR, the architect will draft one then.
 
+## 2026-05-30 — Milestone 1.7: evidence + Capture-to-Record — client-side encryption via workplace sealed-box key pair
+
+- **Decision:** Land `evidence_files` + `workplace_keys` tables per ADR-0006. Per-file DEK generated in the browser via `crypto.getRandomValues`, sealed with the workplace X25519 public key using libsodium `crypto_box_seal`. The workplace private key stays sealed under the KEK in Fly Secrets; the API opens sealed DEKs only inside the decrypt-and-stream handler (`GET /api/evidence/:id/decrypt-url`). Two-step upload: browser PUTs ciphertext directly to Tigris via 5-min presigned URL, then POSTs the metadata + sealed_dek to `/api/evidence` for finalize. `evidence.uploaded` + `evidence.read` chain events carry `plaintext_sha256` as the integrity anchor.
+- **Why:** CLAUDE.md non-negotiable #11 establishes that imports parse + encrypt browser-side before sync; evidence is the same shape with the same posture. The workplace public-key model lets the browser encrypt without ever holding a key that decrypts — the API holds the private key but only opens it inside one bounded handler. Capture-to-Record (CLAUDE.md "Signature Interactions") is the first identity-defining UX to ship.
+- **Voice-to-text:** native browser `SpeechRecognition` API only. No third-party ASR (CLAUDE.md non-negotiable #3). Falls back to plain textarea on Firefox/Safari desktop.
+- **GPS precision:** `numeric(8,4)` — ~11 m resolution. Worker-station-level precision (6 decimals = 11 cm) is intentionally lost to bound the worker-location PI surface.
+- **Scope deferrals (per ROADMAP):**
+  - `evidence_redactions` table for misfiling correction → 1.12 hardening.
+  - Workplace key pair rotation script → 1.12 (the operational floor in 1.7 is "don't rotate the workplace key pair without the rewrap script").
+  - Encrypted thumbnails for the list view → 1.10 (offline-first; the cache layer makes the round-trip cheap).
+  - `recommendation` / `inspection_finding` / `incident` linked_type values → rejected at the route layer until those tables ship in their owning milestones.
+- **Alternatives ruled out:**
+  - Direct workplace KEK in the browser — violates CLAUDE.md ("Master key in Fly Secrets, never returned by API").
+  - Per-session symmetric upload key — leaves a plaintext-shaped key on the server side.
+  - Cloudflare-Worker filter for the decrypt path — too much new infrastructure for 1.7 scope.
+  - EXIF-preserve mode — every uploaded photo loses metadata via the canvas re-encode path; GPS comes from the live Geolocation API at the moment of upload, not from EXIF.
+- **ADR:** [`docs/adr/0006-evidence-capture.md`](../docs/adr/0006-evidence-capture.md).
+
 ## 2026-05-29 — Milestone 1.6: action items — central operational entity, chain-anchored section moves, Action Flag pure function
 
 - **Decision:** Land `action_items` + `action_item_moves` tables per ADR-0005. Four envelope-encrypted columns (`description`, `recommended_action`, `raised_by` external, `follow_up_owner` external) plus the encrypted move `reason_ct`. Four fixed taxonomies (Type, Status, Section, Risk) mirroring CLAUDE.md §"Action Item Conventions" verbatim. Section workflow as a directed-graph pure helper in `packages/shared-types/src/action-item-transitions.ts` next to the 1.5 hazard graph. Action Flag (ARCHITECTURE.md §5) computed server-side from `(section, status, start_date, closed_date, today)` and projected into every list/detail response so the client never re-computes. Six routes (POST create, GET list, GET detail, PATCH update, POST move, POST move-undo) — no DELETE. Audit chain emits `action_item.created`, `action_item.updated`, `action_item.moved`, `action_item.move_undone` with non-PI payloads. Step-up gates `→ archived` and move-undo. Polymorphic `(source_type, source_id)` accepts `'manual' | 'hazard' | 'recommendation' | 'inspection' | 'incident' | 'excel_import'`; only `'hazard'` is FK-validated in 1.6.

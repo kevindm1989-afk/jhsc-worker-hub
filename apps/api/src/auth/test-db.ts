@@ -13,6 +13,8 @@ export function hasDb(): boolean {
 }
 
 const TABLES_TO_TRUNCATE = [
+  'evidence_files',
+  'workplace_keys',
   'action_item_moves',
   'action_items',
   'hazard_status_history',

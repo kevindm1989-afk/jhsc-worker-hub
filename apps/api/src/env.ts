@@ -50,6 +50,17 @@ const envSchema = z
     AUTH_LOCKOUT_LONG_WINDOW_SECONDS: z.coerce.number().int().positive().default(3600),
     AUTH_LOCKOUT_HARD_FAILS: z.coerce.number().int().positive().default(20),
     AUTH_LOCKOUT_HARD_WINDOW_SECONDS: z.coerce.number().int().positive().default(86400),
+
+    // Tigris (S3-compatible object storage) for evidence files in
+    // Milestone 1.7 (ADR-0006). Same optional-at-schema posture as
+    // DATABASE_URL: the evidence route asserts at first use via
+    // requireTigrisEnv(), so non-evidence code paths and unit tests
+    // don't need the bucket configured.
+    TIGRIS_BUCKET: z.string().trim().optional(),
+    TIGRIS_ENDPOINT: z.string().url().optional(),
+    TIGRIS_REGION: z.string().trim().default('auto'),
+    TIGRIS_ACCESS_KEY_ID: z.string().trim().optional(),
+    TIGRIS_SECRET_ACCESS_KEY: z.string().trim().optional(),
   })
   .superRefine((v, ctx) => {
     // Lockout ladder must be strictly ascending or the floor doesn't make
@@ -131,6 +142,31 @@ export function requireAuthEnv(): AuthEnv {
     );
   }
   return env as AuthEnv;
+}
+
+export interface TigrisEnv {
+  readonly TIGRIS_BUCKET: string;
+  readonly TIGRIS_ENDPOINT: string;
+  readonly TIGRIS_REGION: string;
+  readonly TIGRIS_ACCESS_KEY_ID: string;
+  readonly TIGRIS_SECRET_ACCESS_KEY: string;
+}
+
+/**
+ * Evidence routes call this to assert Tigris secrets are present.
+ * Same optional-at-schema, required-at-use shape as requireAuthEnv()
+ * so non-evidence tests don't have to mock the bucket env.
+ */
+export function requireTigrisEnv(): TigrisEnv {
+  const missing: string[] = [];
+  if (!env.TIGRIS_BUCKET) missing.push('TIGRIS_BUCKET');
+  if (!env.TIGRIS_ENDPOINT) missing.push('TIGRIS_ENDPOINT');
+  if (!env.TIGRIS_ACCESS_KEY_ID) missing.push('TIGRIS_ACCESS_KEY_ID');
+  if (!env.TIGRIS_SECRET_ACCESS_KEY) missing.push('TIGRIS_SECRET_ACCESS_KEY');
+  if (missing.length > 0) {
+    throw new Error(`Tigris env missing required secrets: ${missing.join(', ')}`);
+  }
+  return env as TigrisEnv;
 }
 
 export interface JwtKeyPair {
