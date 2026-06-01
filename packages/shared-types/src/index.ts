@@ -85,6 +85,12 @@ export type AuditEventKind =
   | 'evidence.uploaded'
   | 'evidence.read'
   | 'evidence.list_accessed'
+  | 'inspection.created'
+  | 'inspection_finding.created'
+  | 'inspection_finding.promoted'
+  | 'inspection.signed'
+  | 'inspection.exported'
+  | 'audit.inspection_template.seeded'
   | AuthEventKind;
 
 // ---------------------------------------------------------------------------
@@ -169,6 +175,72 @@ export const actionItemUpdateField = [
   'type_subtype',
 ] as const;
 export type ActionItemUpdateField = (typeof actionItemUpdateField)[number];
+
+// ---------------------------------------------------------------------------
+// Inspections (Milestone 1.8, ADR-0007)
+// ---------------------------------------------------------------------------
+
+/** Stable template_code namespace. 'custom' is the prefix-bearing slot for
+ * workplace-authored templates (ADR-0007 §3.5). */
+export const inspectionTemplateCode = ['zone_monthly', 'rack_inspection', 'custom'] as const;
+export type InspectionTemplateCode = (typeof inspectionTemplateCode)[number];
+
+/** Two status vocabularies ship in 1.8 — ABC+X (Zone Monthly) and GAR
+ * (Rack / CSA A344). ADR-0007 §3.2 deliberately keeps them distinct
+ * rather than flattening to a common axis. */
+export const inspectionStatusVocabKind = ['ABC_X', 'GAR'] as const;
+export type InspectionStatusVocabKind = (typeof inspectionStatusVocabKind)[number];
+
+/** ABC+X codes. 'X' is the not-promotable marker (no issue / N/A). */
+export const inspectionFindingStatusAbcx = ['A', 'B', 'C', 'X'] as const;
+export type InspectionFindingStatusAbcx = (typeof inspectionFindingStatusAbcx)[number];
+
+/** GAR codes. 'G' is the not-promotable marker (green / no issue). Note
+ * 'A' overloads with ABC+X — the row carries both status_vocab and
+ * status_value so the API can disambiguate. */
+export const inspectionFindingStatusGar = ['G', 'A', 'R'] as const;
+export type InspectionFindingStatusGar = (typeof inspectionFindingStatusGar)[number];
+
+/** Conduct lifecycle states. The DB CHECK accepts these values; the
+ * transition graph (scheduled → in_progress → awaiting_signatures →
+ * complete → archived) is enforced at the route layer. */
+export const inspectionConductState = [
+  'scheduled',
+  'in_progress',
+  'awaiting_signatures',
+  'complete',
+  'archived',
+] as const;
+export type InspectionConductState = (typeof inspectionConductState)[number];
+
+/** Signature roles. Rack requires all three; Zone Monthly only inspector
+ * (ADR-0007 §3.8). */
+export const inspectionSignatureRole = ['inspector', 'supervisor', 'jhsc_worker_co_chair'] as const;
+export type InspectionSignatureRole = (typeof inspectionSignatureRole)[number];
+
+/** Export kind discriminator on export_records.kind. */
+export const inspectionExportKind = ['single', 'batch'] as const;
+export type InspectionExportKind = (typeof inspectionExportKind)[number];
+
+/**
+ * Promotability gate for inspection findings (CLAUDE.md #15).
+ * Returns false for 'X' (ABC+X) and 'G' (GAR) — both the not-promotable
+ * markers — and true for every other in-vocab value. The route layer
+ * and the UI both consume this helper; it is the single source of
+ * truth for the X/G fail-closed gate.
+ */
+export function inspectionPromotability(
+  statusVocab: InspectionStatusVocabKind,
+  statusValue: string,
+): boolean {
+  if (statusVocab === 'ABC_X') {
+    return statusValue === 'A' || statusValue === 'B' || statusValue === 'C';
+  }
+  if (statusVocab === 'GAR') {
+    return statusValue === 'A' || statusValue === 'R';
+  }
+  return false;
+}
 
 // ---------------------------------------------------------------------------
 // Evidence (Milestone 1.7, ADR-0006)
@@ -299,6 +371,54 @@ export type AuditPayload =
       readonly linkedType: EvidenceLinkedType;
       readonly linkedId: string;
       readonly rowCount: number;
+    }
+  | {
+      readonly kind: 'inspection.created';
+      readonly inspectionId: string;
+      readonly templateCode: InspectionTemplateCode;
+      readonly templateVersionId: string;
+      readonly conductedByUserId: string;
+      readonly zoneId: string;
+      readonly scheduledFor: string | null;
+    }
+  | {
+      readonly kind: 'inspection_finding.created';
+      readonly inspectionId: string;
+      readonly findingId: string;
+      readonly sectionKey: string;
+      readonly statusVocab: InspectionStatusVocabKind;
+      readonly statusValue: string;
+      readonly hasObservation: boolean;
+      readonly hasCorrectiveAction: boolean;
+    }
+  | {
+      readonly kind: 'inspection_finding.promoted';
+      readonly findingId: string;
+      readonly actionItemId: string;
+      readonly risk: ActionItemRisk;
+    }
+  | {
+      readonly kind: 'inspection.signed';
+      readonly inspectionId: string;
+      readonly signatureId: string;
+      readonly role: InspectionSignatureRole;
+    }
+  | {
+      readonly kind: 'inspection.exported';
+      readonly exportId: string;
+      readonly kindOfExport: InspectionExportKind;
+      readonly inspectionIds: ReadonlyArray<string>;
+      readonly outputSha256: string;
+      readonly byteSize: number;
+    }
+  | {
+      readonly kind: 'audit.inspection_template.seeded';
+      readonly templateCode: InspectionTemplateCode;
+      readonly templateVersionId: string;
+      readonly version: number;
+      readonly statusVocab: InspectionStatusVocabKind;
+      readonly sectionCount: number;
+      readonly structureSha256: string;
     }
   | { readonly kind: 'signup'; readonly via: 'first_run' | 'invite' }
   | { readonly kind: 'login.passkey' }
