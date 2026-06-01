@@ -83,8 +83,18 @@ import { rateLimit } from '../../middleware/rate-limit';
 import { openOptionalField, sealField, sealOptionalField } from '../../inspections/crypto';
 import { sealField as sealActionItemField } from '../../action-items/crypto';
 import { allocateSequenceNumber } from '../action-items';
+import { inspectionsExportsRoute } from './exports';
+
+export { inspectionsExportsRoute } from './exports';
 
 export const inspectionsRoute = new Hono();
+// Mount the exports sub-route under /api/inspections/exports. S4 (PDF
+// export) shares the inspections route group's auth + rate-limit
+// middleware via authMiddleware re-applied inside exports.ts. Keeping
+// the exports surface in its own file because the render-decrypt-anchor
+// pipeline is substantial enough to warrant the separation; the create
+// flow alone is ~250 lines.
+inspectionsRoute.route('/exports', inspectionsExportsRoute);
 
 inspectionsRoute.use('*', authMiddleware());
 // Same ordering rationale as evidence + action-items: rateLimit BEFORE

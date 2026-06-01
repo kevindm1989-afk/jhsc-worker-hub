@@ -330,6 +330,38 @@ export interface PatchInspectionResponse {
 }
 
 // ---------------------------------------------------------------------------
+// Export DTOs (Milestone 1.8 S4)
+// ---------------------------------------------------------------------------
+
+export type InspectionExportKindT = 'single' | 'batch';
+
+export interface CreateExportBody {
+  readonly kind: InspectionExportKindT;
+  readonly inspectionIds: ReadonlyArray<string>;
+}
+
+export interface CreateExportResponse {
+  readonly exportId: string;
+  readonly kind: InspectionExportKindT;
+  readonly outputSha256: string;
+  readonly byteSize: number;
+  readonly expiresAt: string;
+  readonly chainIdx: number;
+}
+
+export interface ExportSummary {
+  readonly id: string;
+  readonly kind: InspectionExportKindT;
+  readonly inspectionCount: number;
+  readonly inspectionIds: ReadonlyArray<string>;
+  readonly requestedByUserId: string;
+  readonly requestedAt: string;
+  readonly outputSha256: string;
+  readonly byteSize: number;
+  readonly expiresAt: string;
+}
+
+// ---------------------------------------------------------------------------
 // Public API surface
 // ---------------------------------------------------------------------------
 
@@ -405,6 +437,62 @@ export const inspectionsApi = {
       method: 'POST',
       json: body,
     }),
+
+  // Exports (S4) ---------------------------------------------------------
+  //
+  // create: POST /api/inspections/exports → render + store + anchor.
+  //   step-up required (60s freshness); on 401 dispatches the
+  //   stepUpEmitter for the global modal.
+  //
+  // download: GET /api/inspections/exports/:id/download → returns a Blob
+  //   of the PDF. The server already sets Content-Disposition: attachment
+  //   + a strict CSP sandbox; we mirror the 1.7 evidence reveal flow
+  //   (open the blob URL, revoke after 5s, sec-F10 close-out).
+  //
+  // list: GET /api/inspections/exports → metadata.
+  exports: {
+    create: (body: CreateExportBody): Promise<CreateExportResponse> =>
+      callOrThrow(`${INSPECTIONS_BASE}/exports`, {
+        method: 'POST',
+        json: body,
+      }),
+    /** Returns the raw PDF Blob; caller is responsible for the open/revoke dance. */
+    download: async (id: string): Promise<Blob> => {
+      const res = await fetch(`${INSPECTIONS_BASE}/exports/${encodeURIComponent(id)}/download`, {
+        method: 'GET',
+        credentials: 'same-origin',
+        headers: { 'X-Requested-With': 'jhsc-web' },
+      });
+      if (res.status === 401) {
+        const text = await res.text().catch(() => '');
+        let parsed: unknown = text;
+        try {
+          parsed = JSON.parse(text);
+        } catch {
+          // leave as text
+        }
+        const errBody = parsed as { error?: string; action?: string } | undefined;
+        if (errBody?.error === 'step_up_required') {
+          const action = errBody.action ?? 'inspection.export.download';
+          stepUpEmitter.dispatch(action);
+        }
+        throw new InspectionApiError(401, parsed);
+      }
+      if (!res.ok) {
+        const text = await res.text().catch(() => '');
+        let parsed: unknown = text;
+        try {
+          parsed = JSON.parse(text);
+        } catch {
+          // leave as text
+        }
+        throw new InspectionApiError(res.status, parsed);
+      }
+      return res.blob();
+    },
+    list: (): Promise<{ items: ReadonlyArray<ExportSummary> }> =>
+      callOrThrow(`${INSPECTIONS_BASE}/exports`),
+  },
 };
 
 // Re-export the sentinel narrowing helper so views can use it without

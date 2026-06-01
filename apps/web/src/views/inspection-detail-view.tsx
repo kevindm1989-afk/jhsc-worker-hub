@@ -30,6 +30,7 @@ import { cn } from '@/lib/utils';
 import {
   InspectionApiError,
   inspectionsApi,
+  type CreateExportResponse,
   type CreateFindingBody,
   type InspectionDetail,
   type InspectionFindingSummary,
@@ -363,20 +364,137 @@ function StateControls({
           <p className="text-sm text-muted-foreground">
             Inspection complete. You can archive it once it has been included in a meeting export.
           </p>
-          <Button
-            type="button"
-            variant="outline"
-            size="sm"
-            disabled={pending !== null}
-            onClick={() => onTransition('archived')}
-          >
-            {pending === 'archived' ? 'Archiving…' : 'Archive'}
-          </Button>
+          <div className="flex items-center gap-2">
+            <ExportPanel inspectionId={inspection.id} />
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              disabled={pending !== null}
+              onClick={() => onTransition('archived')}
+            >
+              {pending === 'archived' ? 'Archiving…' : 'Archive'}
+            </Button>
+          </div>
         </div>
       </div>
     );
   }
   return null;
+}
+
+// ---------------------------------------------------------------------------
+// Export panel — visible only when state='complete'. CLAUDE.md #16:
+// every export carries step-up + audit. The button click POSTs to
+// /api/inspections/exports; on 401 the api wrapper dispatches the
+// global step-up modal. On success the panel shows a receipt (export
+// id, sha-prefix, byte size, expiry) plus a Download button that opens
+// the blob in a new tab with the 5s revoke + noopener,noreferrer dance
+// (mirror of the 1.7 evidence reveal sec-F10 close-out).
+// ---------------------------------------------------------------------------
+
+function ExportPanel({ inspectionId }: { inspectionId: string }): JSX.Element {
+  const [busy, setBusy] = useState(false);
+  const [receipt, setReceipt] = useState<CreateExportResponse | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  async function startExport(): Promise<void> {
+    setBusy(true);
+    setError(null);
+    try {
+      const r = await inspectionsApi.exports.create({
+        kind: 'single',
+        inspectionIds: [inspectionId],
+      });
+      setReceipt(r);
+    } catch (e) {
+      if (e instanceof InspectionApiError) {
+        if (e.status === 401) {
+          // Step-up already dispatched by the API wrapper; tell the user.
+          setError('Re-authenticate to export. The step-up dialog should be open.');
+        } else if (e.status === 429) {
+          setError('Export rate limit reached. Try again in an hour.');
+        } else {
+          setError(`Could not export (HTTP ${e.status}).`);
+        }
+      } else {
+        setError(e instanceof Error ? e.message : String(e));
+      }
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function downloadExport(): Promise<void> {
+    if (!receipt) return;
+    setBusy(true);
+    setError(null);
+    try {
+      const blob = await inspectionsApi.exports.download(receipt.exportId);
+      const url = URL.createObjectURL(blob);
+      // sec-F10 close-out: noopener,noreferrer and revoke the blob URL
+      // after 5s. The server-set Content-Disposition: attachment is the
+      // primary mechanism; this is the belt-and-suspenders pass.
+      window.open(url, '_blank', 'noopener,noreferrer');
+      window.setTimeout(() => URL.revokeObjectURL(url), 5_000);
+    } catch (e) {
+      if (e instanceof InspectionApiError && e.status === 401) {
+        setError('Re-authenticate to download. The step-up dialog should be open.');
+      } else {
+        setError(e instanceof Error ? e.message : String(e));
+      }
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  if (receipt === null) {
+    return (
+      <div className="flex flex-col items-end gap-1">
+        <Button
+          type="button"
+          variant="default"
+          size="sm"
+          disabled={busy}
+          onClick={() => {
+            void startExport();
+          }}
+        >
+          {busy ? 'Exporting…' : 'Export PDF'}
+        </Button>
+        {error ? <span className="text-[11px] text-status-rejected">{error}</span> : null}
+      </div>
+    );
+  }
+  return (
+    <div className="flex flex-col items-end gap-1 rounded-md border border-border bg-background p-2">
+      <div className="flex items-center gap-2 text-[11px] text-muted-foreground">
+        <span>
+          Export <span className="font-mono tabular-nums">{receipt.exportId.slice(0, 8)}</span>
+        </span>
+        <span>·</span>
+        <span>
+          sha <span className="font-mono tabular-nums">{receipt.outputSha256.slice(0, 12)}</span>
+        </span>
+        <span>·</span>
+        <span>{(receipt.byteSize / 1024).toFixed(1)} KB</span>
+        <span>·</span>
+        <span>expires {new Date(receipt.expiresAt).toLocaleDateString()}</span>
+      </div>
+      <Button
+        type="button"
+        variant="outline"
+        size="sm"
+        disabled={busy}
+        onClick={() => {
+          void downloadExport();
+        }}
+      >
+        {busy ? 'Opening…' : 'Download PDF'}
+      </Button>
+      {error ? <span className="text-[11px] text-status-rejected">{error}</span> : null}
+    </div>
+  );
 }
 
 // ---------------------------------------------------------------------------

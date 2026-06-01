@@ -1,7 +1,8 @@
-import { render, screen } from '@testing-library/react';
+import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { describe, expect, it, vi } from 'vitest';
 import { MemoryRouter, Route, Routes } from 'react-router-dom';
 import { InspectionDetailView } from '../views/inspection-detail-view';
+import { stepUpEmitter } from '@/auth/api';
 
 // Verifies the state-aware affordances on the conduct-flow view:
 //   - in_progress: per-item "Add finding" buttons rendered;
@@ -175,6 +176,92 @@ describe('InspectionDetailView — in_progress', () => {
     expect(finish).not.toBeDisabled();
     // The finding card is present.
     expect(screen.getByText(/1 finding recorded so far/)).toBeInTheDocument();
+  });
+});
+
+describe('InspectionDetailView — S4 Export PDF affordance', () => {
+  const COMPLETE_ZONE_MONTHLY = {
+    ...ZONE_MONTHLY_WITH_FINDING,
+    state: 'complete',
+    completedAt: '2026-05-29T11:00:00Z',
+    signatures: [
+      {
+        id: 'siggggg1-ffff-ffff-ffff-ffffffffffff',
+        role: 'inspector',
+        signedByUserId: 'user-1',
+        signedAt: '2026-05-29T11:00:00Z',
+        hasNote: false,
+      },
+    ],
+  };
+
+  it('renders the Export PDF button only when state=complete', async () => {
+    mockFetch((url) => {
+      if (url === `/api/inspections/${INSPECTION_ID}`) {
+        return jsonResponse(COMPLETE_ZONE_MONTHLY);
+      }
+      return undefined;
+    });
+    render(
+      <MemoryRouter initialEntries={[`/inspections/${INSPECTION_ID}`]}>
+        <Routes>
+          <Route path="/inspections/:id" element={<InspectionDetailView />} />
+        </Routes>
+      </MemoryRouter>,
+    );
+    await screen.findByRole('heading', { level: 1, name: 'Zone Monthly Walk-through' });
+    expect(screen.getByRole('button', { name: /Export PDF/i })).toBeInTheDocument();
+  });
+
+  it('does NOT render the Export PDF button when state=in_progress', async () => {
+    mockFetch((url) => {
+      if (url === `/api/inspections/${INSPECTION_ID}`) {
+        return jsonResponse(ZONE_MONTHLY_WITH_FINDING);
+      }
+      return undefined;
+    });
+    render(
+      <MemoryRouter initialEntries={[`/inspections/${INSPECTION_ID}`]}>
+        <Routes>
+          <Route path="/inspections/:id" element={<InspectionDetailView />} />
+        </Routes>
+      </MemoryRouter>,
+    );
+    await screen.findByRole('heading', { level: 1, name: 'Zone Monthly Walk-through' });
+    expect(screen.queryByRole('button', { name: /Export PDF/i })).not.toBeInTheDocument();
+  });
+
+  it('dispatches stepUpEmitter when the export POST returns 401 step_up_required', async () => {
+    mockFetch((url, init) => {
+      if (url === `/api/inspections/${INSPECTION_ID}` && (init?.method ?? 'GET') === 'GET') {
+        return jsonResponse(COMPLETE_ZONE_MONTHLY);
+      }
+      if (url === `/api/inspections/exports` && (init?.method ?? 'GET') === 'POST') {
+        return jsonResponse({ error: 'step_up_required', action: 'inspection.export' }, 401);
+      }
+      return undefined;
+    });
+
+    const events: string[] = [];
+    const unsubscribe = stepUpEmitter.subscribe((action) => {
+      events.push(action);
+    });
+
+    render(
+      <MemoryRouter initialEntries={[`/inspections/${INSPECTION_ID}`]}>
+        <Routes>
+          <Route path="/inspections/:id" element={<InspectionDetailView />} />
+        </Routes>
+      </MemoryRouter>,
+    );
+    await screen.findByRole('heading', { level: 1, name: 'Zone Monthly Walk-through' });
+    const button = screen.getByRole('button', { name: /Export PDF/i });
+    fireEvent.click(button);
+
+    await waitFor(() => {
+      expect(events).toContain('inspection.export');
+    });
+    unsubscribe();
   });
 });
 

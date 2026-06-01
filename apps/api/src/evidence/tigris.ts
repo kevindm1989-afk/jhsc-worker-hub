@@ -6,7 +6,12 @@
 // one file (matching the @jhsc/crypto + apps/api/src/hazards/crypto.ts
 // + apps/api/src/action-items/crypto.ts pattern).
 
-import { GetObjectCommand, HeadObjectCommand, S3Client } from '@aws-sdk/client-s3';
+import {
+  GetObjectCommand,
+  HeadObjectCommand,
+  PutObjectCommand,
+  S3Client,
+} from '@aws-sdk/client-s3';
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
 import { requireTigrisEnv } from '../env';
 
@@ -39,9 +44,6 @@ export async function presignEvidenceUpload(opts: {
 }): Promise<{ uploadUrl: string; expiresInSeconds: number }> {
   const env = requireTigrisEnv();
   const expiresInSeconds = 5 * 60;
-  // Lazy import avoids an upfront require cost when evidence routes
-  // are not exercised in a given test run.
-  const { PutObjectCommand } = await import('@aws-sdk/client-s3');
   const cmd = new PutObjectCommand({
     Bucket: env.TIGRIS_BUCKET,
     Key: opts.storageKey,
@@ -94,6 +96,35 @@ export async function fetchEvidenceCiphertext(storageKey: string): Promise<Uint8
   // transformToByteArray is the recommended path for binary blobs.
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   return await (body as any).transformToByteArray();
+}
+
+/**
+ * Server-side direct PUT to Tigris. Used by the inspection export route
+ * (S4) where the API already holds the final bytes in process memory
+ * (rendered PDF) and has no reason to round-trip through a presigned
+ * browser upload. The evidence route's two-step `presignEvidenceUpload`
+ * + browser-direct PUT path is preserved for the original upload flow.
+ *
+ * The caller is expected to have already hashed the bytes for the
+ * `output_sha256` chain anchor + DB row. This helper does NOT hash —
+ * keeping the function single-purpose so the caller controls when the
+ * hash is bound to the plaintext buffer.
+ */
+export async function putEvidenceObject(opts: {
+  storageKey: string;
+  bytes: Uint8Array;
+  mimeType: string;
+}): Promise<void> {
+  const env = requireTigrisEnv();
+  await getClient().send(
+    new PutObjectCommand({
+      Bucket: env.TIGRIS_BUCKET,
+      Key: opts.storageKey,
+      ContentType: opts.mimeType,
+      ContentLength: opts.bytes.length,
+      Body: Buffer.from(opts.bytes),
+    }),
+  );
 }
 
 /** Test-only: drop the cached client. */

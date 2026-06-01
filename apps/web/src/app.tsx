@@ -13,6 +13,7 @@ import { HazardNewView } from './views/hazard-new-view';
 import { HazardsView } from './views/hazards-view';
 import { FindingDetailView } from './views/finding-detail-view';
 import { InspectionDetailView } from './views/inspection-detail-view';
+import { InspectionsExportsView } from './views/inspections-exports-view';
 import { InspectionsView } from './views/inspections-view';
 import { NewInspectionView } from './views/new-inspection-view';
 import { NewTemplateView } from './views/new-template-view';
@@ -54,6 +55,7 @@ export function App(): JSX.Element {
                 <Route path="/capture" element={<CaptureView />} />
                 <Route path="/inspections" element={<InspectionsView />} />
                 <Route path="/inspections/new" element={<NewInspectionView />} />
+                <Route path="/inspections/exports" element={<InspectionsExportsView />} />
                 <Route path="/inspections/:id" element={<InspectionDetailView />} />
                 <Route
                   path="/inspections/:id/findings/:findingId"
