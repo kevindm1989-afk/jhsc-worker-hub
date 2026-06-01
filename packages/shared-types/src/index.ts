@@ -82,6 +82,8 @@ export type AuditEventKind =
   | 'action_item.updated'
   | 'action_item.moved'
   | 'action_item.move_undone'
+  | 'evidence.uploaded'
+  | 'evidence.read'
   | AuthEventKind;
 
 // ---------------------------------------------------------------------------
@@ -167,6 +169,38 @@ export const actionItemUpdateField = [
 ] as const;
 export type ActionItemUpdateField = (typeof actionItemUpdateField)[number];
 
+// ---------------------------------------------------------------------------
+// Evidence (Milestone 1.7, ADR-0006)
+// ---------------------------------------------------------------------------
+
+/**
+ * Polymorphic linked_type for evidence_files. The schema CHECK accepts
+ * the full list now; the API route layer only accepts 'hazard' and
+ * 'action_item' in 1.7 and rejects the rest until their owning
+ * migrations ship per-type FK triggers (same fail-closed pattern as
+ * action items priv-AI-F3).
+ */
+export const evidenceLinkedType = [
+  'hazard',
+  'action_item',
+  'inspection_finding',
+  'recommendation',
+  'incident',
+] as const;
+export type EvidenceLinkedType = (typeof evidenceLinkedType)[number];
+
+/** Mime allow-list. No PDF execution surface, no raw text, no exotic formats. */
+export const evidenceMimeType = [
+  'image/jpeg',
+  'image/png',
+  'image/webp',
+  'image/heic',
+  'audio/webm',
+  'audio/ogg',
+  'application/pdf',
+] as const;
+export type EvidenceMimeType = (typeof evidenceMimeType)[number];
+
 /**
  * Per-kind payload shapes. Every kind that ever lands an audit row
  * must declare its payload here. Fields are typed enums + IDs +
@@ -238,6 +272,22 @@ export type AuditPayload =
       readonly movedItemId: string;
       readonly revertedFromSection: ActionItemSection;
       readonly revertedToSection: ActionItemSection;
+    }
+  | {
+      readonly kind: 'evidence.uploaded';
+      readonly evidenceId: string;
+      readonly linkedType: EvidenceLinkedType;
+      readonly linkedId: string;
+      readonly mimeType: EvidenceMimeType;
+      readonly byteSize: number;
+      /** Hex-encoded SHA-256 of the plaintext file. Non-reversible. */
+      readonly plaintextSha256: string;
+    }
+  | {
+      readonly kind: 'evidence.read';
+      readonly evidenceId: string;
+      readonly linkedType: EvidenceLinkedType;
+      readonly linkedId: string;
     }
   | { readonly kind: 'signup'; readonly via: 'first_run' | 'invite' }
   | { readonly kind: 'login.passkey' }
