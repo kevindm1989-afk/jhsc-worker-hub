@@ -414,6 +414,16 @@ export function NewTemplateView(): JSX.Element {
               Add section
             </Button>
           </div>
+          {/*
+            priv-F11 close-out: anti-name nudge near the section/item
+            authoring inputs. Template labels are SNAPSHOTTED onto
+            findings as plaintext (migrations/0007:105-108); a label
+            with embedded names propagates to every finding's metadata.
+          */}
+          <p className="mb-2 text-xs text-muted-foreground">
+            Templates are static structure — avoid naming individual workers or supervisors in
+            section/item labels. Use roles (e.g. &lsquo;Shift Lead&rsquo;) instead.
+          </p>
           <ul className="space-y-3">
             {form.sections.map((section, idx) => (
               <li key={idx}>

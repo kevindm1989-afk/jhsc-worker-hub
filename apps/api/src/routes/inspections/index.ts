@@ -838,7 +838,15 @@ inspectionsRoute.post('/:id/findings', async (c) => {
   }>;
   if (ctx.length === 0) return c.json({ error: 'not_found' }, 404);
   const { state, status_vocab: templateVocab, sections } = ctx[0]!;
-  if (state !== 'scheduled' && state !== 'in_progress' && state !== 'awaiting_signatures') {
+  // sec-F7 / T-I41 close-out: drop 'awaiting_signatures' from the
+  // allow-list. Once an inspection advances to awaiting_signatures
+  // (the inspector has signed a rack inspection), no new findings can
+  // be added — preserving the chain-of-custody "the inspector
+  // documented findings while walking; signatures attest to the
+  // findings as seen." This is asymmetric with the prior shape (POST
+  // accepted awaiting_signatures, PATCH did not); the symmetry now is
+  // that all finding authoring must precede the first signature.
+  if (state !== 'scheduled' && state !== 'in_progress') {
     return c.json({ error: 'inspection_not_open_for_findings', state }, 422);
   }
   if (body.statusVocab !== templateVocab) {
@@ -976,6 +984,32 @@ inspectionsRoute.patch('/findings/:id', async (c) => {
           status: 422,
           body: { error: 'finding_immutable_in_state', state: row.state },
         });
+      }
+      // sec-F5 / T-I39 close-out: once a finding has been promoted to
+      // an action item, the substantive fields (statusValue,
+      // observation, correctiveAction) become immutable. The
+      // promote handler sealed the action_item description against
+      // the finding's section/item labels at promote time; later
+      // status/observation/corrective_action edits would let a rep
+      // promote-then-cover-tracks (promote an A finding, mutate to X
+      // so the inspection record reads "no issue" while the open
+      // INSP action item stands). responsibleParty edits remain
+      // allowed because that field most often needs amendment
+      // without changing the finding's substance.
+      if (row.promoted_action_item_id !== null) {
+        const mutatesSubstantive =
+          body.statusValue !== undefined ||
+          body.observation !== undefined ||
+          body.correctiveAction !== undefined;
+        if (mutatesSubstantive) {
+          throw new InspectionWriteAborted({
+            status: 422,
+            body: {
+              error: 'finding_immutable_after_promote',
+              promotedActionItemId: row.promoted_action_item_id,
+            },
+          });
+        }
       }
       if (
         body.statusValue !== undefined &&
@@ -1129,12 +1163,13 @@ inspectionsRoute.post('/findings/:id/promote', async (c) => {
       // concurrent POSTs so the double-promotion guard is race-safe
       // (T-I16). The schema's UNIQUE index on promoted_action_item_id
       // is the second line of defense.
+      // sec-F3 close-out: the SELECT no longer reads observation /
+      // corrective_action / responsible_party ciphertext. The promote
+      // handler no longer needs to decrypt these — the action-item
+      // description is derived from the template-snapshot labels only.
       const findingRows = (await tx.execute(sql`
         SELECT id, inspection_id, status_vocab, status_value,
                section_label, item_label,
-               observation_ct, observation_dek_ct,
-               corrective_action_ct, corrective_action_dek_ct,
-               responsible_party_ct, responsible_party_dek_ct,
                promoted_action_item_id
         FROM inspection_findings
         WHERE id = ${idParsed.data}
@@ -1146,12 +1181,6 @@ inspectionsRoute.post('/findings/:id/promote', async (c) => {
         status_value: string;
         section_label: string;
         item_label: string;
-        observation_ct: Uint8Array | null;
-        observation_dek_ct: Uint8Array | null;
-        corrective_action_ct: Uint8Array | null;
-        corrective_action_dek_ct: Uint8Array | null;
-        responsible_party_ct: Uint8Array | null;
-        responsible_party_dek_ct: Uint8Array | null;
         promoted_action_item_id: string | null;
       }>;
       if (findingRows.length === 0) {
@@ -1178,25 +1207,21 @@ inspectionsRoute.post('/findings/:id/promote', async (c) => {
         });
       }
 
-      // Re-seal the action-item description: prefix with the finding's
-      // section/item label snapshot + the decrypted observation, if
-      // present. Plaintext lives only inside this transaction's locals.
-      let descriptionText = `Promoted from inspection finding: ${f.section_label} / ${f.item_label}`;
-      const obs = openOptionalField({
-        ct: f.observation_ct,
-        dekCt: f.observation_dek_ct,
-      });
-      if (obs) descriptionText += `. Observation: ${obs}`;
-      const correctiveAction = openOptionalField({
-        ct: f.corrective_action_ct,
-        dekCt: f.corrective_action_dek_ct,
-      });
-      if (correctiveAction) descriptionText += `. Corrective action: ${correctiveAction}`;
-      // Cap at 8000 to satisfy any downstream UI safety (matches the
-      // action-items create body limit).
-      if (descriptionText.length > 8000) {
-        descriptionText = descriptionText.slice(0, 7997) + '...';
-      }
+      // sec-F3 / T-I37 close-out: derive a NON-PI action-item
+      // description from the finding's section/item label snapshot
+      // ONLY. The pre-S5 implementation welded the decrypted
+      // observation + corrective_action plaintext into the description,
+      // which then became readable via the no-step-up
+      // `GET /api/action-items/:id` route — bypassing the
+      // `inspection.finding.read` step-up gate (T-I30) in two
+      // unrelated authenticated calls. The promote no longer widens
+      // the PI surface. Anyone wanting the finding text takes the
+      // step-up gated `GET /api/inspections/findings/:id` route.
+      //
+      // Section/item labels are template-snapshotted at finding
+      // create time (non-PI per T-I12 / ADR-0007 §3.5 — template
+      // content is non-PI by construction).
+      const descriptionText = `Promoted from inspection finding: ${f.section_label} / ${f.item_label}. Open the finding for full context.`;
       const descSealed = sealActionItemField(descriptionText);
 
       // Allocate next per-section sequence number for new_business.

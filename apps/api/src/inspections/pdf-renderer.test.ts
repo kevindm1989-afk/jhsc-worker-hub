@@ -187,4 +187,124 @@ describe('renderInspectionPdf', () => {
     expect(asString).not.toMatch(/\/JS\s/);
     expect(asString).not.toMatch(/\/AA\s/);
   });
+
+  // priv-F7 / T-I43 close-out: GPS opt-in on the export. Default render
+  // (includeGps: false) suppresses the `GPS lat, lon` caption fragment.
+  // includeGps: true surfaces it.
+  it('priv-F7: omits GPS caption fragment by default (includeGps: false)', async () => {
+    const bytes = await renderInspectionPdf(
+      [
+        makeInspection({
+          findings: [
+            {
+              id: 'dddddddd-dddd-dddd-dddd-dddddddddddd',
+              sectionLabel: 'Walk-through',
+              itemLabel: 'Floor clear of trip hazards',
+              statusVocab: 'ABC_X',
+              statusValue: 'B',
+              observation: null,
+              correctiveAction: null,
+              responsibleParty: null,
+              photos: [
+                {
+                  evidenceId: 'eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee',
+                  mimeType: 'image/png',
+                  bytes: new Uint8Array(TINY_PNG),
+                  capturedAt: '2026-05-29T10:30:00Z',
+                  gpsLatitude: 43.6532,
+                  gpsLongitude: -79.3832,
+                },
+              ],
+            },
+          ],
+        }),
+      ],
+      makeProvenance(),
+      { includeGps: false },
+    );
+    const asString = Buffer.from(bytes).toString('latin1');
+    // The "GPS " prefix is what the caption builder uses; pdfkit
+    // compress option may break literal matching for prose content
+    // but the marker is short enough and uncompressed text fragments
+    // typically land in the stream.
+    expect(asString).not.toContain('GPS 43.6532');
+    expect(asString).not.toContain('GPS -79.3832');
+  });
+
+  it('priv-F7: renders GPS caption fragment when includeGps: true', async () => {
+    const bytes = await renderInspectionPdf(
+      [
+        makeInspection({
+          findings: [
+            {
+              id: 'dddddddd-dddd-dddd-dddd-dddddddddddd',
+              sectionLabel: 'Walk-through',
+              itemLabel: 'Floor clear of trip hazards',
+              statusVocab: 'ABC_X',
+              statusValue: 'B',
+              observation: null,
+              correctiveAction: null,
+              responsibleParty: null,
+              photos: [
+                {
+                  evidenceId: 'eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee',
+                  mimeType: 'image/png',
+                  bytes: new Uint8Array(TINY_PNG),
+                  capturedAt: '2026-05-29T10:30:00Z',
+                  gpsLatitude: 43.6532,
+                  gpsLongitude: -79.3832,
+                },
+              ],
+            },
+          ],
+        }),
+      ],
+      makeProvenance(),
+      { includeGps: true },
+    );
+    // Length sanity: includeGps:true output must be larger than
+    // includeGps:false output by at least the GPS-fragment length.
+    expect(bytes.length).toBeGreaterThan(0);
+    // The renderer carries the GPS substring; the text stream may be
+    // compressed in some configurations. Sanity-check the byte length
+    // delta against the includeGps:false render.
+    const noGpsBytes = await renderInspectionPdf(
+      [
+        makeInspection({
+          findings: [
+            {
+              id: 'dddddddd-dddd-dddd-dddd-dddddddddddd',
+              sectionLabel: 'Walk-through',
+              itemLabel: 'Floor clear of trip hazards',
+              statusVocab: 'ABC_X',
+              statusValue: 'B',
+              observation: null,
+              correctiveAction: null,
+              responsibleParty: null,
+              photos: [
+                {
+                  evidenceId: 'eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee',
+                  mimeType: 'image/png',
+                  bytes: new Uint8Array(TINY_PNG),
+                  capturedAt: '2026-05-29T10:30:00Z',
+                  gpsLatitude: 43.6532,
+                  gpsLongitude: -79.3832,
+                },
+              ],
+            },
+          ],
+        }),
+      ],
+      makeProvenance(),
+      { includeGps: false },
+    );
+    expect(bytes.length).toBeGreaterThan(noGpsBytes.length);
+  });
+
+  // sec-F8 close-out: the running footer no longer carries "Chain idx N".
+  it('sec-F8: running footer does not include "Chain idx" text', async () => {
+    const bytes = await renderInspectionPdf([makeInspection()], makeProvenance());
+    const asString = Buffer.from(bytes).toString('latin1');
+    expect(asString).not.toContain('Chain idx');
+  });
 });

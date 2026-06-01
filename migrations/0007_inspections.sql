@@ -287,21 +287,46 @@ $$;
 -- T-I17 close-out: extend action_items_source_fk_guard with an
 -- 'inspection' branch validating source_id against inspection_findings.
 -- 0005 only carried the 'hazard' branch; the function is rewritten with
--- both branches. Source types 'manual' and 'excel_import' remain
--- referential-integrity-free by design.
+-- both branches. Source types 'manual' and 'excel_import' (and NULL)
+-- remain referential-integrity-free by design (manual is the rep-typed
+-- create path; excel_import lands rows from the browser-parsed
+-- spreadsheet with no FK target in this DB).
+--
+-- T-I38 close-out (S5 sec-F4): the function now carries a fail-closed
+-- `ELSE RAISE EXCEPTION` rail so unsupported source_types
+-- (recommendation, incident, future kinds) are rejected at the DB layer
+-- even if a future route ratchet opens them in Zod before the matching
+-- table lands. Mirrors the evidence_files_linked_fk_guard shape from
+-- the 1.7 sec-F4 close-out.
 CREATE OR REPLACE FUNCTION action_items_source_fk_guard() RETURNS trigger
 LANGUAGE plpgsql AS $$
 BEGIN
-  IF NEW.source_type = 'hazard' AND NEW.source_id IS NOT NULL THEN
-    IF NOT EXISTS (SELECT 1 FROM hazards WHERE id = NEW.source_id) THEN
+  -- Skip referential validation for the documented bypass cases. NULL
+  -- source_type is the legacy default from migrations 0005; 'manual' and
+  -- 'excel_import' have no backing table by design (priv-AI-F3 1.6
+  -- documented residual).
+  IF NEW.source_type IS NULL OR NEW.source_type IN ('manual','excel_import') THEN
+    RETURN NEW;
+  END IF;
+
+  IF NEW.source_type = 'hazard' THEN
+    IF NEW.source_id IS NULL OR NOT EXISTS (SELECT 1 FROM hazards WHERE id = NEW.source_id) THEN
       RAISE EXCEPTION
         'action_items_source_fk_guard: hazard % does not exist', NEW.source_id;
     END IF;
-  ELSIF NEW.source_type = 'inspection' AND NEW.source_id IS NOT NULL THEN
-    IF NOT EXISTS (SELECT 1 FROM inspection_findings WHERE id = NEW.source_id) THEN
+  ELSIF NEW.source_type = 'inspection' THEN
+    IF NEW.source_id IS NULL OR NOT EXISTS (SELECT 1 FROM inspection_findings WHERE id = NEW.source_id) THEN
       RAISE EXCEPTION
         'action_items_source_fk_guard: inspection_finding % does not exist', NEW.source_id;
     END IF;
+  ELSE
+    -- Fail-closed rail for any source_type the trigger does not yet
+    -- recognize (recommendation, incident, future kinds). The route's
+    -- Zod refinement is the upstream gate; this is the DB-layer
+    -- backstop against a hand-crafted INSERT.
+    RAISE EXCEPTION
+      'action_items_source_fk_guard: source_type % not yet supported at trigger layer',
+      NEW.source_type;
   END IF;
   RETURN NEW;
 END;

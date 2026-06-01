@@ -184,7 +184,9 @@ function PromoteBlocked({ reason, onClose }: { reason: string; onClose: () => vo
           <p className="mt-1 text-xs text-muted-foreground">{reason}</p>
           <p className="mt-2 text-xs text-muted-foreground">
             If the finding warrants tracking, re-open it in the inspection (while still in progress)
-            and change the status before promoting.
+            and change the status before promoting. If this inspection is already past &lsquo;in
+            progress&rsquo;, the finding is immutable — raise a separate hazard or action item to
+            track the issue.
           </p>
         </div>
       </div>

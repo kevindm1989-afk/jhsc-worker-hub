@@ -338,6 +338,13 @@ export type InspectionExportKindT = 'single' | 'batch';
 export interface CreateExportBody {
   readonly kind: InspectionExportKindT;
   readonly inspectionIds: ReadonlyArray<string>;
+  /**
+   * priv-F7 / T-I43 close-out: per-export GPS opt-in. Default false on
+   * both sides (client + server Zod). The export panel checkbox is
+   * the rep-facing surface; without it photo captions in the PDF do
+   * NOT include GPS coordinates.
+   */
+  readonly includeGps?: boolean;
 }
 
 export interface CreateExportResponse {

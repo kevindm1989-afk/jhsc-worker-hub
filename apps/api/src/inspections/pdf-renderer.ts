@@ -94,7 +94,13 @@ export interface RenderableInspection {
 export interface ProvenanceFooter {
   readonly exportId: string;
   readonly exportedAt: string;
-  /** audit_log.idx of the inspection.exported chain row. Filled by caller. */
+  /**
+   * audit_log.idx of the inspection.exported chain row. Accepted for
+   * back-compat; the running footer no longer surfaces this value (S5
+   * sec-F8 close-out — see paintFooter below). The receipt panel on
+   * the inspection detail view continues to surface the real chainIdx
+   * out-of-band, which is the integrity anchor the rep cites.
+   */
   readonly chainIdx: number;
   /**
    * Placeholder for compatibility with the original ADR §3.9 footer-hash
@@ -104,6 +110,20 @@ export interface ProvenanceFooter {
    * write it into the PDF.
    */
   readonly outputSha256Placeholder: string;
+}
+
+/**
+ * Per-render options that gate optional PDF surfaces. Plumbed through
+ * from the export-create body (priv-F7 / T-I43).
+ */
+export interface RenderOptions {
+  /**
+   * priv-F7 / T-I43 close-out: photo-caption GPS render gate. Defaults
+   * to false (the route's Zod schema also defaults to false). Only
+   * surfaces GPS when the rep affirmatively opts in per-export. ADR-
+   * 0007 §3.6 + the runbook §8 explain the PIPEDA P4 rationale.
+   */
+  readonly includeGps: boolean;
 }
 
 // ---------------------------------------------------------------------------
@@ -289,7 +309,12 @@ function renderCoverPage(
 // Finding block
 // ---------------------------------------------------------------------------
 
-function renderFinding(doc: PDFKit.PDFDocument, finding: RenderableFinding, index: number): void {
+function renderFinding(
+  doc: PDFKit.PDFDocument,
+  finding: RenderableFinding,
+  index: number,
+  options: RenderOptions,
+): void {
   // If we're getting near the bottom, force a page break before starting
   // a finding. Avoids splitting a finding's header from its body.
   if (doc.y > doc.page.height - PAGE_MARGIN - 160) {
@@ -356,23 +381,31 @@ function renderFinding(doc: PDFKit.PDFDocument, finding: RenderableFinding, inde
       // Manually advance doc.y because image() doesn't always update it.
       doc.y = doc.y + MAX_PHOTO_HEIGHT + 4;
     } catch {
-      // A photo whose bytes pdfkit cannot decode is rendered as a
-      // placeholder line so the export does not crash on a corrupt
-      // image. The route layer's per-photo plaintext-SHA-256 verify
-      // (T-I24) is the upstream gate; this is the renderer-side
-      // belt-and-suspenders so a non-image MIME never blows up rendering.
-      doc
-        .fontSize(9)
-        .fillColor('#b91c1c')
-        .text(`[photo ${shortId(photo.evidenceId)} could not be embedded]`, { align: 'left' });
-      doc.fillColor('#0f172a');
+      // priv-F12 close-out: fail-loud on embed failure. The route
+      // layer's per-photo plaintext-SHA-256 verify (T-I24) is the
+      // upstream integrity gate; if bytes reached the renderer past
+      // that gate but pdfkit cannot decode them, that IS a tamper
+      // signal — render aborts and the route's catch surfaces a 500
+      // to the client. The chain anchor never lands on a degraded
+      // PDF. Pre-S5 the renderer silently fell back to a `[photo X
+      // could not be embedded]` text line and the export shipped.
+      //
+      // Note: the renderer cannot import `ExportAborted` from the
+      // route layer without circularity, so we throw a generic Error
+      // with a tag the route's catch can re-shape into the 500
+      // response. exports.ts's catch already memzeros buffers.
+      throw new Error(`pdf_embed_failed:${photo.evidenceId}`);
     }
     // Caption.
     fontRegular(doc);
     const cap: string[] = [`Photo ${shortId(photo.evidenceId)}`];
     if (photo.capturedAt) cap.push(`captured ${photo.capturedAt}`);
-    const gps = formatGps(photo.gpsLatitude, photo.gpsLongitude);
-    if (gps) cap.push(`GPS ${gps}`);
+    // priv-F7 / T-I43 close-out: GPS is rendered only when the rep
+    // explicitly opted in per-export. Default off.
+    if (options.includeGps) {
+      const gps = formatGps(photo.gpsLatitude, photo.gpsLongitude);
+      if (gps) cap.push(`GPS ${gps}`);
+    }
     doc.fontSize(8).fillColor('#475569').text(cap.join(' · '), {
       align: 'left',
     });
@@ -427,9 +460,16 @@ function paintFooter(
   fontRegular(doc);
   doc.fontSize(8).fillColor('#64748b');
 
+  // sec-F8 close-out: the "Chain idx N" right-edge footer is dropped.
+  // The pre-S5 footer carried the predicted idx (non-locking SELECT
+  // outside the transaction) which could race the actual append()
+  // value. The receipt panel on the inspection detail view surfaces
+  // the real chainIdx out-of-band, and the chain row's outputSha256
+  // is the canonical integrity anchor regardless of what the footer
+  // says. Keeping the exportId prefix (left) + page N of M (center)
+  // is sufficient for cross-referencing.
   const left = `Export ${shortId(provenance.exportId)}`;
   const center = `page ${pageNum} of ${totalPages}`;
-  const right = `Chain idx ${provenance.chainIdx}`;
 
   doc.text(left, PAGE_MARGIN, y, {
     width: 200,
@@ -439,11 +479,6 @@ function paintFooter(
   doc.text(center, PAGE_MARGIN, y, {
     width: pageWidth - PAGE_MARGIN * 2,
     align: 'center',
-    lineBreak: false,
-  });
-  doc.text(right, pageWidth - PAGE_MARGIN - 200, y, {
-    width: 200,
-    align: 'right',
     lineBreak: false,
   });
 
@@ -479,6 +514,10 @@ function collectStream(doc: PDFKit.PDFDocument): Promise<Uint8Array> {
 export async function renderInspectionPdf(
   inspections: ReadonlyArray<RenderableInspection>,
   provenance: ProvenanceFooter,
+  // priv-F7 / T-I43: RenderOptions is a separate arg (rather than
+  // folded into ProvenanceFooter) because options control runtime
+  // behavior, while ProvenanceFooter is identity metadata.
+  options: RenderOptions = { includeGps: false },
 ): Promise<Uint8Array> {
   const doc = new PDFDocument({
     autoFirstPage: false,
@@ -523,7 +562,7 @@ export async function renderInspectionPdf(
       doc.moveDown(0.5);
     } else {
       insp.findings.forEach((finding, idx) => {
-        renderFinding(doc, finding, idx);
+        renderFinding(doc, finding, idx, options);
       });
     }
     renderSignatures(doc, insp.signatures);

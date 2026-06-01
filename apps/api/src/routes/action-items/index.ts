@@ -111,21 +111,29 @@ const createBody = z
     (b) =>
       // sec-review F7 / priv-AI-F3 1.6: SECURITY.md T-AI8 promises route-
       // level FK validation for hazard / recommendation / inspection /
-      // incident. Only hazard (1.5) + inspection (1.8 — T-I18 close-out)
-      // are backed by per-source-type DB triggers; recommendation +
-      // incident remain rejected at the route until 1.9 / later. The
-      // 'inspection' branch landed in migration 0007 alongside the
-      // inspections schema, so this refinement opens in lockstep.
+      // incident. Only hazard (1.5) is allowed via this generic route
+      // in 1.8. Inspection-derived action items must go through the
+      // dedicated `POST /api/inspections/findings/:id/promote` handler
+      // (sec-F2 / T-I36 close-out): that handler is the single source
+      // of truth for the #15 X/G fail-closed gate AND the T-I16 one-
+      // shot promote invariant. Accepting `sourceType='inspection'`
+      // here would let a hand-crafted POST bypass both. Recommendation
+      // + incident remain rejected at the route until 1.9 / later.
       !b.sourceType ||
       b.sourceType === 'manual' ||
       b.sourceType === 'hazard' ||
-      b.sourceType === 'inspection' ||
       b.sourceType === 'excel_import',
-    {
+    (b) => ({
+      // sec-F2 close-out: give a hand-crafted caller a clear redirect
+      // to the promote route instead of the generic 'not yet supported'
+      // line. Other unsupported source_types (recommendation, incident)
+      // still get the generic message.
       message:
-        'sourceType not yet supported -- recommendation / incident land in their owning milestones',
+        b.sourceType === 'inspection'
+          ? 'inspection_source_requires_promote_route'
+          : 'sourceType not yet supported -- recommendation / incident land in their owning milestones',
       path: ['sourceType'],
-    },
+    }),
   );
 
 const listQuery = z.object({

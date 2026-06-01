@@ -397,6 +397,11 @@ function ExportPanel({ inspectionId }: { inspectionId: string }): JSX.Element {
   const [busy, setBusy] = useState(false);
   const [receipt, setReceipt] = useState<CreateExportResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
+  // priv-F7 close-out: GPS opt-in per-export. Defaults to UNCHECKED so
+  // the rep affirmatively decides whether to surface ~11m-resolution
+  // coordinates in the disclosable PDF. The server also defaults to
+  // false; this checkbox is the rep-facing surface.
+  const [includeGps, setIncludeGps] = useState(false);
 
   async function startExport(): Promise<void> {
     setBusy(true);
@@ -405,6 +410,7 @@ function ExportPanel({ inspectionId }: { inspectionId: string }): JSX.Element {
       const r = await inspectionsApi.exports.create({
         kind: 'single',
         inspectionIds: [inspectionId],
+        includeGps,
       });
       setReceipt(r);
     } catch (e) {
@@ -451,6 +457,22 @@ function ExportPanel({ inspectionId }: { inspectionId: string }): JSX.Element {
   if (receipt === null) {
     return (
       <div className="flex flex-col items-end gap-1">
+        {/*
+          priv-F7 close-out: per-export GPS opt-in. Default UNCHECKED.
+          The PDF only carries photo-caption GPS when the rep
+          affirmatively opts in. Runbook §8 documents the
+          PIPEDA P4 rationale.
+        */}
+        <label className="flex items-center gap-1.5 text-[11px] text-muted-foreground">
+          <input
+            type="checkbox"
+            checked={includeGps}
+            onChange={(e) => setIncludeGps(e.target.checked)}
+            className="h-3.5 w-3.5 rounded border-input"
+            disabled={busy}
+          />
+          <span>Include GPS coordinates in photo captions</span>
+        </label>
         <Button
           type="button"
           variant="default"
@@ -724,6 +746,16 @@ function AddFindingForm({
         </div>
       </div>
 
+      {/*
+        priv-F2 close-out: capture-flow placeholders bias toward role/
+        department language and explicitly nudge away from naming
+        individual workers without consent. Mirrors the seeded
+        employee_interview.concerns_raised PIPEDA-P3 guidance. The
+        runbook PIPEDA P9 procedure docs the residual.
+      */}
+      <p className="mt-2 text-[11px] text-muted-foreground">
+        Encrypted on save. Avoid naming individual workers unless they&apos;ve explicitly asked.
+      </p>
       <FindingTextInput
         id={`obs-${sectionKey}-${itemKey}`}
         label="Observation"
@@ -731,7 +763,7 @@ function AddFindingForm({
         onChange={setObservation}
         rows={3}
         maxLength={8000}
-        placeholder="What did you see? Where? Conditions?"
+        placeholder="What did you see? Where? Conditions? Use roles (e.g. 'Forklift operator') rather than naming individual workers unless they've asked you to."
       />
       <FindingTextInput
         id={`cor-${sectionKey}-${itemKey}`}
@@ -740,7 +772,7 @@ function AddFindingForm({
         onChange={setCorrectiveAction}
         rows={2}
         maxLength={8000}
-        placeholder="What needs to happen to resolve this?"
+        placeholder="What needs to happen? Identify the role or department responsible."
       />
       <FindingTextInput
         id={`resp-${sectionKey}-${itemKey}`}
@@ -749,7 +781,7 @@ function AddFindingForm({
         onChange={setResponsibleParty}
         rows={1}
         maxLength={200}
-        placeholder="Role or name (encrypted on save)"
+        placeholder="Supervisor or department (e.g. Maintenance Lead, Receiving)"
       />
 
       {error ? (

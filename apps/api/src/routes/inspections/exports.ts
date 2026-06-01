@@ -51,10 +51,15 @@ import {
   type InspectionSignatureRole,
   type InspectionStatusVocabKind,
 } from '@jhsc/shared-types';
+import { loadWorkplaceConfig, type ZoneId } from '../../../../../config/workplace';
 import { getDb } from '../../db/client';
 import { authMiddleware, checkStepUpFreshness } from '../../auth/step-up';
 import { rateLimit } from '../../middleware/rate-limit';
-import { fetchEvidenceCiphertext, putEvidenceObject } from '../../evidence/tigris';
+import {
+  deleteEvidenceObject,
+  fetchEvidenceCiphertext,
+  putEvidenceObject,
+} from '../../evidence/tigris';
 import { openWorkplacePrivateKey } from '../../evidence/workplace-key';
 import { openOptionalField } from '../../inspections/crypto';
 import {
@@ -135,6 +140,13 @@ const exportCreateBody = z
     // T-I29 + T-I32: hard bound at 100 inspections per request (the SQL
     // CHECK on export_records.inspection_ids enforces the same).
     inspectionIds: z.array(z.string().uuid()).min(1).max(100),
+    // priv-F7 / T-I43 close-out: GPS opt-in per-export. Defaults to
+    // false so the rep must affirmatively check the box on the export
+    // panel to surface ~11m-resolution coordinates in the disclosable
+    // PDF. The 1.7 T-E5 GPS resolution cap is fine for in-app worker-
+    // side metadata; once distributed in an exhibit, the cap stops
+    // being a meaningful bound. Plumbed through to the renderer.
+    includeGps: z.boolean().default(false),
   })
   .strict()
   .refine((b) => (b.kind === 'single' ? b.inspectionIds.length === 1 : true), {
@@ -160,32 +172,46 @@ class ExportAborted extends Error {
 }
 
 // ---------------------------------------------------------------------------
-// Helpers: zone display name (same shape as the web resolveZoneLabel,
-// but server-side — env-driven with a generic fallback so the PDF does
-// not embed workplace-specific text unless explicitly configured).
+// Helpers: zone display name. Reads the workplace deploy-config
+// (config/workplace.ts) so the PDF carries the workplace's own zone
+// labels (e.g. "Cold Warehouse" instead of "Zone 3") — the rep's
+// evidentiary PDF matches their lived vocabulary.
+//
+// priv-F6 / T-I44 close-out: prior to S5 the renderer hard-coded a
+// `ZONE_DEFAULTS` map to bound the workplace-name surface. That
+// produced an accuracy gap (PIPEDA Principle 6) — the rep's PDF said
+// "Zone 3" while their UI said "Cold Warehouse." The S5 wiring
+// consumes `loadWorkplaceConfig().zones`. Two hygiene constraints
+// applied to env-supplied display names:
+//   - Length cap at 120 chars (matches the template displayName cap).
+//   - Reject any value containing `<` or `>` (HTML strip).
+// On violation, we silently fall back to the defaultName ("Zone N").
+// No crash, no warning — the rep's PDF is the dominant concern; a
+// misconfigured env should produce a generic but valid label, not a
+// crash mid-export. Constraint documented inline.
+//
+// T-I28 residual: `/Title`, `/Author`, `/Producer` metadata fields
+// remain hard-coded generic strings. Only the rendered text body
+// surfaces the configured zone label. The workplace name itself stays
+// out of the PDF body until 1.9 (runbook §11).
 // ---------------------------------------------------------------------------
 
-const ZONE_DEFAULTS: Record<string, string> = {
-  zone_1: 'Zone 1',
-  zone_2: 'Zone 2',
-  zone_3: 'Zone 3',
-  zone_4: 'Zone 4',
-  zone_5: 'Zone 5',
-  zone_6: 'Zone 6',
-  zone_7: 'Zone 7',
-  zone_8: 'Zone 8',
-  zone_9: 'Zone 9',
-  zone_10: 'Zone 10',
-};
+const ZONE_DISPLAY_MAX_LEN = 120;
 
 function resolveZoneDisplayName(zoneId: string): string {
-  // Per CLAUDE.md non-negotiable #14: stable IDs, configurable display
-  // names. The configured display lives in env (deploy-config). For
-  // 1.8 we ship only the default labels in PDFs to bound the workplace-
-  // name surface in PDF text (T-I28-adjacent — the metadata fields are
-  // already strict-generic; this keeps the text body workplace-clean by
-  // default until S5 reviewers approve the deploy-config wiring).
-  return ZONE_DEFAULTS[zoneId] ?? zoneId;
+  const cfg = loadWorkplaceConfig();
+  const z = cfg.zones.find((zone) => zone.id === (zoneId as ZoneId));
+  if (!z) return zoneId;
+  const raw = (z.displayName ?? '').trim();
+  if (
+    raw.length === 0 ||
+    raw.length > ZONE_DISPLAY_MAX_LEN ||
+    raw.includes('<') ||
+    raw.includes('>')
+  ) {
+    return z.defaultName;
+  }
+  return raw;
 }
 
 // ---------------------------------------------------------------------------
@@ -204,6 +230,69 @@ interface ResolveResult {
    * route handler memzeros each of these after the PDF is rendered.
    */
   readonly plaintextBuffers: ReadonlyArray<Uint8Array>;
+}
+
+// Required-signature roles per template. The signature schema's
+// `(inspection_id, role)` UNIQUE constraint means presence of all three
+// distinct roles is sufficient for "complete" on a three-sig template.
+const REQUIRED_THREE_SIG_ROLES: ReadonlyArray<string> = [
+  'inspector',
+  'supervisor',
+  'jhsc_worker_co_chair',
+];
+
+/**
+ * sec-F1 / T-I35 close-out: pre-render gate that asserts the inspection
+ * is in the `complete` state AND, for rack templates, that all three
+ * required roles have signed. Both checks run BEFORE `resolveInspection`
+ * opens the workplace private key and BEFORE any decrypt happens — so a
+ * forged POST never touches plaintext for an unsigned inspection.
+ *
+ * Throws `ExportAborted` with `inspection_not_complete` /
+ * `signatures_incomplete` so the caller's existing catch path surfaces
+ * the 422 to the client without leaking the inspection's state shape.
+ */
+async function assertInspectionExportReady(
+  inspectionId: string,
+  db: ReturnType<typeof getDb>,
+): Promise<void> {
+  const ready = (await db.execute(sql`
+    SELECT i.id, i.state, t.requires_three_signatures
+    FROM inspections i
+    JOIN inspection_templates t ON t.id = i.template_version_id
+    WHERE i.id = ${inspectionId}
+    LIMIT 1
+  `)) as unknown as Array<{
+    id: string;
+    state: string;
+    requires_three_signatures: boolean;
+  }>;
+  if (ready.length === 0) {
+    throw new ExportAborted(422, { error: 'inspection_not_found', inspectionId });
+  }
+  const r = ready[0]!;
+  if (r.state !== 'complete') {
+    throw new ExportAborted(422, {
+      error: 'inspection_not_complete',
+      inspectionId,
+      state: r.state,
+    });
+  }
+  if (r.requires_three_signatures) {
+    const sigRows = (await db.execute(sql`
+      SELECT DISTINCT role FROM inspection_signatures
+      WHERE inspection_id = ${inspectionId}
+    `)) as unknown as Array<{ role: string }>;
+    const present = new Set(sigRows.map((row) => row.role));
+    const missing = REQUIRED_THREE_SIG_ROLES.filter((role) => !present.has(role));
+    if (present.size !== REQUIRED_THREE_SIG_ROLES.length || missing.length > 0) {
+      throw new ExportAborted(422, {
+        error: 'signatures_incomplete',
+        inspectionId,
+        missingRoles: missing,
+      });
+    }
+  }
 }
 
 async function resolveInspection(
@@ -468,8 +557,22 @@ inspectionsExportsRoute.post('/', async (c) => {
   let renderedBytes: Uint8Array | null = null;
   let outputSha256Hex = '';
   let byteSize = 0;
+  // sec-F6 / T-I42 close-out: track the Tigris storage key once the PUT
+  // succeeds so we can best-effort DELETE it if the DB transaction
+  // rolls back. Without this, a transaction failure after PUT (advisory
+  // lock contention, audit_log_pkey collision, export_records CHECK
+  // violation) would leave an orphan PDF in Tigris that the chain
+  // doesn't know about.
+  let putStorageKey: string | null = null;
 
   try {
+    // sec-F1 / T-I35 close-out: assert state=complete + (for rack)
+    // all three signatures present BEFORE any key open or decrypt. The
+    // assertion runs per-inspection so a batch export with one un-
+    // signed inspection rejects the whole batch.
+    for (const inspectionId of body.inspectionIds) {
+      await assertInspectionExportReady(inspectionId, db);
+    }
     for (const inspectionId of body.inspectionIds) {
       const r = await resolveInspection(inspectionId, db);
       inspections.push(r.inspection);
@@ -513,12 +616,20 @@ inspectionsExportsRoute.post('/', async (c) => {
     `)) as unknown as Array<{ next_idx: number }>;
     const predictedIdx = Number(predictedIdxRows[0]?.next_idx ?? 0);
 
-    renderedBytes = await renderInspectionPdf(inspections, {
-      exportId,
-      exportedAt: new Date().toISOString(),
-      chainIdx: predictedIdx,
-      outputSha256Placeholder: '',
-    });
+    renderedBytes = await renderInspectionPdf(
+      inspections,
+      {
+        exportId,
+        exportedAt: new Date().toISOString(),
+        chainIdx: predictedIdx,
+        outputSha256Placeholder: '',
+      },
+      // priv-F7 / T-I43 close-out: per-export GPS opt-in. Renderer
+      // suppresses photo-caption GPS unless the rep explicitly
+      // checked the export panel's "Include GPS coordinates"
+      // checkbox.
+      { includeGps: body.includeGps },
+    );
 
     // 7. Memzero plaintext buffers now — render is complete, the bytes
     //    are encoded into the PDF stream (which holds compressed/
@@ -543,48 +654,74 @@ inspectionsExportsRoute.post('/', async (c) => {
       bytes: renderedBytes,
       mimeType: 'application/pdf',
     });
+    putStorageKey = storageKey;
 
     // 10. Transactional anchor + INSERT. The append() call computes
     //     this_hash over the full payload INCLUDING outputSha256 — the
     //     chain binds the exported bytes by hash.
+    //
+    // sec-F6 / T-I42 close-out: wrap the db.transaction in a try/catch.
+    // If the transaction rolls back AFTER the Tigris PUT succeeded
+    // (advisory-lock contention on append(), audit_log_pkey collision,
+    // export_records constraint violation, network drop on the DB
+    // connection), best-effort DELETE the orphaned storage_key. Log
+    // the cleanup attempt at warn level; never throw from cleanup —
+    // re-raise the original transaction error.
     const expiresAt = new Date(Date.now() + 30 * 24 * 3600 * 1000).toISOString();
-    const result = await db.transaction(async (tx) => {
-      const chainRow = await append(tx, {
-        actorId: auth.userId,
-        payload: {
-          kind: 'inspection.exported',
-          exportId,
-          kindOfExport: body.kind as InspectionExportKind,
-          inspectionIds: body.inspectionIds,
-          outputSha256: outputSha256Hex,
-          byteSize,
-        },
-        resourceType: 'export_records',
-        resourceId: exportId,
+    let result: { exportId: string; chainIdx: number };
+    try {
+      result = await db.transaction(async (tx) => {
+        const chainRow = await append(tx, {
+          actorId: auth.userId,
+          payload: {
+            kind: 'inspection.exported',
+            exportId,
+            kindOfExport: body.kind as InspectionExportKind,
+            inspectionIds: body.inspectionIds,
+            outputSha256: outputSha256Hex,
+            byteSize,
+          },
+          resourceType: 'export_records',
+          resourceId: exportId,
+        });
+        const outputShaBytes = Buffer.from(outputSha256Hex, 'hex');
+        await tx.execute(sql`
+          INSERT INTO export_records (
+            id, kind, inspection_ids, requested_by_user_id, requested_at,
+            output_sha256, byte_size, storage_key, step_up_jti,
+            expires_at, audit_idx
+          )
+          VALUES (
+            ${exportId},
+            ${body.kind},
+            ${body.inspectionIds}::uuid[],
+            ${auth.userId},
+            now(),
+            ${outputShaBytes as unknown as Uint8Array},
+            ${byteSize},
+            ${storageKey},
+            ${auth.sessionId},
+            ${expiresAt}::timestamptz,
+            ${chainRow.idx}
+          )
+        `);
+        return { exportId, chainIdx: chainRow.idx };
       });
-      const outputShaBytes = Buffer.from(outputSha256Hex, 'hex');
-      await tx.execute(sql`
-        INSERT INTO export_records (
-          id, kind, inspection_ids, requested_by_user_id, requested_at,
-          output_sha256, byte_size, storage_key, step_up_jti,
-          expires_at, audit_idx
-        )
-        VALUES (
-          ${exportId},
-          ${body.kind},
-          ${body.inspectionIds}::uuid[],
-          ${auth.userId},
-          now(),
-          ${outputShaBytes as unknown as Uint8Array},
-          ${byteSize},
-          ${storageKey},
-          ${auth.sessionId},
-          ${expiresAt}::timestamptz,
-          ${chainRow.idx}
-        )
-      `);
-      return { exportId, chainIdx: chainRow.idx };
-    });
+      // Chain anchor + export_records row landed; the Tigris object is
+      // now non-orphan and the catch-block cleanup should NOT delete it.
+      putStorageKey = null;
+    } catch (txErr) {
+      // Best-effort orphan delete. deleteEvidenceObject never throws;
+      // it returns {ok: boolean} so the original txErr is preserved.
+      if (putStorageKey) {
+        const del = await deleteEvidenceObject(putStorageKey).catch(() => ({ ok: false }));
+        console.warn(
+          `[inspections.exports] orphan PDF cleanup after transaction failure: storageKey=${putStorageKey} ok=${del.ok}`,
+        );
+        putStorageKey = null;
+      }
+      throw txErr;
+    }
 
     return c.json({
       exportId: result.exportId,
@@ -609,8 +746,28 @@ inspectionsExportsRoute.post('/', async (c) => {
       // artifact. Zeroing them is harmless and we do it for symmetry.
       renderedBytes.fill(0);
     }
+    // sec-F6 / T-I42 close-out (outer catch fallback): if a non-tx
+    // error fired AFTER the Tigris PUT landed (rare — the only path is
+    // an exception thrown between PUT and the inner tx try-block),
+    // still attempt the orphan cleanup. The inner try-block already
+    // covers the common case.
+    if (putStorageKey) {
+      const del = await deleteEvidenceObject(putStorageKey).catch(() => ({ ok: false }));
+      console.warn(
+        `[inspections.exports] orphan PDF cleanup after non-tx failure: storageKey=${putStorageKey} ok=${del.ok}`,
+      );
+      putStorageKey = null;
+    }
     if (err instanceof ExportAborted) {
       return c.json(err.body, err.status as 400 | 422 | 500);
+    }
+    // priv-F12 close-out: the renderer throws `Error('pdf_embed_failed:<evidenceId>')`
+    // when pdfkit cannot decode photo bytes that passed the upstream
+    // SHA-256 verify (T-I24). Shape into the 500 the rep already
+    // expects on render abort.
+    if (err instanceof Error && err.message.startsWith('pdf_embed_failed:')) {
+      const evidenceId = err.message.slice('pdf_embed_failed:'.length);
+      return c.json({ error: 'export_aborted', reason: 'pdf_embed_failed', evidenceId }, 500);
     }
     throw err;
   }
