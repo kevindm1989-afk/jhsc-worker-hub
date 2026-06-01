@@ -9,10 +9,12 @@
 //   DATABASE_URL=... bun run scripts/audit-log-verify.ts
 //   DATABASE_URL=... bun run scripts/audit-log-verify.ts --quiet
 //   DATABASE_URL=... bun run scripts/audit-log-verify.ts --check-backfill
+//   DATABASE_URL=... bun run scripts/audit-log-verify.ts --check-evidence
 //
 // Exit codes
-//   0   chain verified (and backfill anchor verified if --check-backfill)
-//   1   tamper detected (firstDivergence reported, or backfill mismatch)
+//   0   chain verified (and any requested anchor checks pass)
+//   1   tamper detected (firstDivergence reported, or backfill mismatch,
+//       or evidence forward-defense check fails)
 //   2   operational error (could not reach DB, etc.)
 
 import { createHash } from 'node:crypto';
@@ -90,9 +92,37 @@ async function checkBackfillAnchor(
   return { ok: true, rowCount: rows.length };
 }
 
+const ZERO_UUID = '00000000-0000-0000-0000-000000000000';
+
+/**
+ * sec-F1 forward defense: reject any chain row whose payload carries
+ * the all-zero placeholder UUID. The pre-fix evidence finalize handler
+ * (Milestone 1.7) emitted `evidence.uploaded` rows with a literal
+ * '00000000-0000-0000-0000-000000000000' in the `evidenceId` slot — the
+ * fix is to pre-allocate the UUID, but a regression here would silently
+ * break the chain-only export contract. Scan all rows for the marker.
+ */
+async function checkEvidenceForwardDefense(
+  db: ReturnType<typeof getDb>,
+): Promise<{ ok: true; checked: number } | { ok: false; offendingIdx: number; kind: string }> {
+  const rows = (await db.execute(sql`
+    SELECT idx, kind, payload
+    FROM audit_log
+    WHERE kind IN ('evidence.uploaded', 'evidence.read')
+    ORDER BY idx ASC
+  `)) as unknown as Array<{ idx: number; kind: string; payload: { evidenceId?: string } }>;
+  for (const row of rows) {
+    if (row.payload.evidenceId === ZERO_UUID) {
+      return { ok: false, offendingIdx: row.idx, kind: row.kind };
+    }
+  }
+  return { ok: true, checked: rows.length };
+}
+
 async function main(): Promise<void> {
   const quiet = process.argv.includes('--quiet');
   const checkBackfill = process.argv.includes('--check-backfill');
+  const checkEvidence = process.argv.includes('--check-evidence');
   const db = getDb();
   const result = await verify(db);
   if (!result.ok) {
@@ -107,6 +137,30 @@ async function main(): Promise<void> {
       process.stderr.write('\nRun docs/runbooks/auth.md §7 (tamper response) immediately.\n');
     }
     process.exit(1);
+  }
+
+  if (checkEvidence) {
+    const evidence = await checkEvidenceForwardDefense(db);
+    if (!evidence.ok) {
+      if (quiet) {
+        process.stdout.write(
+          `audit-log-verify EVIDENCE_PLACEHOLDER_UUID idx=${evidence.offendingIdx} kind=${evidence.kind}\n`,
+        );
+      } else {
+        process.stderr.write(
+          `audit-log-verify FAIL (evidence forward defense)\n  offending idx: ${evidence.offendingIdx}\n  kind:          ${evidence.kind}\n  reason:        evidenceId is the all-zero placeholder UUID\n`,
+        );
+        process.stderr.write(
+          '\nA evidence audit payload carries the sec-F1 placeholder UUID — the finalize handler regressed. Inspect the offending row and re-run the fix.\n',
+        );
+      }
+      process.exit(1);
+    }
+    if (!quiet) {
+      process.stdout.write(
+        `audit-log-verify evidence forward defense: ${evidence.checked} chain row(s) checked, no placeholder UUIDs found.\n`,
+      );
+    }
   }
 
   if (checkBackfill) {

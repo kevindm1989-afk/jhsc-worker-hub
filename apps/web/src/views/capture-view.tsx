@@ -20,7 +20,6 @@ import { cn } from '@/lib/utils';
 import { evidenceApi, EvidenceApiError } from '@/evidence/api';
 import { b64ToBytes, bytesToB64, sealEvidence } from '@/evidence/crypto';
 import { evidenceLinkedType, type EvidenceLinkedType } from '@jhsc/shared-types';
-import { VoiceToText } from '@/evidence/components';
 
 type Stage = 'idle' | 'capturing' | 'preview' | 'drafting' | 'confirmed';
 
@@ -74,17 +73,22 @@ function CaptureInner({
 }): JSX.Element {
   const [stage, setStage] = useState<Stage>('idle');
   const [photos, setPhotos] = useState<CapturedPhoto[]>([]);
-  const [description, setDescription] = useState('');
   const [error, setError] = useState<string | null>(null);
   const [uploading, setUploading] = useState(false);
   const [uploaded, setUploaded] = useState<UploadedEvidence[]>([]);
   const [coords, setCoords] = useState<GeolocationPosition | null>(null);
 
   function reset(): void {
-    photos.forEach((p) => URL.revokeObjectURL(p.previewUrl));
+    // sec-F9 close-out: zero plaintext bytes + revoke preview URLs
+    // before dropping the photos array. Same pattern is run on
+    // successful upload in the onSubmit handler below.
+    photos.forEach((p) => {
+      URL.revokeObjectURL(p.previewUrl);
+      p.bytes.fill(0);
+    });
     setPhotos([]);
-    setDescription('');
     setUploaded([]);
+    setCoords(null);
     setStage('idle');
   }
 
@@ -143,10 +147,9 @@ function CaptureInner({
         {stage === 'drafting' && (
           <DraftingStage
             photoCount={photos.length}
-            description={description}
-            onDescriptionChange={setDescription}
             coords={coords}
             onCoordsChange={setCoords}
+            onClearCoords={() => setCoords(null)}
             uploading={uploading}
             onSubmit={async () => {
               setError(null);
@@ -190,6 +193,15 @@ function CaptureInner({
                   });
                   results.push({ id: finalized.id });
                 }
+                // sec-F9 close-out: now that every photo's bytes have
+                // been sealed + uploaded, scrub the plaintext from
+                // process memory and revoke the preview URLs. The
+                // confirmed screen doesn't need the bytes anymore.
+                for (const photo of photos) {
+                  URL.revokeObjectURL(photo.previewUrl);
+                  photo.bytes.fill(0);
+                }
+                setPhotos([]);
                 setUploaded(results);
                 setStage('confirmed');
               } catch (e) {
@@ -230,6 +242,10 @@ function IdleStage({
       <p className="mt-1 max-w-xs text-sm text-slate-400">
         Linked to {linkedType.replace(/_/g, ' ')}. Photos are encrypted in this device before
         upload. Camera roll is never touched.
+      </p>
+      <p className="mt-3 max-w-xs text-xs text-slate-500">
+        Frame the hazard, not co-workers. If someone is incidentally in frame, retake from a
+        different angle when feasible.
       </p>
       <div className="mt-6">
         <Button type="button" onClick={onStart}>
@@ -378,18 +394,16 @@ function PreviewStage({
 
 function DraftingStage({
   photoCount,
-  description,
-  onDescriptionChange,
   coords,
   onCoordsChange,
+  onClearCoords,
   uploading,
   onSubmit,
 }: {
   photoCount: number;
-  description: string;
-  onDescriptionChange: (next: string) => void;
   coords: GeolocationPosition | null;
   onCoordsChange: (c: GeolocationPosition) => void;
+  onClearCoords: () => void;
   uploading: boolean;
   onSubmit: () => void;
 }): JSX.Element {
@@ -406,34 +420,46 @@ function DraftingStage({
       <div className="text-sm text-slate-300">
         {photoCount} photo{photoCount === 1 ? '' : 's'} ready to encrypt + upload.
       </div>
-      <div className="space-y-1">
-        <label htmlFor="cap-desc" className="text-xs uppercase tracking-wide text-slate-400">
-          Description (optional)
-        </label>
-        <VoiceToText
-          value={description}
-          onChange={onDescriptionChange}
-          rows={4}
-          placeholder="What's in the photo? What's the immediate concern?"
-        />
+      {/* priv-F1 close-out: the description field used to live here but
+          silently dropped to /dev/null at finalize because the
+          evidence_files row has no description column. Until that
+          column lands (tracked for a follow-up milestone), the rep
+          enters context on the linked hazard or action item instead --
+          the form on that detail page is encrypted, audited, and the
+          right home for the narrative. */}
+      <div className="rounded-md border border-slate-700 bg-slate-800/50 p-3 text-xs text-slate-300">
+        Add context (what happened, who was there, hazard severity) on the linked hazard or action
+        item. This evidence row stores the photo only.
       </div>
-      <div className="flex items-center justify-between gap-3 rounded-md border border-slate-700 bg-slate-800/50 p-3">
-        <div className="flex items-center gap-2">
-          <MapPin className="h-4 w-4 text-slate-300" strokeWidth={1.75} aria-hidden="true" />
-          <div className="text-xs text-slate-300">
+      <div className="space-y-1">
+        <div className="flex items-center justify-between gap-3 rounded-md border border-slate-700 bg-slate-800/50 p-3">
+          <div className="flex items-center gap-2">
+            <MapPin className="h-4 w-4 text-slate-300" strokeWidth={1.75} aria-hidden="true" />
+            <div className="text-xs text-slate-300">
+              {coords ? (
+                <span>
+                  {coords.coords.latitude.toFixed(4)}, {coords.coords.longitude.toFixed(4)} (±
+                  {Math.round(coords.coords.accuracy)} m)
+                </span>
+              ) : (
+                'No GPS attached'
+              )}
+            </div>
+          </div>
+          <div className="flex items-center gap-2">
             {coords ? (
-              <span>
-                {coords.coords.latitude.toFixed(4)}, {coords.coords.longitude.toFixed(4)} (±
-                {Math.round(coords.coords.accuracy)} m)
-              </span>
-            ) : (
-              'No GPS attached'
-            )}
+              <Button type="button" variant="ghost" size="sm" onClick={onClearCoords}>
+                Clear
+              </Button>
+            ) : null}
+            <Button type="button" variant="outline" size="sm" onClick={getCoords}>
+              {coords ? 'Refresh' : 'Attach GPS'}
+            </Button>
           </div>
         </div>
-        <Button type="button" variant="outline" size="sm" onClick={getCoords}>
-          {coords ? 'Refresh' : 'Attach GPS'}
-        </Button>
+        <p className="text-[11px] text-slate-500">
+          Adds 11-metre-precision location. Skip for medical, washroom, or off-site captures.
+        </p>
       </div>
       <div className="fixed inset-x-0 bottom-0 z-30 border-t border-slate-700 bg-slate-900/95 p-3 backdrop-blur">
         <div className="mx-auto flex max-w-md items-center justify-end gap-2">

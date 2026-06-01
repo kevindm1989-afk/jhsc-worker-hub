@@ -84,6 +84,7 @@ export type AuditEventKind =
   | 'action_item.move_undone'
   | 'evidence.uploaded'
   | 'evidence.read'
+  | 'evidence.list_accessed'
   | AuthEventKind;
 
 // ---------------------------------------------------------------------------
@@ -288,6 +289,16 @@ export type AuditPayload =
       readonly evidenceId: string;
       readonly linkedType: EvidenceLinkedType;
       readonly linkedId: string;
+    }
+  | {
+      // priv-F5 close-out: the list endpoint emits one anchor per call
+      // so a session-token theft that can't pass step-up still leaves a
+      // trail when bulk-walking GPS/timestamp metadata. Payload is
+      // PI-clean: linkedType + linkedId + row count, no per-row ids.
+      readonly kind: 'evidence.list_accessed';
+      readonly linkedType: EvidenceLinkedType;
+      readonly linkedId: string;
+      readonly rowCount: number;
     }
   | { readonly kind: 'signup'; readonly via: 'first_run' | 'invite' }
   | { readonly kind: 'login.passkey' }

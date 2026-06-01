@@ -80,10 +80,12 @@ CREATE INDEX "evidence_files_linked_idx" ON "evidence_files" USING btree ("linke
 CREATE INDEX "evidence_files_uploaded_at_idx" ON "evidence_files" USING btree ("uploaded_at");
 --> statement-breakpoint
 -- T-E6 backstop: the route layer rejects non-(hazard|action_item)
--- linked_type, but a trigger lands a defence-in-depth check that
--- the linked_id exists for the two types we DO support. The other
--- linked_type values are accepted by the table CHECK so that a future
--- migration can add per-type triggers without altering this table.
+-- linked_type, and the trigger is fail-closed at the SQL layer too --
+-- any linked_type the trigger doesn't know how to verify is rejected
+-- outright (sec-F4 close-out: previously the ELSE branch silently
+-- returned NEW for inspection_finding/recommendation/incident). Each
+-- future milestone adds its branch alongside its FK target table --
+-- same ratchet the route layer uses.
 CREATE OR REPLACE FUNCTION evidence_files_linked_fk_guard() RETURNS trigger
 LANGUAGE plpgsql AS $$
 BEGIN
@@ -97,6 +99,10 @@ BEGIN
       RAISE EXCEPTION
         'evidence_files_linked_fk_guard: action_item % does not exist', NEW.linked_id;
     END IF;
+  ELSE
+    RAISE EXCEPTION
+      'evidence_files_linked_fk_guard: linked_type % not yet supported at trigger layer',
+      NEW.linked_type;
   END IF;
   RETURN NEW;
 END;

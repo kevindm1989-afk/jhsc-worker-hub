@@ -187,17 +187,33 @@ evidenceRoute.post('/', async (c) => {
     if (rows.length === 0) return c.json({ error: 'linked_entity_not_found' }, 422);
   }
 
+  // sec-F5 close-out: the client tells us which workplaceKeyId it
+  // sealed under, but the server re-asserts that's the currently
+  // ACTIVE key. Stops a malicious or buggy client from pinning new
+  // uploads to a retired (and possibly compromised) key id.
+  const activeKey = await getActiveWorkplacePublicKey(db);
+  if (!activeKey) {
+    return c.json({ error: 'workplace_key_not_ready' }, 503);
+  }
+  if (body.workplaceKeyId !== activeKey.id) {
+    return c.json({ error: 'workplace_key_id_not_active' }, 422);
+  }
+
   // Convert hex SHA-256 inputs to bytea for the DB.
   const ciphertextSha = Buffer.from(body.ciphertextSha256, 'hex');
   const plaintextSha = Buffer.from(body.plaintextSha256, 'hex');
   const sealedDek = Buffer.from(body.sealedDekB64, 'base64');
+  // sec-F1 close-out: pre-allocate the evidence row id so the
+  // evidence.uploaded chain payload (canonicalised + hashed at append
+  // time) carries the real evidenceId, not a zero-UUID placeholder.
+  const evidenceId = randomUUID();
 
   const inserted = await db.transaction(async (tx) => {
     const chainRow = await append(tx, {
       actorId: auth.userId,
       payload: {
         kind: 'evidence.uploaded',
-        evidenceId: '00000000-0000-0000-0000-000000000000', // placeholder, overwritten below
+        evidenceId,
         linkedType: body.linkedType,
         linkedId: body.linkedId,
         mimeType: body.mimeType,
@@ -205,17 +221,18 @@ evidenceRoute.post('/', async (c) => {
         plaintextSha256: body.plaintextSha256,
       },
       resourceType: 'evidence_files',
-      resourceId: body.storageKey,
+      resourceId: evidenceId,
     });
     const rows = (await tx.execute(sql`
       INSERT INTO evidence_files (
-        linked_type, linked_id, storage_key,
+        id, linked_type, linked_id, storage_key,
         ciphertext_sha256, sealed_dek, workplace_key_id, plaintext_sha256,
         mime_type, byte_size,
         captured_at, gps_latitude, gps_longitude, gps_accuracy_m,
         audit_idx, uploaded_by_user_id
       )
       VALUES (
+        ${evidenceId},
         ${body.linkedType}, ${body.linkedId}, ${body.storageKey},
         ${ciphertextSha as unknown as Uint8Array},
         ${sealedDek as unknown as Uint8Array},
@@ -250,6 +267,7 @@ evidenceRoute.get('/', async (c) => {
   if (!parsed.success) {
     return c.json({ error: 'invalid_query', issues: parsed.error.flatten() }, 400);
   }
+  const auth = c.get('auth');
   const db = getDb();
   const rows = (await db.execute(sql`
     SELECT id, mime_type, byte_size,
@@ -275,6 +293,22 @@ evidenceRoute.get('/', async (c) => {
     uploaded_by_user_id: string;
     plaintext_sha256: string;
   }>;
+  // priv-F5 close-out: emit one chain anchor per list call so a
+  // session-token theft that can't pass step-up still leaves a trail
+  // when bulk-walking GPS/timestamp metadata. Payload is PI-clean
+  // (no per-row ids -- only linkedType + linkedId + row count).
+  await append(db, {
+    actorId: auth.userId,
+    payload: {
+      kind: 'evidence.list_accessed',
+      linkedType: parsed.data.linkedType,
+      linkedId: parsed.data.linkedId,
+      rowCount: rows.length,
+    },
+    resourceType: 'evidence_files',
+    resourceId: parsed.data.linkedId,
+  });
+
   return c.json({
     items: rows.map((r) => ({
       id: r.id,
@@ -296,6 +330,16 @@ evidenceRoute.get('/', async (c) => {
 // ---------------------------------------------------------------------------
 
 evidenceRoute.get('/:id/decrypt', async (c) => {
+  // sec-F2 close-out: GET /:id/decrypt is state-mutating (writes
+  // evidence.read into the chain + materialises plaintext) and the
+  // app-wide csrfHeaderGuard short-circuits on safe-method GETs. Same-
+  // site phishing tabs cannot fire this via <img src> / <iframe src>
+  // without the X-Requested-With header, which the web client sends
+  // unconditionally. Curl / API consumers must opt in to the header.
+  if (c.req.header('x-requested-with') !== 'jhsc-web') {
+    return c.json({ error: 'csrf_required' }, 403);
+  }
+
   const idParsed = uuidParam.safeParse(c.req.param('id'));
   if (!idParsed.success) return c.json({ error: 'invalid_id' }, 400);
 
@@ -330,6 +374,13 @@ evidenceRoute.get('/:id/decrypt', async (c) => {
   }>;
   if (rows.length === 0) return c.json({ error: 'not_found' }, 404);
   const row = rows[0]!;
+
+  // sec-F3 close-out: re-assert the linkedType is one the route layer
+  // accepts. Defense-in-depth against a manual SQL writer or a future
+  // migration bug landing a row with an unsupported linked_type.
+  if (!acceptedLinkedTypes.includes(row.linked_type as EvidenceLinkedType)) {
+    return c.json({ error: 'not_found' }, 404);
+  }
 
   // Fetch the ciphertext from Tigris.
   const ciphertext = await fetchEvidenceCiphertext(row.storage_key);
@@ -397,12 +448,38 @@ evidenceRoute.get('/:id/decrypt', async (c) => {
   // Slicing into a fresh ArrayBuffer detaches the libsodium-owned
   // memory before the response is sent.
   const body = plaintext.slice().buffer;
+  // sec-F6 close-out: PDFs render inline by default and can carry
+  // embedded JS that runs at blob: origin. Force every reveal to
+  // download via Content-Disposition: attachment AND lock the
+  // response down with a strict CSP so even if a viewer were to
+  // open the bytes inline the embedded script gets no network
+  // egress. priv-F10 close-out: belt-and-suspenders cache headers
+  // (pragma + expires + referrer-policy) on the plaintext response.
+  const mimeExt = MIME_EXT[row.mime_type] ?? 'bin';
   return new Response(body, {
     status: 200,
     headers: {
       'content-type': row.mime_type,
-      'cache-control': 'private, no-store',
+      'content-disposition': `attachment; filename="evidence-${row.id}.${mimeExt}"`,
+      'content-security-policy': "default-src 'none'; sandbox",
+      'cache-control': 'private, no-store, max-age=0',
+      pragma: 'no-cache',
+      expires: '0',
+      'referrer-policy': 'no-referrer',
       'content-length': String(plaintext.length),
     },
   });
 });
+
+// Extension by mime type for the Content-Disposition filename. The
+// extension is cosmetic -- the actual bytes are the original ciphertext
+// plaintext, mime is set by content-type.
+const MIME_EXT: Readonly<Record<string, string>> = {
+  'image/jpeg': 'jpg',
+  'image/png': 'png',
+  'image/webp': 'webp',
+  'image/heic': 'heic',
+  'audio/webm': 'webm',
+  'audio/ogg': 'ogg',
+  'application/pdf': 'pdf',
+};

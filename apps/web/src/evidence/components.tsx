@@ -92,12 +92,16 @@ function EvidenceListInner({
       }
       if (!res.ok) throw new EvidenceApiError(res.status, await res.text().catch(() => ''));
       const blob = await res.blob();
-      // Open in a new tab via a transient object URL. Revoke after
-      // the new tab has had a moment to load so we don't keep the
-      // plaintext blob alive in browser memory.
+      // Open in a new tab via a transient object URL. sec-F10 close-
+      // out: 5s revoke (was 30s). The browser loads a blob URL
+      // synchronously; 30s left the plaintext alive in process memory
+      // for half a minute past the moment the new tab finished
+      // loading. The decrypt response is Content-Disposition: attachment
+      // (sec-F6) so the user gets a download dialog -- the URL only
+      // needs to survive the dispatch.
       const url = URL.createObjectURL(blob);
       window.open(url, '_blank', 'noopener,noreferrer');
-      setTimeout(() => URL.revokeObjectURL(url), 30_000);
+      setTimeout(() => URL.revokeObjectURL(url), 5_000);
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     }
@@ -114,7 +118,7 @@ function EvidenceListInner({
   if (items.length === 0) {
     return (
       <div className="text-sm text-muted-foreground">
-        No evidence attached. Tap the camera button to capture a photo or audio note.
+        No evidence attached. Tap the camera button to capture a photo.
       </div>
     );
   }
@@ -268,11 +272,22 @@ export function VoiceToText({
           {listening ? <MicOff className="h-3.5 w-3.5" /> : <Mic className="h-3.5 w-3.5" />}
         </button>
       ) : null}
-      {!supported ? (
+      {/* priv-F3 close-out: webkitSpeechRecognition (Chrome/Edge)
+          routes audio to Google's servers for transcription. We don't
+          call a third party, but the browser API does on our behalf.
+          CLAUDE.md non-negotiable #3 demands explicit opt-in for any
+          third-party data flow, so we surface it unconditionally where
+          the API is available. Where it isn't, the fallback note runs. */}
+      {supported ? (
+        <div className="mt-1 text-[10px] text-muted-foreground">
+          Voice transcription on this browser may route audio to the browser vendor (e.g. Google on
+          Chrome). For sensitive content, hand-type instead.
+        </div>
+      ) : (
         <div className="mt-1 text-[10px] text-muted-foreground">
           Voice input not supported in this browser. Type instead.
         </div>
-      ) : null}
+      )}
     </div>
   );
 }

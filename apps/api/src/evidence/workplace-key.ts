@@ -105,7 +105,19 @@ export async function openWorkplacePrivateKey(
   return opened;
 }
 
-/** Test-only: clear the public-key cache so tests pick up freshly bootstrapped keys. */
-export function _resetWorkplaceKeyCacheForTests(): void {
+/**
+ * Invalidate the in-process public-key cache. Used by the test harness
+ * AND by the future workplace-key rotation script (1.12) so the next
+ * SELECT picks up the newly-active row instead of a stale cache. Multi-
+ * machine deploys still need a deploy-level invalidation, but a single-
+ * machine deploy is correct after one call here. Documented in
+ * docs/runbooks/evidence.md §3 (workplace key rotation).
+ */
+export function _invalidateWorkplaceKeyCache(): void {
   publicKeyCache = null;
+}
+
+/** Test-only alias for backward compat -- prefer _invalidateWorkplaceKeyCache(). */
+export function _resetWorkplaceKeyCacheForTests(): void {
+  _invalidateWorkplaceKeyCache();
 }
