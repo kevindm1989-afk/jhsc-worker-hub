@@ -579,6 +579,206 @@ export const evidenceFiles = pgTable(
 );
 
 // ---------------------------------------------------------------------------
+// Inspections (1.8, ADR-0007)
+// ---------------------------------------------------------------------------
+
+// Append-only versioned template rows. (template_code, version_number) is
+// the natural key; partial UNIQUE on (template_code) WHERE retired_at IS
+// NULL keeps at most one active version per code (T-I1).
+
+export const inspectionTemplates = pgTable(
+  'inspection_templates',
+  {
+    id: uuid('id')
+      .primaryKey()
+      .default(sql`gen_random_uuid()`),
+    templateCode: text('template_code').notNull(),
+    versionNumber: integer('version_number').notNull(),
+    statusVocab: text('status_vocab').notNull(),
+    displayName: text('display_name').notNull(),
+    cadence: text('cadence').notNull(),
+    sections: jsonb('sections').notNull(),
+    requiresThreeSignatures: boolean('requires_three_signatures').notNull().default(false),
+    createdAt: timestamp('created_at', { withTimezone: true })
+      .notNull()
+      .default(sql`now()`),
+    retiredAt: timestamp('retired_at', { withTimezone: true }),
+    createdByUserId: uuid('created_by_user_id').references(() => users.id, {
+      onDelete: 'restrict',
+      onUpdate: 'restrict',
+    }),
+  },
+  (t) => ({
+    codeIdx: index('inspection_templates_code_idx').on(t.templateCode),
+    codeVersionUnique: uniqueIndex('inspection_templates_code_version_unique').on(
+      t.templateCode,
+      t.versionNumber,
+    ),
+  }),
+);
+
+// Inspections pin a specific template version (non-negotiable #13).
+// zone_id is text + CHECK rather than FK — config/workplace.ts is the
+// runtime display layer; the literal zone_N is the stable id
+// (non-negotiable #14).
+
+export const inspections = pgTable(
+  'inspections',
+  {
+    id: uuid('id')
+      .primaryKey()
+      .default(sql`gen_random_uuid()`),
+    templateVersionId: uuid('template_version_id')
+      .notNull()
+      .references(() => inspectionTemplates.id, { onDelete: 'restrict', onUpdate: 'restrict' }),
+    zoneId: text('zone_id').notNull(),
+    conductedByUserId: uuid('conducted_by_user_id')
+      .notNull()
+      .references(() => users.id, { onDelete: 'restrict', onUpdate: 'restrict' }),
+    state: text('state').notNull().default('scheduled'),
+    scheduledFor: timestamp('scheduled_for', { withTimezone: true }),
+    startedAt: timestamp('started_at', { withTimezone: true }),
+    completedAt: timestamp('completed_at', { withTimezone: true }),
+    auditIdx: bigint('audit_idx', { mode: 'number' })
+      .notNull()
+      .references(() => auditLog.idx, { onDelete: 'restrict', onUpdate: 'restrict' }),
+    createdAt: timestamp('created_at', { withTimezone: true })
+      .notNull()
+      .default(sql`now()`),
+    updatedAt: timestamp('updated_at', { withTimezone: true })
+      .notNull()
+      .default(sql`now()`),
+  },
+  (t) => ({
+    auditIdxUnique: uniqueIndex('inspections_audit_idx_unique').on(t.auditIdx),
+    stateIdx: index('inspections_state_idx').on(t.state),
+    zoneIdx: index('inspections_zone_idx').on(t.zoneId),
+    templateVersionIdx: index('inspections_template_version_idx').on(t.templateVersionId),
+    conductedByIdx: index('inspections_conducted_by_idx').on(t.conductedByUserId),
+    scheduledForIdx: index('inspections_scheduled_for_idx').on(t.scheduledFor),
+  }),
+);
+
+// Finding rows snapshot section/item from the pinned template version at
+// create time so a row remains self-describing even if (hypothetically)
+// the template were force-deleted. Three encrypted column pairs carry
+// observation / corrective_action / responsible_party PI — each pair is
+// both-NULL or both-NOT-NULL (CHECK in 0007). promoted_action_item_id is
+// the bidirectional link to action_items; UNIQUE so each finding can
+// promote at most once (T-I16).
+
+export const inspectionFindings = pgTable(
+  'inspection_findings',
+  {
+    id: uuid('id')
+      .primaryKey()
+      .default(sql`gen_random_uuid()`),
+    inspectionId: uuid('inspection_id')
+      .notNull()
+      .references(() => inspections.id, { onDelete: 'restrict', onUpdate: 'restrict' }),
+    sectionKey: text('section_key').notNull(),
+    sectionLabel: text('section_label').notNull(),
+    itemKey: text('item_key').notNull(),
+    itemLabel: text('item_label').notNull(),
+    statusVocab: text('status_vocab').notNull(),
+    statusValue: text('status_value').notNull(),
+    observationCt: bytea('observation_ct'),
+    observationDekCt: bytea('observation_dek_ct'),
+    correctiveActionCt: bytea('corrective_action_ct'),
+    correctiveActionDekCt: bytea('corrective_action_dek_ct'),
+    responsiblePartyCt: bytea('responsible_party_ct'),
+    responsiblePartyDekCt: bytea('responsible_party_dek_ct'),
+    promotedActionItemId: uuid('promoted_action_item_id').references(() => actionItems.id, {
+      onDelete: 'set null',
+      onUpdate: 'restrict',
+    }),
+    auditIdx: bigint('audit_idx', { mode: 'number' })
+      .notNull()
+      .references(() => auditLog.idx, { onDelete: 'restrict', onUpdate: 'restrict' }),
+    createdAt: timestamp('created_at', { withTimezone: true })
+      .notNull()
+      .default(sql`now()`),
+    updatedAt: timestamp('updated_at', { withTimezone: true })
+      .notNull()
+      .default(sql`now()`),
+  },
+  (t) => ({
+    auditIdxUnique: uniqueIndex('inspection_findings_audit_idx_unique').on(t.auditIdx),
+    inspectionIdx: index('inspection_findings_inspection_idx').on(t.inspectionId),
+    statusValueIdx: index('inspection_findings_status_value_idx').on(t.statusValue),
+  }),
+);
+
+// One row per signature, separate-table over JSONB blob (ADR-0007 §3.8).
+// UNIQUE (inspection_id, role) gives "at most one of each role per
+// inspection" for free; audit_idx FK is per-signature anchoring.
+
+export const inspectionSignatures = pgTable(
+  'inspection_signatures',
+  {
+    id: uuid('id')
+      .primaryKey()
+      .default(sql`gen_random_uuid()`),
+    inspectionId: uuid('inspection_id')
+      .notNull()
+      .references(() => inspections.id, { onDelete: 'restrict', onUpdate: 'restrict' }),
+    signedByUserId: uuid('signed_by_user_id')
+      .notNull()
+      .references(() => users.id, { onDelete: 'restrict', onUpdate: 'restrict' }),
+    role: text('role').notNull(),
+    signedAt: timestamp('signed_at', { withTimezone: true })
+      .notNull()
+      .default(sql`now()`),
+    noteCt: bytea('note_ct'),
+    noteDekCt: bytea('note_dek_ct'),
+    auditIdx: bigint('audit_idx', { mode: 'number' })
+      .notNull()
+      .references(() => auditLog.idx, { onDelete: 'restrict', onUpdate: 'restrict' }),
+  },
+  (t) => ({
+    auditIdxUnique: uniqueIndex('inspection_signatures_audit_idx_unique').on(t.auditIdx),
+    inspectionIdx: index('inspection_signatures_inspection_idx').on(t.inspectionId),
+  }),
+);
+
+// PDF export receipts. The file lives in Tigris under storage_key; the
+// row carries the integrity anchor (output_sha256, 32 bytes) plus the
+// step-up grant jti that authorized the export. expires_at is the
+// 30-day TTL hint (Tigris lifecycle is the actual enforcement).
+// inspection_ids[] is bounded by the SQL CHECK to 1..100 (T-I32).
+
+export const exportRecords = pgTable(
+  'export_records',
+  {
+    id: uuid('id')
+      .primaryKey()
+      .default(sql`gen_random_uuid()`),
+    kind: text('kind').notNull(),
+    inspectionIds: uuid('inspection_ids').array().notNull(),
+    requestedByUserId: uuid('requested_by_user_id')
+      .notNull()
+      .references(() => users.id, { onDelete: 'restrict', onUpdate: 'restrict' }),
+    requestedAt: timestamp('requested_at', { withTimezone: true })
+      .notNull()
+      .default(sql`now()`),
+    outputSha256: bytea('output_sha256').notNull(),
+    byteSize: bigint('byte_size', { mode: 'number' }).notNull(),
+    storageKey: text('storage_key').notNull(),
+    stepUpJti: text('step_up_jti').notNull(),
+    expiresAt: timestamp('expires_at', { withTimezone: true }).notNull(),
+    auditIdx: bigint('audit_idx', { mode: 'number' })
+      .notNull()
+      .references(() => auditLog.idx, { onDelete: 'restrict', onUpdate: 'restrict' }),
+  },
+  (t) => ({
+    storageKeyUnique: uniqueIndex('export_records_storage_key_unique').on(t.storageKey),
+    auditIdxUnique: uniqueIndex('export_records_audit_idx_unique').on(t.auditIdx),
+    requestedByIdx: index('export_records_requested_by_idx').on(t.requestedByUserId),
+    requestedAtIdx: index('export_records_requested_at_idx').on(t.requestedAt),
+  }),
+);
+
+// ---------------------------------------------------------------------------
 // Re-export for Drizzle adapters
 // ---------------------------------------------------------------------------
 
@@ -604,6 +804,11 @@ export const schema = {
   actionItemMoves,
   workplaceKeys,
   evidenceFiles,
+  inspectionTemplates,
+  inspections,
+  inspectionFindings,
+  inspectionSignatures,
+  exportRecords,
   loginAttemptOutcome,
   authEventKind,
   webauthnPurpose,

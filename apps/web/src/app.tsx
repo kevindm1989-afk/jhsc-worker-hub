@@ -11,7 +11,13 @@ import { ActionItemsView } from './views/action-items-view';
 import { HazardDetailView } from './views/hazard-detail-view';
 import { HazardNewView } from './views/hazard-new-view';
 import { HazardsView } from './views/hazards-view';
+import { FindingDetailView } from './views/finding-detail-view';
+import { InspectionDetailView } from './views/inspection-detail-view';
+import { InspectionsExportsView } from './views/inspections-exports-view';
 import { InspectionsView } from './views/inspections-view';
+import { NewInspectionView } from './views/new-inspection-view';
+import { NewTemplateView } from './views/new-template-view';
+import { TemplatesView } from './views/templates-view';
 import { LegalView } from './views/legal-view';
 import { MinutesView } from './views/minutes-view';
 import { MoreView } from './views/more-view';
@@ -48,6 +54,15 @@ export function App(): JSX.Element {
                 <Route path="/action-items/:id" element={<ActionItemDetailView />} />
                 <Route path="/capture" element={<CaptureView />} />
                 <Route path="/inspections" element={<InspectionsView />} />
+                <Route path="/inspections/new" element={<NewInspectionView />} />
+                <Route path="/inspections/exports" element={<InspectionsExportsView />} />
+                <Route path="/inspections/:id" element={<InspectionDetailView />} />
+                <Route
+                  path="/inspections/:id/findings/:findingId"
+                  element={<FindingDetailView />}
+                />
+                <Route path="/inspection-templates" element={<TemplatesView />} />
+                <Route path="/inspection-templates/new" element={<NewTemplateView />} />
                 <Route path="/recommendations" element={<RecommendationsView />} />
                 <Route path="/more" element={<MoreView />} />
                 <Route path="/legal" element={<LegalView />} />

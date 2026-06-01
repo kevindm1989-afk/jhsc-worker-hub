@@ -65,11 +65,20 @@ const MAX_BYTE_SIZE = 50 * 1024 * 1024; // 50 MB — matches the SQL CHECK + buc
 const SHA256_HEX = z.string().regex(/^[0-9a-f]{64}$/, 'must be 64 hex chars (SHA-256)');
 const B64 = z.string().regex(/^[A-Za-z0-9+/]*={0,2}$/, 'must be valid base64');
 
-// linkedType the route ACCEPTS in 1.7. Schema allows the full set so a
+// linkedType the route ACCEPTS. The schema allows the full set so a
 // future migration can add per-type FK triggers without altering the
 // table; the route layer rejects the rest until those tables ship
 // (fail-closed forward seam — same pattern as action items priv-AI-F3).
-const acceptedLinkedTypes: ReadonlyArray<EvidenceLinkedType> = ['hazard', 'action_item'];
+//
+// 1.8 (T-I14 close-out): 'inspection_finding' opens in lockstep with
+// migration 0007's `evidence_files_linked_fk_guard` trigger ratchet —
+// both layers agree, neither drifts. 'recommendation' + 'incident' stay
+// rejected until 1.9 / later ship their owning tables + triggers.
+const acceptedLinkedTypes: ReadonlyArray<EvidenceLinkedType> = [
+  'hazard',
+  'action_item',
+  'inspection_finding',
+];
 
 const uploadUrlBody = z
   .object({
@@ -173,8 +182,8 @@ evidenceRoute.post('/', async (c) => {
     return c.json({ error: 'object_missing_or_size_mismatch', byteSize: head.byteSize }, 422);
   }
 
-  // Verify the linked entity exists -- T-E6 backstop. The DB trigger
-  // catches a manual SQL bypass; this catches the API path.
+  // Verify the linked entity exists -- T-E6 / T-I14 backstop. The DB
+  // trigger catches a manual SQL bypass; this catches the API path.
   if (body.linkedType === 'hazard') {
     const rows = (await db.execute(
       sql`SELECT 1 FROM hazards WHERE id = ${body.linkedId} LIMIT 1`,
@@ -183,6 +192,11 @@ evidenceRoute.post('/', async (c) => {
   } else if (body.linkedType === 'action_item') {
     const rows = (await db.execute(
       sql`SELECT 1 FROM action_items WHERE id = ${body.linkedId} LIMIT 1`,
+    )) as unknown as Array<unknown>;
+    if (rows.length === 0) return c.json({ error: 'linked_entity_not_found' }, 422);
+  } else if (body.linkedType === 'inspection_finding') {
+    const rows = (await db.execute(
+      sql`SELECT 1 FROM inspection_findings WHERE id = ${body.linkedId} LIMIT 1`,
     )) as unknown as Array<unknown>;
     if (rows.length === 0) return c.json({ error: 'linked_entity_not_found' }, 422);
   }

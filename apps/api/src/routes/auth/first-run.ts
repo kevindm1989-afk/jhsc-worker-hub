@@ -52,6 +52,7 @@ import {
 } from '../../db/schema';
 import { env } from '../../env';
 import { ensureWorkplaceKey } from '../../evidence/workplace-key';
+import { seedInspectionTemplates } from '../../../scripts/seed-inspection-templates';
 
 export const firstRunRoute = new Hono();
 
@@ -256,6 +257,13 @@ firstRunRoute.post('/confirm', async (c) => {
       // browser can sealed-box-encrypt evidence files immediately after
       // first-run. Idempotent — re-runs on retry are no-ops.
       await ensureWorkplaceKey(tx);
+      // Milestone 1.8 (ADR-0007 §3.4): seed the Zone Monthly v1 + Rack
+      // Inspection v1 templates so the rep can conduct inspections
+      // immediately after first-run. Idempotent — SELECT-first on
+      // (template_code, version_number); audit anchor only on actual
+      // INSERT (T-I9, T-I33). Runs inside the same confirm transaction
+      // so a rolled-back first-run leaves no half-seeded templates.
+      await seedInspectionTemplates(tx);
       return userRow.id;
     });
   } catch (e) {
