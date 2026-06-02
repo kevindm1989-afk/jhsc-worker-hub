@@ -1126,6 +1126,10 @@ export const excelImports = pgTable(
     previewedAt: timestamp('previewed_at', { withTimezone: true }),
     committedAt: timestamp('committed_at', { withTimezone: true }),
     cancelledAt: timestamp('cancelled_at', { withTimezone: true }),
+    // S2 reverse-path stamp (ADR §3.11). NULL until the 30-day reverse
+    // fires. The migration extends the state-consistency CHECK to enforce
+    // that reversed_at is NOT NULL when status='reversed'.
+    reversedAt: timestamp('reversed_at', { withTimezone: true }),
   },
   (t) => ({
     auditIdxUnique: uniqueIndex('excel_imports_audit_idx_unique').on(t.auditIdx),

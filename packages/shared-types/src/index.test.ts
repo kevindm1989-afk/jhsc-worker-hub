@@ -407,8 +407,14 @@ describe('isClientId — RFC 4122 v4 runtime guard', () => {
 });
 
 describe('excel-import enums (Milestone 1.11, ADR-0010)', () => {
-  it('excelImportStatus exports the four lifecycle states in order', () => {
-    expect([...excelImportStatus]).toEqual(['pending', 'preview', 'committed', 'cancelled']);
+  it('excelImportStatus exports the five lifecycle states in order (S2 added reversed)', () => {
+    expect([...excelImportStatus]).toEqual([
+      'pending',
+      'preview',
+      'committed',
+      'cancelled',
+      'reversed',
+    ]);
   });
 
   it('excelImportItemStatus exports the four classifications in order', () => {
@@ -454,13 +460,19 @@ describe('AuditPayload — 1.11 excel-import variants (type-level)', () => {
     }
   });
 
-  it('excel_import.reversed carries the server-side reversedAt timestamp', () => {
+  it('excel_import.reversed carries reversedAt + per-decision counts', () => {
     const p: AuditPayload = {
       kind: 'excel_import.reversed',
       importId: 'imp-1',
       reversedAt: '2026-06-15T12:34:56.000Z',
+      deletedCount: 5,
+      revertedCount: 3,
+      refusedCount: 1,
     };
     expect(p.kind).toBe('excel_import.reversed');
+    if (p.kind === 'excel_import.reversed') {
+      expect(p.deletedCount + p.revertedCount + p.refusedCount).toBe(9);
+    }
   });
 
   it('narrows on the discriminant for all three excel-import kinds', () => {
@@ -484,6 +496,9 @@ describe('AuditPayload — 1.11 excel-import variants (type-level)', () => {
         kind: 'excel_import.reversed',
         importId: 'i1',
         reversedAt: '2026-06-02T00:00:00.000Z',
+        deletedCount: 0,
+        revertedCount: 0,
+        refusedCount: 0,
       },
     ];
     const kinds = payloads.map((p) => p.kind);
@@ -492,6 +507,48 @@ describe('AuditPayload — 1.11 excel-import variants (type-level)', () => {
       'excel_import.committed',
       'excel_import.reversed',
     ]);
+  });
+});
+
+describe('AuditPayload — action_item.created + action_item.updated retain optional createdByImportId (1.11 S2 close-out)', () => {
+  it('action_item.created accepts createdByImportId for excel-import-driven creates', () => {
+    const p: AuditPayload = {
+      kind: 'action_item.created',
+      itemId: 'ai-1',
+      itemType: 'OTHER',
+      section: 'new_business',
+      risk: 'Low',
+      createdByImportId: 'imp-7',
+    };
+    if (p.kind === 'action_item.created') {
+      expect(p.createdByImportId).toBe('imp-7');
+    }
+  });
+
+  it('action_item.created omits createdByImportId for native creates (field is optional)', () => {
+    const p: AuditPayload = {
+      kind: 'action_item.created',
+      itemId: 'ai-2',
+      itemType: 'INSP',
+      section: 'new_business',
+      risk: 'High',
+    };
+    if (p.kind === 'action_item.created') {
+      expect(p.createdByImportId).toBeUndefined();
+    }
+  });
+
+  it('action_item.updated accepts createdByImportId for excel-import-driven updates', () => {
+    const p: AuditPayload = {
+      kind: 'action_item.updated',
+      itemId: 'ai-3',
+      changedFields: ['status', 'risk'],
+      createdByImportId: 'imp-7',
+    };
+    if (p.kind === 'action_item.updated') {
+      expect(p.createdByImportId).toBe('imp-7');
+      expect(p.changedFields).toEqual(['status', 'risk']);
+    }
   });
 });
 

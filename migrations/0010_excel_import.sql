@@ -97,14 +97,21 @@ CREATE TABLE "excel_imports" (
 	"previewed_at" timestamp with time zone,
 	"committed_at" timestamp with time zone,
 	"cancelled_at" timestamp with time zone,
+	-- S2 reverse-path stamp. NULL until the 30-day reverse fires; once
+	-- stamped, the status MUST also flip to 'reversed' per the
+	-- state-consistency CHECK below. ADR §3.11.
+	"reversed_at" timestamp with time zone,
 	CONSTRAINT "excel_imports_source_sha256_length_check"
 		CHECK (octet_length("source_sha256") = 32),
 	CONSTRAINT "excel_imports_row_count_bounds_check"
 		CHECK ("row_count" >= 0 AND "row_count" <= 50000),
 	CONSTRAINT "excel_imports_schema_version_check"
 		CHECK ("schema_version" IN ('meeting_minutes_v1')),
+	-- 'reversed' added in S2: the 30-day reverse path flips the
+	-- committed row to this state + stamps reversed_at. Append-only
+	-- after that (no transition out of 'reversed').
 	CONSTRAINT "excel_imports_status_check"
-		CHECK ("status" IN ('pending','preview','committed','cancelled')),
+		CHECK ("status" IN ('pending','preview','committed','cancelled','reversed')),
 	-- inspection_review snapshot pair-NULL: both columns NULL or both
 	-- NOT NULL. T-X13 + the established 1.7 evidence / 1.8 finding /
 	-- 1.9 recommendation encrypted-pair posture.
@@ -114,20 +121,31 @@ CREATE TABLE "excel_imports" (
 	),
 	-- State-consistency CHECK: the (status, *_at) tuple must be coherent.
 	-- A drifted route handler cannot land a row claiming status='committed'
-	-- with committed_at IS NULL.
+	-- with committed_at IS NULL.  S2 adds the 'reversed' shape: status
+	-- transitions committed → reversed; reversed_at gets stamped at the
+	-- transition; committed_at stays populated (the prior commit still
+	-- happened; the reverse is an additive lifecycle event).
 	CONSTRAINT "excel_imports_state_consistency_check" CHECK (
 		("status" = 'pending'
 			AND "committed_at" IS NULL
-			AND "cancelled_at" IS NULL)
+			AND "cancelled_at" IS NULL
+			AND "reversed_at" IS NULL)
 		OR ("status" = 'preview'
 			AND "previewed_at" IS NOT NULL
 			AND "committed_at" IS NULL
-			AND "cancelled_at" IS NULL)
+			AND "cancelled_at" IS NULL
+			AND "reversed_at" IS NULL)
 		OR ("status" = 'committed'
 			AND "committed_at" IS NOT NULL
-			AND "cancelled_at" IS NULL)
+			AND "cancelled_at" IS NULL
+			AND "reversed_at" IS NULL)
 		OR ("status" = 'cancelled'
-			AND "cancelled_at" IS NOT NULL)
+			AND "cancelled_at" IS NOT NULL
+			AND "reversed_at" IS NULL)
+		OR ("status" = 'reversed'
+			AND "committed_at" IS NOT NULL
+			AND "reversed_at" IS NOT NULL
+			AND "cancelled_at" IS NULL)
 	),
 	CONSTRAINT "excel_imports_imported_by_user_fk"
 		FOREIGN KEY ("imported_by_user_id") REFERENCES "users"("id")

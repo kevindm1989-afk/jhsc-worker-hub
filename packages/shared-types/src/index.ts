@@ -462,25 +462,28 @@ export type AuditPayload =
       readonly toStatus: HazardStatus;
     }
   | {
-      // S1 NOTE (1.11): ADR-0010 §3.9 introduces an optional
-      // `createdByImportId` field on this payload for the
-      // excel-import-created branch. The retrofit is DEFERRED to S2
-      // when the actual commit transaction lands and the route layer
-      // proves out the wiring. S1's three new excel_import.* kinds
-      // (uploaded / committed / reversed) suffice for the package's
-      // test coverage; the per-row link can be reconstructed at
-      // verifier time by joining excel_import_items.action_item_id
-      // until the additive field arrives in S2.
+      // S2 (1.11): ADR-0010 §3.9 additive field. When the action_item
+      // was created by an Excel-import commit transaction, this carries
+      // the import batch id so an auditor can grep the chain for every
+      // action_item created by a given import. Optional — existing 1.6
+      // create paths omit it (the field is absent from the canonical
+      // JSON, which keeps the chain hash stable for pre-S2 rows).
       readonly kind: 'action_item.created';
       readonly itemId: string;
       readonly itemType: ActionItemType;
       readonly section: ActionItemSection;
       readonly risk: ActionItemRisk;
+      readonly createdByImportId?: string;
     }
   | {
+      // S2 (1.11): same additive close-out — an update emitted within
+      // the Excel-import commit transaction carries the import batch
+      // id so an auditor can trace every action_item the import
+      // touched. Optional; absent on non-import-driven updates.
       readonly kind: 'action_item.updated';
       readonly itemId: string;
       readonly changedFields: ReadonlyArray<ActionItemUpdateField>;
+      readonly createdByImportId?: string;
     }
   | {
       readonly kind: 'action_item.moved';
@@ -704,11 +707,14 @@ export type AuditPayload =
   | {
       // Emitted at the reverse-transaction end (within 30 days; after
       // 30 days the operator-script path adds the optional
-      // viaOperatorScript + operatorUserId fields — S2 lands those).
-      // PI-clean: server timestamp + count of rows touched.
+      // viaOperatorScript + operatorUserId fields — runbook follow-up).
+      // PI-clean: server timestamp + per-decision counts.
       readonly kind: 'excel_import.reversed';
       readonly importId: string;
       readonly reversedAt: string;
+      readonly deletedCount: number;
+      readonly revertedCount: number;
+      readonly refusedCount: number;
     }
   | { readonly kind: 'signup'; readonly via: 'first_run' | 'invite' }
   | { readonly kind: 'login.passkey' }
@@ -879,18 +885,24 @@ export function computeNextBackoff(attemptCount: number): number | null {
  * between the upload-record POST and the preview-ready event;
  * `preview` is what the rep sees + edits + (optionally) commits or
  * cancels. `committed` is terminal-but-reversible-for-30-days;
- * `cancelled` is terminal. The status enum is the structural backstop
- * for the migration 0010 state-consistency CHECK (which additionally
- * couples status to the *_at timestamps).
+ * `cancelled` is terminal. `reversed` is the post-30-day-reverse
+ * terminal state added in S2 (ADR-0010 §3.11) — the original
+ * commit's chain anchors stay in place, the reverse fires its own
+ * `excel_import.reversed` anchor, and the action_items the import
+ * created are soft-deleted via status='Cancelled' + section='archived'
+ * for chain-of-custody preservation.
  *
- * Note: 1.11 does NOT add a `'reversed'` status here in S1. The ADR
- * uses it in §3.8 and the SECURITY threat-model references it
- * (T-X38), but S1's migration only ships the four-state pending /
- * preview / committed / cancelled enum; the reverse path lands in S2
- * (and may either add 'reversed' as a fifth state or use a
- * `reversed_at` timestamp on the existing 'committed' row — S2 picks).
+ * The status enum is the structural backstop for the migration 0010
+ * state-consistency CHECK (which additionally couples status to the
+ * *_at timestamps).
  */
-export const excelImportStatus = ['pending', 'preview', 'committed', 'cancelled'] as const;
+export const excelImportStatus = [
+  'pending',
+  'preview',
+  'committed',
+  'cancelled',
+  'reversed',
+] as const;
 export type ExcelImportStatus = (typeof excelImportStatus)[number];
 
 /** Per-row reconciliation classification (ADR-0010 §3.6).
