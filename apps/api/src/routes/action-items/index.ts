@@ -109,29 +109,39 @@ const createBody = z
   )
   .refine(
     (b) =>
-      // sec-review F7 / priv-AI-F3 1.6: SECURITY.md T-AI8 promises route-
-      // level FK validation for hazard / recommendation / inspection /
-      // incident. Only hazard (1.5) is allowed via this generic route
-      // in 1.8. Inspection-derived action items must go through the
-      // dedicated `POST /api/inspections/findings/:id/promote` handler
-      // (sec-F2 / T-I36 close-out): that handler is the single source
-      // of truth for the #15 X/G fail-closed gate AND the T-I16 one-
-      // shot promote invariant. Accepting `sourceType='inspection'`
-      // here would let a hand-crafted POST bypass both. Recommendation
-      // + incident remain rejected at the route until 1.9 / later.
+      // sec-review F7 / priv-AI-F3 1.6 + 1.8 sec-F2 + T-R14 1.9
+      // close-out: SECURITY.md T-AI8 promises route-level FK validation
+      // for hazard / recommendation / inspection / incident. Only
+      // hazard (1.5) is allowed via this generic route. Inspection-
+      // derived action items must go through the dedicated
+      // `POST /api/inspections/findings/:id/promote` handler (sec-F2
+      // / T-I36 close-out): that handler is the single source of truth
+      // for the #15 X/G fail-closed gate AND the T-I16 one-shot
+      // promote invariant. Recommendation-derived action items must
+      // go through the dedicated
+      // `POST /api/recommendations/:id/submit` handler (T-R14 1.9
+      // close-out): that handler is the single source of truth for
+      // the citation Zod gate + the T-R13 one-shot submit invariant
+      // (UNIQUE action_item_id on recommendation_action_item_links).
+      // Accepting `sourceType='inspection'` OR
+      // `sourceType='recommendation'` here would let a hand-crafted
+      // POST bypass those gates. Incident remains rejected at the
+      // route until its owning milestone.
       !b.sourceType ||
       b.sourceType === 'manual' ||
       b.sourceType === 'hazard' ||
       b.sourceType === 'excel_import',
     (b) => ({
-      // sec-F2 close-out: give a hand-crafted caller a clear redirect
-      // to the promote route instead of the generic 'not yet supported'
-      // line. Other unsupported source_types (recommendation, incident)
+      // sec-F2 + T-R14 close-out: give a hand-crafted caller a clear
+      // redirect to the dedicated route instead of the generic 'not
+      // yet supported' line. Other unsupported source_types (incident)
       // still get the generic message.
       message:
         b.sourceType === 'inspection'
           ? 'inspection_source_requires_promote_route'
-          : 'sourceType not yet supported -- recommendation / incident land in their owning milestones',
+          : b.sourceType === 'recommendation'
+            ? 'recommendation_source_requires_submit_route'
+            : 'sourceType not yet supported -- incident lands in its owning milestone',
       path: ['sourceType'],
     }),
   );

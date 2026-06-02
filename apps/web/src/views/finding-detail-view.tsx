@@ -24,6 +24,7 @@ import {
   inspectionsApi,
   isStepUpRequired,
   type FindingDetail,
+  type ResponsibleParty,
 } from '@/inspections/api';
 import { inspectionPromotability } from '@jhsc/shared-types';
 
@@ -260,7 +261,10 @@ function RevealedFinding({
       <div className="mt-3 space-y-3">
         <RevealedField label="Observation" value={finding.observation} />
         <RevealedField label="Corrective action" value={finding.correctiveAction} />
-        <RevealedField label="Responsible party" value={finding.responsibleParty} />
+        <RevealedField
+          label="Responsible party"
+          value={formatResponsibleParty(finding.responsibleParty)}
+        />
       </div>
       <div className="mt-3 text-[11px] text-muted-foreground">
         Created {new Date(finding.createdAt).toLocaleString()} · last updated{' '}
@@ -286,6 +290,30 @@ function RevealedFinding({
       </div>
     </section>
   );
+}
+
+/**
+ * 1.9 S5 priv-F1 close-out: project the server's responsibleParty
+ * discriminated union (`{kind: 'user_ref', userId} | {kind: 'name_text',
+ * nameText}`) into a single string-or-null shape suitable for the
+ * RevealedField caller.
+ *
+ *   - `null` → null (em-dash placeholder).
+ *   - `name_text` → the decrypted plaintext.
+ *   - `user_ref` → an 8-char UUID prefix + `…`. Until a workplace user
+ *     list with display names ships in 1.12, the prefix is the minimum
+ *     identifier the rep needs to distinguish internal owners on the
+ *     reveal screen without surfacing the full uuid. The runbook
+ *     documents the trade-off (priv-F13).
+ *
+ * Exported for the test surface.
+ */
+export function formatResponsibleParty(rp: ResponsibleParty | null): string | null {
+  if (rp === null) return null;
+  if (rp.kind === 'name_text') return rp.nameText;
+  // kind === 'user_ref' — render an 8-char prefix until a user-picker
+  // resolution ships (1.12 follow-up).
+  return `${rp.userId.slice(0, 8)}…`;
 }
 
 function RevealedField({ label, value }: { label: string; value: string | null }): JSX.Element {

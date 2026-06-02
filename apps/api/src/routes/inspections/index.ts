@@ -82,6 +82,7 @@ import { authMiddleware, checkStepUpFreshness } from '../../auth/step-up';
 import { rateLimit } from '../../middleware/rate-limit';
 import { openOptionalField, sealField, sealOptionalField } from '../../inspections/crypto';
 import { sealField as sealActionItemField } from '../../action-items/crypto';
+import { noHtmlBounded } from '../../lib/string-validators';
 import { allocateSequenceNumber } from '../action-items';
 import { inspectionsExportsRoute } from './exports';
 
@@ -142,16 +143,11 @@ const uuidParam = z.string().uuid();
 // even a future renderer that mishandles escaping cannot land XSS
 // content via the template surface (T-I11). Max sizes from ADR-0007 §3.5.
 const KEY_PATTERN = /^[a-z][a-z0-9_]{0,63}$/;
-// Helper: build a string schema with min/max + the no-HTML refinement
-// applied LAST (refine returns ZodEffects which loses .min/.max).
-function noHtmlBounded(opts: {
-  min?: number;
-  max: number;
-}): z.ZodEffects<z.ZodString, string, string> {
-  let s = z.string().max(opts.max);
-  if (opts.min !== undefined) s = s.min(opts.min);
-  return s.refine((v) => !/[<>]/.test(v), 'must not contain `<` or `>` (no HTML/markdown)');
-}
+// `noHtmlBounded` lives in `apps/api/src/lib/string-validators.ts` so
+// the recommendations route can share the same refinement (priv-F14
+// close-out from the 1.9 S5 review). The helper also strips C0/C1
+// control characters + BiDi overrides — defenses we always wanted on
+// the inspections route's free-text surfaces and now apply uniformly.
 
 const templateItemSchema = z
   .object({
@@ -212,6 +208,23 @@ const patchInspectionBody = z
 // schema's check just bounds the alphabet.
 const findingStatusValueRaw = z.string().regex(/^[A-Z]$/);
 
+// 1.9 priv-F8 close-out (ADR-0008 §3.12): responsibleParty becomes a
+// discriminatedUnion('kind', ['user_ref', 'name_text']). 'user_ref'
+// surfaces an internal owner by user id (no encryption, no PI in the
+// name field — the rep is in users); 'name_text' captures an external
+// party whose name is envelope-encrypted (the 1.8 path). The migration
+// 0008 CHECK enforces kind / _user_id / _ct alignment at the DB
+// layer; this Zod schema enforces it at the route. Pre-1.9 rows with
+// kind=NULL stay valid because the column is nullable.
+const responsiblePartySchema = z
+  .discriminatedUnion('kind', [
+    z.object({ kind: z.literal('user_ref'), userId: z.string().uuid() }).strict(),
+    z
+      .object({ kind: z.literal('name_text'), nameText: noHtmlBounded({ min: 1, max: 200 }) })
+      .strict(),
+  ])
+  .optional();
+
 const createFindingBody = z
   .object({
     sectionKey: z.string().regex(KEY_PATTERN),
@@ -220,21 +233,34 @@ const createFindingBody = z
     statusValue: findingStatusValueRaw,
     observation: noHtmlBounded({ max: 8000 }).optional(),
     correctiveAction: noHtmlBounded({ max: 8000 }).optional(),
-    responsibleParty: noHtmlBounded({ max: 200 }).optional(),
+    responsibleParty: responsiblePartySchema,
   })
   .strict();
 
 // PATCH finding — in_progress only (chain-of-custody discipline). We
 // also restrict the editable surface to:
 //   - statusValue within the same vocab
-//   - observation / correctiveAction / responsibleParty (add or change)
+//   - observation / correctiveAction (add, change, or clear via null)
+//   - responsibleParty (the discriminated union; null to clear)
 // Other fields are immutable for the lifetime of the finding row.
 const patchFindingBody = z
   .object({
     statusValue: findingStatusValueRaw.optional(),
     observation: noHtmlBounded({ max: 8000 }).nullable().optional(),
     correctiveAction: noHtmlBounded({ max: 8000 }).nullable().optional(),
-    responsibleParty: noHtmlBounded({ max: 200 }).nullable().optional(),
+    // For PATCH, the dual-shape accepts a discriminated union to set
+    // (matching create) OR null to clear back to "no responsible party"
+    // (kind=NULL on the row). An optional/undefined value leaves the
+    // existing row unchanged.
+    responsibleParty: z
+      .union([
+        z.object({ kind: z.literal('user_ref'), userId: z.string().uuid() }).strict(),
+        z
+          .object({ kind: z.literal('name_text'), nameText: noHtmlBounded({ min: 1, max: 200 }) })
+          .strict(),
+        z.null(),
+      ])
+      .optional(),
   })
   .strict();
 
@@ -877,7 +903,25 @@ inspectionsRoute.post('/:id/findings', async (c) => {
   // Encrypt the PI fields (T-I13).
   const obsSealed = sealOptionalField(body.observation);
   const correctiveSealed = sealOptionalField(body.correctiveAction);
-  const respSealed = sealOptionalField(body.responsibleParty);
+
+  // 1.9 priv-F8 close-out: responsibleParty dual-shape — set
+  // responsible_party_kind + responsible_party_user_id for 'user_ref'
+  // (no encryption); set responsible_party_kind + encrypted name pair
+  // for 'name_text'. The migration 0008 CHECK constraint enforces the
+  // alignment at the DB layer.
+  let respKind: 'user_ref' | 'name_text' | null = null;
+  let respUserId: string | null = null;
+  let respNameSealed: { ct: Uint8Array; dekCt: Uint8Array } | null = null;
+  if (body.responsibleParty) {
+    if (body.responsibleParty.kind === 'user_ref') {
+      respKind = 'user_ref';
+      respUserId = body.responsibleParty.userId;
+    } else {
+      respKind = 'name_text';
+      respNameSealed = sealField(body.responsibleParty.nameText);
+    }
+  }
+  const hasResponsibleParty = respKind !== null;
 
   const findingId = crypto.randomUUID();
   await db.transaction(async (tx) => {
@@ -903,6 +947,7 @@ inspectionsRoute.post('/:id/findings', async (c) => {
         status_vocab, status_value,
         observation_ct, observation_dek_ct,
         corrective_action_ct, corrective_action_dek_ct,
+        responsible_party_kind, responsible_party_user_id,
         responsible_party_ct, responsible_party_dek_ct,
         audit_idx
       )
@@ -914,8 +959,10 @@ inspectionsRoute.post('/:id/findings', async (c) => {
         ${obsSealed ? (Buffer.from(obsSealed.dekCt) as unknown as Uint8Array) : null},
         ${correctiveSealed ? (Buffer.from(correctiveSealed.ct) as unknown as Uint8Array) : null},
         ${correctiveSealed ? (Buffer.from(correctiveSealed.dekCt) as unknown as Uint8Array) : null},
-        ${respSealed ? (Buffer.from(respSealed.ct) as unknown as Uint8Array) : null},
-        ${respSealed ? (Buffer.from(respSealed.dekCt) as unknown as Uint8Array) : null},
+        ${respKind},
+        ${respUserId},
+        ${respNameSealed ? (Buffer.from(respNameSealed.ct) as unknown as Uint8Array) : null},
+        ${respNameSealed ? (Buffer.from(respNameSealed.dekCt) as unknown as Uint8Array) : null},
         ${chainRow.idx}
       )
     `);
@@ -932,7 +979,7 @@ inspectionsRoute.post('/:id/findings', async (c) => {
     statusValue: body.statusValue,
     hasObservation: obsSealed !== null,
     hasCorrectiveAction: correctiveSealed !== null,
-    hasResponsibleParty: respSealed !== null,
+    hasResponsibleParty,
   });
 });
 
@@ -1025,7 +1072,7 @@ inspectionsRoute.patch('/findings/:id', async (c) => {
         setParts.push(sql`status_value = ${body.statusValue}`);
       }
       function applyEncryptedField(
-        column: 'observation' | 'corrective_action' | 'responsible_party',
+        column: 'observation' | 'corrective_action',
         value: string | null | undefined,
       ): void {
         if (value === undefined) return;
@@ -1044,7 +1091,36 @@ inspectionsRoute.patch('/findings/:id', async (c) => {
       }
       applyEncryptedField('observation', body.observation);
       applyEncryptedField('corrective_action', body.correctiveAction);
-      applyEncryptedField('responsible_party', body.responsibleParty);
+      // 1.9 priv-F8 close-out: responsibleParty dual-shape on PATCH.
+      // undefined → no change. null → clear (kind, user_id, _ct, _dek_ct
+      // all NULL). 'user_ref' → set kind + user_id, clear encrypted
+      // name. 'name_text' → set kind + encrypted name, clear user_id.
+      // The migration 0008 CHECK constraint enforces the alignment;
+      // setting all four columns in one UPDATE keeps a partial-write
+      // mid-flight from violating the CHECK.
+      if (body.responsibleParty !== undefined) {
+        if (body.responsibleParty === null) {
+          setParts.push(sql`responsible_party_kind = NULL`);
+          setParts.push(sql`responsible_party_user_id = NULL`);
+          setParts.push(sql`responsible_party_ct = NULL`);
+          setParts.push(sql`responsible_party_dek_ct = NULL`);
+        } else if (body.responsibleParty.kind === 'user_ref') {
+          setParts.push(sql`responsible_party_kind = 'user_ref'`);
+          setParts.push(sql`responsible_party_user_id = ${body.responsibleParty.userId}`);
+          setParts.push(sql`responsible_party_ct = NULL`);
+          setParts.push(sql`responsible_party_dek_ct = NULL`);
+        } else {
+          const sealed = sealField(body.responsibleParty.nameText);
+          setParts.push(sql`responsible_party_kind = 'name_text'`);
+          setParts.push(sql`responsible_party_user_id = NULL`);
+          setParts.push(
+            sql`responsible_party_ct = ${Buffer.from(sealed.ct) as unknown as Uint8Array}`,
+          );
+          setParts.push(
+            sql`responsible_party_dek_ct = ${Buffer.from(sealed.dekCt) as unknown as Uint8Array}`,
+          );
+        }
+      }
       if (setParts.length === 0) {
         throw new InspectionWriteAborted({ status: 400, body: { error: 'no_changes' } });
       }
@@ -1071,6 +1147,12 @@ inspectionsRoute.get('/findings/:id', async (c) => {
   if (!idParsed.success) return c.json({ error: 'invalid_id' }, 400);
 
   const auth = c.get('auth');
+  // 60s step-up freshness floor (T-I30). The action string is echoed
+  // in the WWW-Authenticate challenge header for the client's step-up
+  // modal; the server enforces only the (actor, freshness-window)
+  // tuple, NOT a per-action binding. True per-action binding is a
+  // 1.12 hardening item (sec-F1 close-out from 1.9 S5 review,
+  // documented in docs/runbooks/recommendations.md §11).
   const challenge = checkStepUpFreshness(auth, {
     action: 'inspection.finding.read',
     maxAgeSeconds: 60,
@@ -1084,39 +1166,93 @@ inspectionsRoute.get('/findings/:id', async (c) => {
   }
 
   const db = getDb();
-  const rows = (await db.execute(sql`
-    SELECT id, inspection_id, section_key, section_label, item_key, item_label,
-           status_vocab, status_value,
-           observation_ct, observation_dek_ct,
-           corrective_action_ct, corrective_action_dek_ct,
-           responsible_party_ct, responsible_party_dek_ct,
-           promoted_action_item_id,
-           created_at::text AS created_at,
-           updated_at::text AS updated_at
-    FROM inspection_findings
-    WHERE id = ${idParsed.data}
-    LIMIT 1
-  `)) as unknown as Array<{
-    id: string;
-    inspection_id: string;
-    section_key: string;
-    section_label: string;
-    item_key: string;
-    item_label: string;
-    status_vocab: string;
-    status_value: string;
-    observation_ct: Uint8Array | null;
-    observation_dek_ct: Uint8Array | null;
-    corrective_action_ct: Uint8Array | null;
-    corrective_action_dek_ct: Uint8Array | null;
-    responsible_party_ct: Uint8Array | null;
-    responsible_party_dek_ct: Uint8Array | null;
-    promoted_action_item_id: string | null;
-    created_at: string;
-    updated_at: string;
-  }>;
-  if (rows.length === 0) return c.json({ error: 'not_found' }, 404);
-  const r = rows[0]!;
+  // 1.9 priv-F3 close-out (ADR-0008 §3.12): wrap the read + the new
+  // `inspection_finding.read` chain anchor in one transaction. The
+  // anchor fires AFTER the step-up gate passes AND inside the same
+  // transaction as the SELECT so a chain row only lands when an
+  // authorized decrypt actually completes. The pre-1.9 handler was
+  // read-only with no per-read trail; the 1.8 runbook called this
+  // out as a 1.9 deferred item. Same posture as the 1.7
+  // evidence.read pattern.
+  const result = await db.transaction(async (tx) => {
+    const rows = (await tx.execute(sql`
+      SELECT id, inspection_id, section_key, section_label, item_key, item_label,
+             status_vocab, status_value,
+             observation_ct, observation_dek_ct,
+             corrective_action_ct, corrective_action_dek_ct,
+             responsible_party_kind, responsible_party_user_id,
+             responsible_party_ct, responsible_party_dek_ct,
+             promoted_action_item_id,
+             created_at::text AS created_at,
+             updated_at::text AS updated_at
+      FROM inspection_findings
+      WHERE id = ${idParsed.data}
+      LIMIT 1
+    `)) as unknown as Array<{
+      id: string;
+      inspection_id: string;
+      section_key: string;
+      section_label: string;
+      item_key: string;
+      item_label: string;
+      status_vocab: string;
+      status_value: string;
+      observation_ct: Uint8Array | null;
+      observation_dek_ct: Uint8Array | null;
+      corrective_action_ct: Uint8Array | null;
+      corrective_action_dek_ct: Uint8Array | null;
+      responsible_party_kind: string | null;
+      responsible_party_user_id: string | null;
+      responsible_party_ct: Uint8Array | null;
+      responsible_party_dek_ct: Uint8Array | null;
+      promoted_action_item_id: string | null;
+      created_at: string;
+      updated_at: string;
+    }>;
+    if (rows.length === 0) return null;
+    const r = rows[0]!;
+    await append(tx, {
+      actorId: auth.userId,
+      payload: {
+        kind: 'inspection_finding.read',
+        findingId: r.id,
+        inspectionId: r.inspection_id,
+      },
+      resourceType: 'inspection_findings',
+      resourceId: r.id,
+    });
+    return r;
+  });
+  if (!result) return c.json({ error: 'not_found' }, 404);
+  const r = result;
+  // 1.9 priv-F8 close-out: project responsibleParty as the
+  // discriminated union shape. 'user_ref' surfaces the user id; the
+  // encrypted-name path is decrypted only when kind === 'name_text'.
+  // Pre-1.9 rows with kind=NULL but encrypted-name set (open findings
+  // authored under the 1.8 contract) read as null here — the rep
+  // re-edits the responsible-party field on first edit to opt the row
+  // into the 'name_text' kind.
+  let responsibleParty:
+    | { kind: 'user_ref'; userId: string }
+    | { kind: 'name_text'; nameText: string }
+    | null;
+  if (r.responsible_party_kind === 'user_ref' && r.responsible_party_user_id !== null) {
+    responsibleParty = { kind: 'user_ref', userId: r.responsible_party_user_id };
+  } else if (
+    r.responsible_party_kind === 'name_text' &&
+    r.responsible_party_ct !== null &&
+    r.responsible_party_dek_ct !== null
+  ) {
+    responsibleParty = {
+      kind: 'name_text',
+      nameText: openOptionalField({
+        ct: r.responsible_party_ct,
+        dekCt: r.responsible_party_dek_ct,
+      }) as string,
+    };
+  } else {
+    responsibleParty = null;
+  }
   return c.json({
     id: r.id,
     inspectionId: r.inspection_id,
@@ -1131,10 +1267,7 @@ inspectionsRoute.get('/findings/:id', async (c) => {
       ct: r.corrective_action_ct,
       dekCt: r.corrective_action_dek_ct,
     }),
-    responsibleParty: openOptionalField({
-      ct: r.responsible_party_ct,
-      dekCt: r.responsible_party_dek_ct,
-    }),
+    responsibleParty,
     promotedActionItemId: r.promoted_action_item_id,
     createdAt: r.created_at,
     updatedAt: r.updated_at,

@@ -52,6 +52,7 @@ import {
 } from '../../db/schema';
 import { env } from '../../env';
 import { ensureWorkplaceKey } from '../../evidence/workplace-key';
+import { ensureWorkplaceSigningKey } from '../../evidence/workplace-signing-key';
 import { seedInspectionTemplates } from '../../../scripts/seed-inspection-templates';
 
 export const firstRunRoute = new Hono();
@@ -257,6 +258,16 @@ firstRunRoute.post('/confirm', async (c) => {
       // browser can sealed-box-encrypt evidence files immediately after
       // first-run. Idempotent — re-runs on retry are no-ops.
       await ensureWorkplaceKey(tx);
+      // Milestone 1.9 (ADR-0008 §3.7 / S2 wiring): bootstrap the
+      // workplace Ed25519 SIGNING keypair alongside the encryption
+      // keypair. Separate primitive from workplace_keys per ADR-0008
+      // §3.7 (different rotation semantics — retired signing keys
+      // stay queryable forever so past signed-export PDFs keep
+      // verifying). Public key ships via /api/auth/session; private
+      // key is sealed under MASTER_KEY and opened only inside the
+      // recommendation-export route's bounded plaintext window (S4).
+      // Idempotent.
+      await ensureWorkplaceSigningKey(tx);
       // Milestone 1.8 (ADR-0007 §3.4): seed the Zone Monthly v1 + Rack
       // Inspection v1 templates so the rep can conduct inspections
       // immediately after first-run. Idempotent — SELECT-first on

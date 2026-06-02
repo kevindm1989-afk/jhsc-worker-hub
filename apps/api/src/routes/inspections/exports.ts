@@ -516,6 +516,13 @@ inspectionsExportsRoute.post('/', async (c) => {
 
   // 1. Step-up gate FIRST. Cheap; rejects unauthorized callers before we
   //    touch the DB or open the workplace key.
+  //
+  // 60s step-up freshness floor (T-I30). The action string is echoed
+  // in the WWW-Authenticate challenge header for the client's step-up
+  // modal; the server enforces only the (actor, freshness-window)
+  // tuple, NOT a per-action binding. True per-action binding is a
+  // 1.12 hardening item (sec-F1 close-out from 1.9 S5 review,
+  // documented in docs/runbooks/recommendations.md §11).
   const challenge = checkStepUpFreshness(auth, {
     action: 'inspection.export',
     maxAgeSeconds: 60,
@@ -789,6 +796,11 @@ inspectionsExportsRoute.get('/:id/download', async (c) => {
   if (!idParsed.success) return c.json({ error: 'invalid_id' }, 400);
 
   const auth = c.get('auth');
+  // 60s step-up freshness floor (T-I31). The action string is echoed
+  // in the WWW-Authenticate challenge header for the client's UX; the
+  // server enforces only the (actor, freshness-window) tuple, NOT a
+  // per-action binding. True per-action binding is a 1.12 hardening
+  // item (sec-F1 close-out from 1.9 S5 review).
   const challenge = checkStepUpFreshness(auth, {
     action: 'inspection.export.download',
     maxAgeSeconds: 60,
@@ -830,6 +842,28 @@ inspectionsExportsRoute.get('/:id/download', async (c) => {
   if (!observed.equals(Buffer.from(r.output_sha256))) {
     return c.json({ error: 'export_tamper_detected' }, 500);
   }
+
+  // 1.9 priv-F5 close-out (ADR-0008 §3.12 / T-R30): emit a per-download
+  // chain anchor AFTER step-up clears AND the Tigris fetch succeeds AND
+  // the SHA-256 verifies AND BEFORE the bytes go out. The ordering
+  // matters — a failed re-download (404 / 410 expired / SHA mismatch)
+  // does NOT anchor; only a successful, integrity-verified download
+  // produces a chain row. The 1.8 contract was fixed at six audit
+  // kinds; this is the seventh, opened by ADR-0008. Wrap the anchor
+  // emit in a tiny transaction so the append() runs under the
+  // serializing advisory-lock pattern.
+  await db.transaction(async (tx) => {
+    await append(tx, {
+      actorId: auth.userId,
+      payload: {
+        kind: 'inspection.export.downloaded',
+        exportId: r.id,
+        downloadedByUserId: auth.userId,
+      },
+      resourceType: 'export_records',
+      resourceId: r.id,
+    });
+  });
 
   // Same response posture as 1.7 evidence decrypt: force download,
   // strict CSP, no-store, no referrer.

@@ -700,6 +700,13 @@ function AddFindingForm({
     setSubmitting(true);
     setError(null);
     try {
+      // 1.9 S5 priv-F1 close-out: wrap the trimmed string in the
+      // `name_text` shape of the server's discriminated union. The
+      // S5 form ships only the `name_text` variant — a `user_ref`
+      // picker (for internal owner attribution) requires a workplace
+      // user list with display names, which is a 1.12 follow-up
+      // documented in docs/runbooks/recommendations.md §11.
+      const trimmedRp = responsibleParty.trim();
       await onSubmit({
         sectionKey,
         itemKey,
@@ -707,7 +714,9 @@ function AddFindingForm({
         statusValue,
         ...(observation.trim() ? { observation: observation.trim() } : {}),
         ...(correctiveAction.trim() ? { correctiveAction: correctiveAction.trim() } : {}),
-        ...(responsibleParty.trim() ? { responsibleParty: responsibleParty.trim() } : {}),
+        ...(trimmedRp
+          ? { responsibleParty: { kind: 'name_text' as const, nameText: trimmedRp } }
+          : {}),
       });
     } catch (e) {
       if (e instanceof InspectionApiError) {

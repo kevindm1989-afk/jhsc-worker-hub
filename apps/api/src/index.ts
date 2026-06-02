@@ -8,6 +8,7 @@ import { hazardsRoute } from './routes/hazards';
 import { healthRoute } from './routes/health';
 import { inspectionsRoute, inspectionTemplatesRoute } from './routes/inspections';
 import { legalRoute } from './routes/legal';
+import { recommendationsRoute } from './routes/recommendations';
 import { workplaceRoute } from './routes/workplace';
 
 export const app = new Hono();
@@ -27,6 +28,7 @@ app.route('/api/action-items', actionItemsRoute);
 app.route('/api/evidence', evidenceRoute);
 app.route('/api/inspection-templates', inspectionTemplatesRoute);
 app.route('/api/inspections', inspectionsRoute);
+app.route('/api/recommendations', recommendationsRoute);
 
 // Bun picks up the default export and calls Bun.serve under the hood. Tests
 // import the named `app` export instead and never trigger the server.

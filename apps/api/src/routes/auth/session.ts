@@ -11,6 +11,7 @@
 import type { SessionId } from '@jhsc/shared-types';
 import { Hono } from 'hono';
 import { getCookie } from 'hono/cookie';
+import sodium from 'libsodium-wrappers-sumo';
 import { authMiddleware, REFRESH_COOKIE } from '../../auth/step-up';
 import { clearAuthCookies, setAuthCookies } from '../../auth/cookies';
 import { emitAuthEvent } from '../../auth/events';
@@ -19,6 +20,7 @@ import { refreshSession, revokeAllUserSessions, revokeSession } from '../../auth
 import { initCrypto, openString } from '../../auth/crypto-stub';
 import { getDb } from '../../db/client';
 import { getActiveWorkplacePublicKey } from '../../evidence/workplace-key';
+import { getActiveWorkplaceSigningPublicKey } from '../../evidence/workplace-signing-key';
 import { userProfiles } from '../../db/schema';
 import { eq } from 'drizzle-orm';
 
@@ -86,6 +88,9 @@ sessionRoute.post('/logout-all', authMiddleware(), async (c) => {
 
 sessionRoute.get('/session', authMiddleware(), async (c) => {
   await initCrypto();
+  // Ensure libsodium is ready before we call sodium.to_base64 below for
+  // the workplaceSigningKey.publicKeyB64 encoding (sec-F5 close-out).
+  await sodium.ready;
   const auth = c.get('auth');
   const db = getDb();
   const profiles = await db
@@ -99,6 +104,13 @@ sessionRoute.get('/session', authMiddleware(), async (c) => {
   // public key is safe to ship -- it's the recipient half of a sealed
   // box, useless for decryption.
   const workplaceKey = await getActiveWorkplacePublicKey(db);
+  // Workplace signing public key (1.9, ADR-0008 §3.7): ships alongside
+  // workplaceKey so the browser can locally verify recommendation
+  // export bundle signatures (S4 ships the signed PDF; the client UI
+  // shows "Signature verified ✓ against workplace key {fingerprint}").
+  // Ed25519 public key is 32 bytes; the verifier runs
+  // sodium.crypto_sign_verify_detached(sig, pdfBytes, publicKey).
+  const workplaceSigningKey = await getActiveWorkplaceSigningPublicKey(db);
   return c.json({
     userId: auth.userId,
     displayName,
@@ -110,6 +122,28 @@ sessionRoute.get('/session', authMiddleware(), async (c) => {
       ? {
           id: workplaceKey.id,
           publicKeyB64: Buffer.from(workplaceKey.publicKey).toString('base64'),
+        }
+      : null,
+    workplaceSigningKey: workplaceSigningKey
+      ? {
+          id: workplaceSigningKey.id,
+          // S5 sec-F5 close-out: URL-safe no-padding base64 to match
+          // the manifest's encoding shipped by
+          // `apps/api/src/routes/recommendations/exports.ts`
+          // (`buildManifest` uses `sodium.to_base64(...,
+          // base64_variants.URLSAFE_NO_PADDING)`). Standardizing on
+          // one variant means a future client-side fingerprint
+          // comparison (`session.workplaceSigningKey.publicKeyB64 ===
+          // manifest.signingPublicKeyB64`) works without
+          // normalization. Cross-codec normalization is fragile —
+          // pick one and stick with it. The manifest is the canonical
+          // artifact a third-party verifier consumes, so we match
+          // that variant.
+          publicKeyB64: sodium.to_base64(
+            workplaceSigningKey.publicKey,
+            sodium.base64_variants.URLSAFE_NO_PADDING,
+          ),
+          algorithm: workplaceSigningKey.algorithm,
         }
       : null,
   });

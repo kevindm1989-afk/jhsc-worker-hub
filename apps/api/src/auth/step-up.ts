@@ -69,6 +69,21 @@ export interface RequireStepUpOptions {
  * hazards PATCH route used to inline a shorter check that missed the
  * freshness floor; routing through this helper guarantees one source of
  * truth for the step-up window across every sensitive endpoint.
+ *
+ * HONEST CONTRACT (1.9 sec-F1 close-out, user-authorized doc-only fix):
+ * The `action` parameter is echoed in the WWW-Authenticate challenge
+ * header for the client's UX (the global step-up modal surfaces the
+ * action string so the rep sees WHICH operation is being authorized).
+ * The server enforces ONLY the (actor, freshness-window) tuple — there
+ * is NO per-action binding at the implementation level. A fresh
+ * step-up grant obtained for ANY action (e.g. `recommendation.read`,
+ * `inspection.finding.read`, `passkey.remove`) is accepted by this
+ * function for ANY OTHER action within the freshness window. True
+ * per-action binding (storing `(action, until)` tuples on the session
+ * and rejecting cross-action grants) is a 1.12 hardening item
+ * documented in `docs/runbooks/recommendations.md` §11. Until then,
+ * the 60s freshness floor + the actor identity + the chain anchor on
+ * the privileged action are the residual bounds.
  */
 export function checkStepUpFreshness(
   auth: ValidatedAccess,

@@ -13,6 +13,11 @@ export function hasDb(): boolean {
 }
 
 const TABLES_TO_TRUNCATE = [
+  'recommendation_action_item_links',
+  'recommendation_responses',
+  'recommendation_citations',
+  'recommendations',
+  'workplace_signing_keys',
   'export_records',
   'inspection_signatures',
   'inspection_findings',
