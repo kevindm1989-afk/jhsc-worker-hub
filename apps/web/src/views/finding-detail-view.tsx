@@ -27,6 +27,8 @@ import {
   type ResponsibleParty,
 } from '@/inspections/api';
 import { inspectionPromotability } from '@jhsc/shared-types';
+import { NetworkRequiredError } from '@/sync/typed-client';
+import { NetworkRequiredBanner } from '@/sync/components/network-required-banner';
 
 export function FindingDetailView(): JSX.Element {
   const { id: inspectionId, findingId } = useParams<{ id: string; findingId: string }>();
@@ -49,12 +51,14 @@ function FindingDetailInner({
   const [needsStepUp, setNeedsStepUp] = useState(false);
   const [notFound, setNotFound] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [networkRequired, setNetworkRequired] = useState(false);
   const [promoteOpen, setPromoteOpen] = useState(false);
 
   const fetchMeta = useCallback(async (): Promise<void> => {
     setRevealing(true);
     setError(null);
     setNeedsStepUp(false);
+    setNetworkRequired(false);
     try {
       const r = await inspectionsApi.getFinding(findingId);
       if (isStepUpRequired(r)) {
@@ -66,8 +70,15 @@ function FindingDetailInner({
       setMeta(r);
       setRevealed(true);
     } catch (e) {
-      if (e instanceof InspectionApiError && e.status === 404) setNotFound(true);
-      else setError(e instanceof Error ? e.message : String(e));
+      if (e instanceof NetworkRequiredError) {
+        setNetworkRequired(true);
+      } else if (e instanceof InspectionApiError && e.status === 404) {
+        setNotFound(true);
+      } else if (e instanceof InspectionApiError && e.status === 503) {
+        setNetworkRequired(true);
+      } else {
+        setError(e instanceof Error ? e.message : String(e));
+      }
     } finally {
       setRevealing(false);
     }
@@ -122,6 +133,12 @@ function FindingDetailInner({
           </Link>
         </div>
       </header>
+
+      {networkRequired ? (
+        <div className="mb-3">
+          <NetworkRequiredBanner action="Reveal" onDismiss={() => setNetworkRequired(false)} />
+        </div>
+      ) : null}
 
       {revealed && meta ? (
         <RevealedFinding finding={meta} onPromote={() => setPromoteOpen(true)} />

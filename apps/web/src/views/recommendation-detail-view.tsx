@@ -62,6 +62,9 @@ import {
   RecommendationStatusBadge,
 } from '@/recommendations/components';
 import { recommendationDeadlineState } from '@jhsc/shared-types';
+import { NetworkRequiredError } from '@/sync/typed-client';
+import { NetworkRequiredBanner } from '@/sync/components/network-required-banner';
+import { db } from '@/sync/db';
 
 export function RecommendationDetailView(): JSX.Element {
   const { id } = useParams<{ id: string }>();
@@ -87,6 +90,11 @@ function RecommendationDetailInner({ id }: { id: string }): JSX.Element {
   const [withdrawOpen, setWithdrawOpen] = useState(false);
   const [resolveOpen, setResolveOpen] = useState(false);
   const [responseSheetOpen, setResponseSheetOpen] = useState(false);
+  const [networkRequired, setNetworkRequired] = useState(false);
+  // ADR §3.12 offline-submit clock notice: true when a submit op is
+  // enqueued (sync_queue row present for this recommendation) but the
+  // server hasn't yet recorded the submission (status still 'draft').
+  const [submitEnqueued, setSubmitEnqueued] = useState(false);
 
   const refresh = useCallback(async (): Promise<void> => {
     try {
@@ -120,6 +128,7 @@ function RecommendationDetailInner({ id }: { id: string }): JSX.Element {
     setRevealing(true);
     setError(null);
     setNeedsStepUp(false);
+    setNetworkRequired(false);
     try {
       const r = await recommendationsApi.reveal(id);
       if (isStepUpRequired(r)) {
@@ -128,8 +137,12 @@ function RecommendationDetailInner({ id }: { id: string }): JSX.Element {
       }
       setReveal(r);
     } catch (e) {
-      if (e instanceof RecommendationApiError && e.status === 404) {
+      if (e instanceof NetworkRequiredError) {
+        setNetworkRequired(true);
+      } else if (e instanceof RecommendationApiError && e.status === 404) {
         setNotFound(true);
+      } else if (e instanceof RecommendationApiError && e.status === 503) {
+        setNetworkRequired(true);
       } else {
         setError(e instanceof Error ? e.message : String(e));
       }
@@ -137,6 +150,33 @@ function RecommendationDetailInner({ id }: { id: string }): JSX.Element {
       setRevealing(false);
     }
   }, [id]);
+
+  // ADR §3.12 — refresh the "submit enqueued?" flag whenever the detail
+  // refreshes. We check Dexie for a sync_queue row with entityKind
+  // 'recommendation' and an op kind that maps to submit (the typed-
+  // client wraps submit as a transition; we look for ANY pending op for
+  // this entityLocalId while status is still draft).
+  useEffect(() => {
+    let cancelled = false;
+    async function check(): Promise<void> {
+      try {
+        const rows = await db.sync_queue.where('entityLocalId').equals(id).toArray();
+        const pending = rows.some(
+          (r) =>
+            r.entityKind === 'recommendation' &&
+            (r.state === 'queued' || r.state === 'in_flight') &&
+            r.endpoint.endsWith('/submit'),
+        );
+        if (!cancelled) setSubmitEnqueued(pending);
+      } catch {
+        if (!cancelled) setSubmitEnqueued(false);
+      }
+    }
+    void check();
+    return () => {
+      cancelled = true;
+    };
+  }, [id, detail?.status]);
 
   async function onSubmit(): Promise<void> {
     setSubmitConfirmOpen(false);
@@ -238,6 +278,21 @@ function RecommendationDetailInner({ id }: { id: string }): JSX.Element {
 
       {/* Statutory anchor / 21-day clock visualization */}
       <StatutoryAnchor detail={detail} deadline={deadline} dlState={dlState} />
+
+      {/* ADR §3.12 offline-submit clock copy — only when a submit op is
+       * enqueued but not yet drained. Rights-protective tone: legally
+       * accurate, not anxiety-inducing. */}
+      {submitEnqueued && detail.status === 'draft' ? (
+        <OfflineSubmitClockNotice jurisdiction={detail.jurisdiction} />
+      ) : null}
+
+      {/* Network-required banner — surfaced when reveal/export hits a
+       * 503 network_required (T-S26: encrypted reveal is online-only). */}
+      {networkRequired ? (
+        <div className="mb-3">
+          <NetworkRequiredBanner action="This action" onDismiss={() => setNetworkRequired(false)} />
+        </div>
+      ) : null}
 
       {/* Action / state error surface */}
       {actionError ? (
@@ -965,15 +1020,25 @@ function ExportPanel({ recommendationId }: { recommendationId: string }): JSX.El
   const [busy, setBusy] = useState(false);
   const [receipt, setReceipt] = useState<CreateRecommendationExportResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [networkRequired, setNetworkRequired] = useState(false);
 
   async function startExport(): Promise<void> {
     setBusy(true);
     setError(null);
+    setNetworkRequired(false);
     try {
       const r = await recommendationsApi.exports.create(recommendationId);
       setReceipt(r);
     } catch (e) {
+      if (e instanceof NetworkRequiredError) {
+        setNetworkRequired(true);
+        return;
+      }
       if (e instanceof RecommendationApiError) {
+        if (e.status === 503) {
+          setNetworkRequired(true);
+          return;
+        }
         if (e.status === 401) {
           setError('Re-authenticate to export. The step-up dialog should be open.');
         } else if (e.status === 422) {
@@ -1015,6 +1080,7 @@ function ExportPanel({ recommendationId }: { recommendationId: string }): JSX.El
     if (!receipt) return;
     setBusy(true);
     setError(null);
+    setNetworkRequired(false);
     try {
       const blob = await recommendationsApi.exports.download(receipt.exportId);
       const url = URL.createObjectURL(blob);
@@ -1024,8 +1090,12 @@ function ExportPanel({ recommendationId }: { recommendationId: string }): JSX.El
       window.open(url, '_blank', 'noopener,noreferrer');
       window.setTimeout(() => URL.revokeObjectURL(url), 5_000);
     } catch (e) {
-      if (e instanceof RecommendationApiError && e.status === 401) {
+      if (e instanceof NetworkRequiredError) {
+        setNetworkRequired(true);
+      } else if (e instanceof RecommendationApiError && e.status === 401) {
         setError('Re-authenticate to download. The step-up dialog should be open.');
+      } else if (e instanceof RecommendationApiError && e.status === 503) {
+        setNetworkRequired(true);
       } else if (e instanceof RecommendationApiError && e.status === 410) {
         setError('This export has expired (30-day TTL). Generate a new one.');
       } else {
@@ -1052,6 +1122,11 @@ function ExportPanel({ recommendationId }: { recommendationId: string }): JSX.El
         The bundle is signed with the workplace signing key. The chain anchor records the SHA-256 of
         the PDF and the signature. Verification instructions live in the bundle&apos;s README.txt.
       </p>
+      {networkRequired ? (
+        <div className="mt-3">
+          <NetworkRequiredBanner action="Export" onDismiss={() => setNetworkRequired(false)} />
+        </div>
+      ) : null}
       {receipt ? (
         <div className="mt-3 rounded-md border border-border bg-background p-3 text-xs">
           <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-muted-foreground">
@@ -1134,6 +1209,52 @@ function ExportPanel({ recommendationId }: { recommendationId: string }): JSX.El
           {error}
         </div>
       ) : null}
+    </section>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// OfflineSubmitClockNotice — ADR §3.12. Surfaces ONLY while a submit op
+// is enqueued but not yet drained. Carries the explicit rights-protective
+// 21-day clock copy: the s.9(21) clock starts when the SERVER records
+// the submission, NOT when the rep typed it locally.
+//
+// Tone: legally accurate, not anxiety-inducing. Pairs amber + CalendarClock
+// icon + textual label so it reads at a glance without color alone.
+// ---------------------------------------------------------------------------
+
+function OfflineSubmitClockNotice({ jurisdiction }: { jurisdiction: string }): JSX.Element {
+  return (
+    <section
+      aria-labelledby="offline-submit-clock-heading"
+      className="mb-4 rounded-md border border-status-pending/40 bg-status-pending/5 p-3 text-sm"
+    >
+      <h2
+        id="offline-submit-clock-heading"
+        className="mb-1 flex items-center gap-1.5 text-xs font-medium uppercase tracking-wide text-status-pending"
+      >
+        <CalendarClock className="h-3.5 w-3.5" strokeWidth={2} aria-hidden="true" />
+        Submit queued — clock starts at server
+      </h2>
+      <p className="text-sm text-foreground">
+        This submit will reach the server when you&apos;re back online.{' '}
+        {jurisdiction === 'ON' ? (
+          <>
+            <strong>
+              The 21-day s.9(21) clock starts when the server records the submission, NOT when you
+              typed it.
+            </strong>
+          </>
+        ) : (
+          <>
+            <strong>
+              The CLC s.135(6) &ldquo;as soon as possible&rdquo; clock starts when the server
+              records the submission, NOT when you typed it.
+            </strong>
+          </>
+        )}{' '}
+        If you&apos;re submitting time-sensitive content, sync when you can.
+      </p>
     </section>
   );
 }

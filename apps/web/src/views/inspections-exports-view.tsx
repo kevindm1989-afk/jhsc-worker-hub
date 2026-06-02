@@ -12,11 +12,14 @@ import { Link } from 'react-router-dom';
 import { ChevronLeft, Download, FileText } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { InspectionApiError, inspectionsApi, type ExportSummary } from '@/inspections/api';
+import { NetworkRequiredError } from '@/sync/typed-client';
+import { NetworkRequiredBanner } from '@/sync/components/network-required-banner';
 
 export function InspectionsExportsView(): JSX.Element {
   const [items, setItems] = useState<ReadonlyArray<ExportSummary> | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busyId, setBusyId] = useState<string | null>(null);
+  const [networkRequired, setNetworkRequired] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
@@ -37,16 +40,21 @@ export function InspectionsExportsView(): JSX.Element {
   async function download(id: string): Promise<void> {
     setBusyId(id);
     setError(null);
+    setNetworkRequired(false);
     try {
       const blob = await inspectionsApi.exports.download(id);
       const url = URL.createObjectURL(blob);
       window.open(url, '_blank', 'noopener,noreferrer');
       window.setTimeout(() => URL.revokeObjectURL(url), 5_000);
     } catch (e) {
-      if (e instanceof InspectionApiError && e.status === 401) {
+      if (e instanceof NetworkRequiredError) {
+        setNetworkRequired(true);
+      } else if (e instanceof InspectionApiError && e.status === 401) {
         setError('Re-authenticate to download. The step-up dialog should be open.');
       } else if (e instanceof InspectionApiError && e.status === 410) {
         setError('This export has expired (30-day TTL).');
+      } else if (e instanceof InspectionApiError && e.status === 503) {
+        setNetworkRequired(true);
       } else {
         setError(e instanceof Error ? e.message : String(e));
       }
@@ -73,6 +81,12 @@ export function InspectionsExportsView(): JSX.Element {
           SHA-256. Files age out of storage after 30 days; the receipt row remains for verification.
         </p>
       </header>
+
+      {networkRequired ? (
+        <div className="mb-4">
+          <NetworkRequiredBanner action="Download" onDismiss={() => setNetworkRequired(false)} />
+        </div>
+      ) : null}
 
       {error ? (
         <div
