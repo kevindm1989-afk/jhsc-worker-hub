@@ -85,6 +85,7 @@ import {
 import { getDb } from '../../db/client';
 import { authMiddleware, checkStepUpFreshness } from '../../auth/step-up';
 import { idempotencyKey } from '../../middleware/idempotency';
+import { readIfMatchOr428, versionConflictBody } from '../../middleware/if-match';
 import { rateLimit } from '../../middleware/rate-limit';
 import { openRecommendationField, sealRecommendationField } from '../../recommendations/crypto';
 import { sealField as sealActionItemField } from '../../action-items/crypto';
@@ -604,7 +605,7 @@ recommendationsRoute.get('/:id', async (c) => {
            submitted_at::text AS submitted_at,
            resolved_at::text AS resolved_at,
            withdrawn_at::text AS withdrawn_at,
-           withdrawn_reason
+           withdrawn_reason, version
     FROM recommendations
     WHERE id = ${idParsed.data}
     LIMIT 1
@@ -619,6 +620,7 @@ recommendationsRoute.get('/:id', async (c) => {
     resolved_at: string | null;
     withdrawn_at: string | null;
     withdrawn_reason: string | null;
+    version: number;
   }>;
   if (rows.length === 0) return c.json({ error: 'not_found' }, 404);
   const r = rows[0]!;
@@ -676,6 +678,9 @@ recommendationsRoute.get('/:id', async (c) => {
     withdrawnAt: r.withdrawn_at,
     withdrawnReason: r.withdrawn_reason,
     deadline: deadline ? deadline.toISOString() : null,
+    // 1.10 S2 (ADR-0009 §3.7): optimistic-concurrency etag for the
+    // client's PATCH wrapper.
+    version: r.version,
     // The PI surface: only presence flags, never the bytes themselves.
     hasTitle: true,
     hasBody: true,
@@ -796,6 +801,9 @@ recommendationsRoute.get('/:id/reveal', async (c) => {
 recommendationsRoute.patch('/:id', async (c) => {
   const idParsed = uuidParam.safeParse(c.req.param('id'));
   if (!idParsed.success) return c.json({ error: 'invalid_id' }, 400);
+  // 1.10 S2 (ADR-0009 §3.7): If-Match etag required.
+  const ifMatch = readIfMatchOr428(c);
+  if (typeof ifMatch !== 'number') return ifMatch.precondition_required;
   const parsed = patchBody.safeParse(await c.req.json().catch(() => null));
   if (!parsed.success) {
     return c.json({ error: 'invalid_body', issues: parsed.error.flatten() }, 400);
@@ -804,16 +812,18 @@ recommendationsRoute.patch('/:id', async (c) => {
   const auth = c.get('auth');
   const db = getDb();
 
+  let newVersion = 0;
   try {
     const result = await db.transaction(async (tx) => {
       const locked = (await tx.execute(sql`
-        SELECT id, recommendation_number, status, jurisdiction, body_ct, body_dek_ct
+        SELECT id, recommendation_number, status, jurisdiction, version, body_ct, body_dek_ct
         FROM recommendations WHERE id = ${idParsed.data} FOR UPDATE
       `)) as unknown as Array<{
         id: string;
         recommendation_number: number;
         status: string;
         jurisdiction: string;
+        version: number;
         body_ct: Uint8Array;
         body_dek_ct: Uint8Array;
       }>;
@@ -821,6 +831,23 @@ recommendationsRoute.patch('/:id', async (c) => {
         throw new RecommendationWriteAborted({ status: 404, body: { error: 'not_found' } });
       }
       const row = locked[0]!;
+      // 1.10 S2 (ADR-0009 §3.7): version check inside the lock. The
+      // body fields are encrypted at rest; the conflict UI fetches
+      // /api/recommendations/:id/reveal in a step-up flow to compare
+      // plaintext (ADR §3.8).
+      if (row.version !== ifMatch) {
+        throw new RecommendationWriteAborted({
+          status: 409,
+          body: versionConflictBody(row.version, {
+            id: row.id,
+            recommendationNumber: row.recommendation_number,
+            status: row.status,
+            jurisdiction: row.jurisdiction,
+            version: row.version,
+          }) as unknown as Record<string, unknown>,
+        });
+      }
+      newVersion = row.version + 1;
       if (row.status !== 'draft') {
         throw new RecommendationWriteAborted({
           status: 422,
@@ -917,11 +944,22 @@ recommendationsRoute.patch('/:id', async (c) => {
         setFragments.push(sql`body_ct = ${Buffer.from(sealed.ct) as unknown as Uint8Array}`);
         setFragments.push(sql`body_dek_ct = ${Buffer.from(sealed.dekCt) as unknown as Uint8Array}`);
       }
+      // 1.10 S2 (ADR-0009 §3.7): explicit version write. Set the column
+      // even on a no-op-on-paper PATCH so the etag advances and a stale
+      // client can't replay; the migration-0009 bump trigger noops when
+      // we set version explicitly. We do NOT skip the UPDATE when
+      // setFragments is empty because the version still needs to bump
+      // (matches the rest of the route's "draft_patched always anchors"
+      // semantics from §3.5).
       if (setFragments.length > 0) {
         await tx.execute(sql`
-          UPDATE recommendations SET ${sql.join(setFragments, sql`, `)}
+          UPDATE recommendations SET ${sql.join(setFragments, sql`, `)}, version = ${newVersion}
           WHERE id = ${idParsed.data}
         `);
+      } else {
+        await tx.execute(
+          sql`UPDATE recommendations SET version = ${newVersion} WHERE id = ${idParsed.data}`,
+        );
       }
 
       if (body.citations !== undefined) {
@@ -971,12 +1009,12 @@ recommendationsRoute.patch('/:id', async (c) => {
           resourceId: idParsed.data,
         });
       }
-      return { id: idParsed.data };
+      return { id: idParsed.data, version: newVersion };
     });
     return c.json(result);
   } catch (err) {
     if (err instanceof RecommendationWriteAborted) {
-      return c.json(err.payload.body, err.payload.status as 404 | 422);
+      return c.json(err.payload.body, err.payload.status as 404 | 409 | 422);
     }
     throw err;
   }

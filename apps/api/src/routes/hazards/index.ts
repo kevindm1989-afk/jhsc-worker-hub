@@ -37,6 +37,7 @@ import {
   sealOptionalField,
 } from '../../hazards/crypto';
 import { idempotencyKey } from '../../middleware/idempotency';
+import { readIfMatchOr428, versionConflictBody } from '../../middleware/if-match';
 import { rateLimit } from '../../middleware/rate-limit';
 
 export const hazardsRoute = new Hono();
@@ -338,7 +339,7 @@ hazardsRoute.get('/:id', async (c) => {
   const db = getDb();
   const rows = (await db.execute(sql`
     SELECT id, hazard_code, title, severity, status, location_zone, jurisdiction,
-           reported_at::text AS reported_at,
+           reported_at::text AS reported_at, version,
            description_ct, description_dek_ct,
            location_detail_ct, location_detail_dek_ct
     FROM hazards WHERE id = ${parsed.data} LIMIT 1
@@ -351,6 +352,7 @@ hazardsRoute.get('/:id', async (c) => {
     location_zone: string | null;
     jurisdiction: string;
     reported_at: string;
+    version: number;
     description_ct: Uint8Array;
     description_dek_ct: Uint8Array;
     location_detail_ct: Uint8Array | null;
@@ -391,6 +393,10 @@ hazardsRoute.get('/:id', async (c) => {
     }),
     jurisdiction: r.jurisdiction as HazardJurisdiction,
     reportedAt: r.reported_at,
+    // 1.10 S2 (ADR-0009 §3.7): version surfaces the row's optimistic-
+    // concurrency etag. The client's queue worker captures this at type-
+    // time + ships it in `If-Match: "<integer>"` on PATCH.
+    version: r.version,
     allowedTransitions: ALLOWED_TRANSITIONS[r.status as HazardStatus],
     history: history.map((h) => ({
       id: h.id,
@@ -458,6 +464,12 @@ hazardsRoute.get(
 hazardsRoute.patch('/:id/status', async (c) => {
   const idParsed = uuidParam.safeParse(c.req.param('id'));
   if (!idParsed.success) return c.json({ error: 'invalid_id' }, 400);
+  // 1.10 S2 (ADR-0009 §3.7): If-Match etag is required. The queue worker
+  // captures the row's version at type-time and ships it on drain; a
+  // mismatch returns 409 with the canonical serverState so the conflict
+  // UI can render the three-way merge.
+  const ifMatch = readIfMatchOr428(c);
+  if (typeof ifMatch !== 'number') return ifMatch.precondition_required;
   const bodyParsed = statusBody.safeParse(await c.req.json().catch(() => null));
   if (!bodyParsed.success) {
     return c.json({ error: 'invalid_body', issues: bodyParsed.error.flatten() }, 400);
@@ -466,9 +478,22 @@ hazardsRoute.patch('/:id/status', async (c) => {
   const db = getDb();
 
   const peek = (await db.execute(sql`
-    SELECT id, status, hazard_code FROM hazards WHERE id = ${idParsed.data} LIMIT 1
-  `)) as unknown as Array<{ id: string; status: string; hazard_code: string }>;
+    SELECT id, status, hazard_code, version FROM hazards WHERE id = ${idParsed.data} LIMIT 1
+  `)) as unknown as Array<{ id: string; status: string; hazard_code: string; version: number }>;
   if (peek.length === 0) return c.json({ error: 'not_found' }, 404);
+  // Fail fast on stale etag BEFORE the step-up gate — the rep doesn't
+  // need to burn step-up freshness on an op that will 409 anyway.
+  if (peek[0]!.version !== ifMatch) {
+    return c.json(
+      versionConflictBody(peek[0]!.version, {
+        id: peek[0]!.id,
+        hazardCode: peek[0]!.hazard_code,
+        status: peek[0]!.status,
+        version: peek[0]!.version,
+      }),
+      409,
+    );
+  }
   const candidateFrom = peek[0]!.status as HazardStatus;
   const to = bodyParsed.data.toStatus;
 
@@ -507,15 +532,32 @@ hazardsRoute.patch('/:id/status', async (c) => {
   // Now do the actual write under a transaction + row lock. Re-check
   // the from-state inside the lock so a concurrent PATCH that landed
   // first can't be overwritten with our stale candidate.
+  let newVersion = 0;
   try {
     await db.transaction(async (tx) => {
       const locked = (await tx.execute(sql`
-        SELECT id, status, hazard_code FROM hazards WHERE id = ${idParsed.data} FOR UPDATE
-      `)) as unknown as Array<{ id: string; status: string; hazard_code: string }>;
+        SELECT id, status, hazard_code, version FROM hazards WHERE id = ${idParsed.data} FOR UPDATE
+      `)) as unknown as Array<{ id: string; status: string; hazard_code: string; version: number }>;
       if (locked.length === 0) {
         throw new HazardWriteAborted({ status: 404, body: { error: 'not_found' } });
       }
       const current = locked[0]!;
+      // 1.10 S2 (ADR-0009 §3.7): re-check the version inside the FOR
+      // UPDATE lock. Same shape as the existing from-state TOCTOU defence
+      // (sec-F2 1.5) — a concurrent PATCH could have landed between the
+      // pre-tx peek and the lock acquisition. 409 returns the new
+      // canonical state so the conflict UI re-renders with fresh data.
+      if (current.version !== ifMatch) {
+        throw new HazardWriteAborted({
+          status: 409,
+          body: versionConflictBody(current.version, {
+            id: current.id,
+            hazardCode: current.hazard_code,
+            status: current.status,
+            version: current.version,
+          }) as unknown as Record<string, unknown>,
+        });
+      }
       const from = current.status as HazardStatus;
       if (from !== candidateFrom) {
         // Race: another PATCH committed first. Re-validate against the
@@ -533,6 +575,7 @@ hazardsRoute.patch('/:id/status', async (c) => {
           });
         }
       }
+      newVersion = current.version + 1;
 
       const chainRow = await append(tx, {
         actorId: auth.userId,
@@ -565,17 +608,23 @@ hazardsRoute.patch('/:id/status', async (c) => {
             : to === 'archived'
               ? 'archived_at'
               : null;
+      // 1.10 S2 (ADR-0009 §3.7): set version = OLD.version + 1 explicitly
+      // so the migration-0009 bump trigger sees a matching NEW.version
+      // and noops (trigger comment: "without double-bumping"). Same shape
+      // for the timestamp+version path and the bare-status+version path.
       if (timestampColumn) {
         await tx.execute(
-          sql`UPDATE hazards SET status = ${to}, ${sql.raw(timestampColumn)} = now() WHERE id = ${current.id}`,
+          sql`UPDATE hazards SET status = ${to}, ${sql.raw(timestampColumn)} = now(), version = ${newVersion} WHERE id = ${current.id}`,
         );
       } else {
-        await tx.execute(sql`UPDATE hazards SET status = ${to} WHERE id = ${current.id}`);
+        await tx.execute(
+          sql`UPDATE hazards SET status = ${to}, version = ${newVersion} WHERE id = ${current.id}`,
+        );
       }
     });
   } catch (err) {
     if (err instanceof HazardWriteAborted) {
-      return c.json(err.payload.body, err.payload.status as 404 | 422);
+      return c.json(err.payload.body, err.payload.status as 404 | 409 | 422);
     }
     throw err;
   }
@@ -584,6 +633,7 @@ hazardsRoute.patch('/:id/status', async (c) => {
     id: peek[0]!.id,
     hazardCode: peek[0]!.hazard_code,
     status: to,
+    version: newVersion,
     allowedTransitions: ALLOWED_TRANSITIONS[to],
   });
 });

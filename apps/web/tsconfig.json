@@ -14,5 +14,6 @@
       "@/*": ["./src/*"]
     }
   },
-  "include": ["src", "tests"]
+  "include": ["src", "tests"],
+  "exclude": ["src/sync/service-worker.ts"]
 }

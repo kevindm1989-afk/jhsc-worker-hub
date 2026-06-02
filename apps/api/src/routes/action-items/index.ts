@@ -52,6 +52,7 @@ import {
   sealOptionalField,
 } from '../../action-items/crypto';
 import { idempotencyKey } from '../../middleware/idempotency';
+import { readIfMatchOr428, versionConflictBody } from '../../middleware/if-match';
 import { rateLimit } from '../../middleware/rate-limit';
 
 export const actionItemsRoute = new Hono();
@@ -487,7 +488,7 @@ actionItemsRoute.get('/:id', async (c) => {
            target_date::text AS target_date,
            closed_date::text AS closed_date,
            verified_by_jhsc_id, meeting_id, source_type, source_id, tags,
-           created_at, updated_at
+           created_at, updated_at, version
     FROM action_items WHERE id = ${parsed.data} LIMIT 1
   `)) as unknown as Array<{
     id: string;
@@ -518,6 +519,7 @@ actionItemsRoute.get('/:id', async (c) => {
     tags: string[];
     created_at: Date;
     updated_at: Date;
+    version: number;
   }>;
   if (rows.length === 0) return c.json({ error: 'not_found' }, 404);
   const r = rows[0]!;
@@ -581,6 +583,9 @@ actionItemsRoute.get('/:id', async (c) => {
     sourceId: r.source_id,
     tags: r.tags,
     flag,
+    // 1.10 S2 (ADR-0009 §3.7): optimistic-concurrency etag for the
+    // client's PATCH wrapper.
+    version: r.version,
     allowedTransitions: ACTION_ITEM_ALLOWED_TRANSITIONS[r.section as ActionItemSection],
     history: history.map((h) => ({
       id: h.id,
@@ -603,6 +608,11 @@ actionItemsRoute.get('/:id', async (c) => {
 actionItemsRoute.patch('/:id', async (c) => {
   const idParsed = uuidParam.safeParse(c.req.param('id'));
   if (!idParsed.success) return c.json({ error: 'invalid_id' }, 400);
+  // 1.10 S2 (ADR-0009 §3.7): If-Match etag is required on every PATCH so
+  // the offline queue's optimistic-concurrency invariant holds end-to-end
+  // (queue worker captures version at type-time + ships it on drain).
+  const ifMatch = readIfMatchOr428(c);
+  if (typeof ifMatch !== 'number') return ifMatch.precondition_required;
   const bodyParsed = patchBody.safeParse(await c.req.json().catch(() => null));
   if (!bodyParsed.success) {
     return c.json({ error: 'invalid_body', issues: bodyParsed.error.flatten() }, 400);
@@ -750,16 +760,41 @@ actionItemsRoute.patch('/:id', async (c) => {
     }
   }
 
-  await db
-    .transaction(async (tx) => {
+  let newVersion = 0;
+  try {
+    await db.transaction(async (tx) => {
       const peek = (await tx.execute(sql`
-      SELECT id FROM action_items WHERE id = ${idParsed.data} FOR UPDATE
-    `)) as unknown as Array<{ id: string }>;
+      SELECT id, version FROM action_items WHERE id = ${idParsed.data} FOR UPDATE
+    `)) as unknown as Array<{ id: string; version: number }>;
       if (peek.length === 0) {
         throw new ActionItemWriteAborted({ status: 404, body: { error: 'not_found' } });
       }
+      // 1.10 S2 (ADR-0009 §3.7): version check inside the FOR UPDATE lock.
+      if (peek[0]!.version !== ifMatch) {
+        // Fetch the canonical serverState for the conflict body. We
+        // intentionally project a shallow shape — the conflict UI
+        // re-reads the full detail via GET /:id after resolving.
+        const fresh = (await tx.execute(sql`
+          SELECT id, sequence_number, status, section, risk, version FROM action_items WHERE id = ${idParsed.data} LIMIT 1
+        `)) as unknown as Array<{
+          id: string;
+          sequence_number: number;
+          status: string;
+          section: string;
+          risk: string;
+          version: number;
+        }>;
+        throw new ActionItemWriteAborted({
+          status: 409,
+          body: versionConflictBody(peek[0]!.version, fresh[0] ?? null) as unknown as Record<
+            string,
+            unknown
+          >,
+        });
+      }
+      newVersion = peek[0]!.version + 1;
       await tx.execute(sql`
-        UPDATE action_items SET ${sql.join(setParts, sql`, `)} WHERE id = ${idParsed.data}
+        UPDATE action_items SET ${sql.join(setParts, sql`, `)}, version = ${newVersion} WHERE id = ${idParsed.data}
       `);
 
       await append(tx, {
@@ -772,13 +807,15 @@ actionItemsRoute.patch('/:id', async (c) => {
         resourceType: 'action_items',
         resourceId: idParsed.data,
       });
-    })
-    .catch((err: unknown) => {
-      if (err instanceof ActionItemWriteAborted) throw err;
-      throw err;
     });
+  } catch (err) {
+    if (err instanceof ActionItemWriteAborted) {
+      return c.json(err.payload.body, err.payload.status as 400 | 404 | 409);
+    }
+    throw err;
+  }
 
-  return c.json({ id: idParsed.data, changedFields });
+  return c.json({ id: idParsed.data, changedFields, version: newVersion });
 });
 
 // ---------------------------------------------------------------------------

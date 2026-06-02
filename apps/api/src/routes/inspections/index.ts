@@ -80,6 +80,7 @@ import {
 import { getDb } from '../../db/client';
 import { authMiddleware, checkStepUpFreshness } from '../../auth/step-up';
 import { idempotencyKey } from '../../middleware/idempotency';
+import { readIfMatchOr428, versionConflictBody } from '../../middleware/if-match';
 import { rateLimit } from '../../middleware/rate-limit';
 import { openOptionalField, sealField, sealOptionalField } from '../../inspections/crypto';
 import { sealField as sealActionItemField } from '../../action-items/crypto';
@@ -739,7 +740,7 @@ inspectionsRoute.get('/:id', async (c) => {
   const rows = (await db.execute(sql`
     SELECT i.id, i.template_version_id, t.template_code, t.display_name,
            t.status_vocab, t.cadence, t.requires_three_signatures, t.sections,
-           i.zone_id, i.state, i.conducted_by_user_id,
+           i.zone_id, i.state, i.conducted_by_user_id, i.version,
            i.scheduled_for::text AS scheduled_for,
            i.started_at::text AS started_at,
            i.completed_at::text AS completed_at,
@@ -760,6 +761,7 @@ inspectionsRoute.get('/:id', async (c) => {
     zone_id: string;
     state: string;
     conducted_by_user_id: string;
+    version: number;
     scheduled_for: string | null;
     started_at: string | null;
     completed_at: string | null;
@@ -828,6 +830,8 @@ inspectionsRoute.get('/:id', async (c) => {
     startedAt: r.started_at,
     completedAt: r.completed_at,
     createdAt: r.created_at,
+    // 1.10 S2 (ADR-0009 §3.7): optimistic-concurrency etag.
+    version: r.version,
     findings: findingRows.map((f) => ({
       id: f.id,
       sectionKey: f.section_key,
@@ -882,20 +886,36 @@ const STATE_TRANSITIONS: ReadonlyArray<AllowedTransition> = [
 inspectionsRoute.patch('/:id', async (c) => {
   const idParsed = uuidParam.safeParse(c.req.param('id'));
   if (!idParsed.success) return c.json({ error: 'invalid_id' }, 400);
+  // 1.10 S2 (ADR-0009 §3.7): If-Match etag required.
+  const ifMatch = readIfMatchOr428(c);
+  if (typeof ifMatch !== 'number') return ifMatch.precondition_required;
   const parsed = patchInspectionBody.safeParse(await c.req.json().catch(() => null));
   if (!parsed.success) {
     return c.json({ error: 'invalid_body', issues: parsed.error.flatten() }, 400);
   }
   const targetState = parsed.data.state;
   const db = getDb();
+  let newVersion = 0;
   try {
     const result = await db.transaction(async (tx) => {
       const locked = (await tx.execute(sql`
-        SELECT id, state FROM inspections WHERE id = ${idParsed.data} FOR UPDATE
-      `)) as unknown as Array<{ id: string; state: string }>;
+        SELECT id, state, version FROM inspections WHERE id = ${idParsed.data} FOR UPDATE
+      `)) as unknown as Array<{ id: string; state: string; version: number }>;
       if (locked.length === 0) {
         throw new InspectionWriteAborted({ status: 404, body: { error: 'not_found' } });
       }
+      // 1.10 S2 (ADR-0009 §3.7): version check inside the lock.
+      if (locked[0]!.version !== ifMatch) {
+        throw new InspectionWriteAborted({
+          status: 409,
+          body: versionConflictBody(locked[0]!.version, {
+            id: locked[0]!.id,
+            state: locked[0]!.state,
+            version: locked[0]!.version,
+          }) as unknown as Record<string, unknown>,
+        });
+      }
+      newVersion = locked[0]!.version + 1;
       const from = locked[0]!.state as InspectionConductState;
       const rule = STATE_TRANSITIONS.find((t) => t.from === from && t.to === targetState);
       if (!rule) {
@@ -919,21 +939,23 @@ inspectionsRoute.patch('/:id', async (c) => {
           });
         }
       }
+      // 1.10 S2 (ADR-0009 §3.7): set version explicitly so the bump
+      // trigger noops; the route owns the version arithmetic.
       if (rule.setStartedAt) {
         await tx.execute(
-          sql`UPDATE inspections SET state = ${targetState}, started_at = now() WHERE id = ${idParsed.data}`,
+          sql`UPDATE inspections SET state = ${targetState}, started_at = now(), version = ${newVersion} WHERE id = ${idParsed.data}`,
         );
       } else {
         await tx.execute(
-          sql`UPDATE inspections SET state = ${targetState} WHERE id = ${idParsed.data}`,
+          sql`UPDATE inspections SET state = ${targetState}, version = ${newVersion} WHERE id = ${idParsed.data}`,
         );
       }
-      return { id: idParsed.data, state: targetState };
+      return { id: idParsed.data, state: targetState, version: newVersion };
     });
     return c.json(result);
   } catch (err) {
     if (err instanceof InspectionWriteAborted) {
-      return c.json(err.payload.body, err.payload.status as 404 | 422);
+      return c.json(err.payload.body, err.payload.status as 404 | 409 | 422);
     }
     throw err;
   }
@@ -1158,6 +1180,9 @@ inspectionsRoute.post('/:id/findings', async (c) => {
 inspectionsRoute.patch('/findings/:id', async (c) => {
   const idParsed = uuidParam.safeParse(c.req.param('id'));
   if (!idParsed.success) return c.json({ error: 'invalid_id' }, 400);
+  // 1.10 S2 (ADR-0009 §3.7): If-Match etag required.
+  const ifMatch = readIfMatchOr428(c);
+  if (typeof ifMatch !== 'number') return ifMatch.precondition_required;
   const parsed = patchFindingBody.safeParse(await c.req.json().catch(() => null));
   if (!parsed.success) {
     return c.json({ error: 'invalid_body', issues: parsed.error.flatten() }, 400);
@@ -1165,10 +1190,12 @@ inspectionsRoute.patch('/findings/:id', async (c) => {
   const body = parsed.data;
   const db = getDb();
 
+  let newVersion = 0;
   try {
     const result = await db.transaction(async (tx) => {
       const rows = (await tx.execute(sql`
-        SELECT f.id, f.inspection_id, f.status_vocab, f.promoted_action_item_id,
+        SELECT f.id, f.inspection_id, f.status_vocab, f.status_value,
+               f.promoted_action_item_id, f.version,
                i.state
         FROM inspection_findings f
         JOIN inspections i ON i.id = f.inspection_id
@@ -1178,13 +1205,30 @@ inspectionsRoute.patch('/findings/:id', async (c) => {
         id: string;
         inspection_id: string;
         status_vocab: string;
+        status_value: string;
         promoted_action_item_id: string | null;
+        version: number;
         state: string;
       }>;
       if (rows.length === 0) {
         throw new InspectionWriteAborted({ status: 404, body: { error: 'not_found' } });
       }
       const row = rows[0]!;
+      // 1.10 S2 (ADR-0009 §3.7): version check inside the lock.
+      if (row.version !== ifMatch) {
+        throw new InspectionWriteAborted({
+          status: 409,
+          body: versionConflictBody(row.version, {
+            id: row.id,
+            inspectionId: row.inspection_id,
+            statusVocab: row.status_vocab,
+            statusValue: row.status_value,
+            promotedActionItemId: row.promoted_action_item_id,
+            version: row.version,
+          }) as unknown as Record<string, unknown>,
+        });
+      }
+      newVersion = row.version + 1;
       if (row.state !== 'in_progress') {
         throw new InspectionWriteAborted({
           status: 422,
@@ -1283,15 +1327,16 @@ inspectionsRoute.patch('/findings/:id', async (c) => {
       if (setParts.length === 0) {
         throw new InspectionWriteAborted({ status: 400, body: { error: 'no_changes' } });
       }
+      // 1.10 S2 (ADR-0009 §3.7): explicit version write.
       await tx.execute(sql`
-        UPDATE inspection_findings SET ${sql.join(setParts, sql`, `)} WHERE id = ${idParsed.data}
+        UPDATE inspection_findings SET ${sql.join(setParts, sql`, `)}, version = ${newVersion} WHERE id = ${idParsed.data}
       `);
-      return { id: idParsed.data };
+      return { id: idParsed.data, version: newVersion };
     });
     return c.json(result);
   } catch (err) {
     if (err instanceof InspectionWriteAborted) {
-      return c.json(err.payload.body, err.payload.status as 400 | 404 | 422);
+      return c.json(err.payload.body, err.payload.status as 400 | 404 | 409 | 422);
     }
     throw err;
   }
