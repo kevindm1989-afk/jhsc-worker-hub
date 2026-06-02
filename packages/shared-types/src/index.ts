@@ -88,9 +88,18 @@ export type AuditEventKind =
   | 'inspection.created'
   | 'inspection_finding.created'
   | 'inspection_finding.promoted'
+  | 'inspection_finding.read'
   | 'inspection.signed'
   | 'inspection.exported'
+  | 'inspection.export.downloaded'
   | 'audit.inspection_template.seeded'
+  | 'recommendation.drafted'
+  | 'recommendation.submitted'
+  | 'recommendation.response_captured'
+  | 'recommendation.resolved'
+  | 'recommendation.withdrawn'
+  | 'recommendation.exported'
+  | 'audit.workplace_signing_key.seeded'
   | AuthEventKind;
 
 // ---------------------------------------------------------------------------
@@ -223,6 +232,17 @@ export const inspectionExportKind = ['single', 'batch'] as const;
 export type InspectionExportKind = (typeof inspectionExportKind)[number];
 
 /**
+ * Dual-shape responsible_party on inspection_findings (ADR-0008 §3.12,
+ * 1.8 priv-F8 close-out). 'user_ref' = internal owner referenced by
+ * responsible_party_user_id; 'name_text' = external named party stored
+ * in responsible_party_ct/dek_ct. NULL kind means neither column is
+ * populated (pre-1.9 rows or open findings).
+ */
+export const inspectionFindingResponsiblePartyKind = ['user_ref', 'name_text'] as const;
+export type InspectionFindingResponsiblePartyKind =
+  (typeof inspectionFindingResponsiblePartyKind)[number];
+
+/**
  * Promotability gate for inspection findings (CLAUDE.md #15).
  * Returns false for 'X' (ABC+X) and 'G' (GAR) — both the not-promotable
  * markers — and true for every other in-vocab value. The route layer
@@ -240,6 +260,102 @@ export function inspectionPromotability(
     return statusValue === 'A' || statusValue === 'R';
   }
   return false;
+}
+
+// ---------------------------------------------------------------------------
+// Recommendations (Milestone 1.9, ADR-0008)
+// ---------------------------------------------------------------------------
+
+/** Recommendation lifecycle state-machine. The DB CHECK accepts every
+ * value here; the transition graph (draft → submitted → response_received
+ * → resolved; * → withdrawn) is enforced at the route layer per
+ * ADR-0008 §3.1. */
+export const recommendationStatus = [
+  'draft',
+  'submitted',
+  'response_received',
+  'resolved',
+  'withdrawn',
+] as const;
+export type RecommendationStatus = (typeof recommendationStatus)[number];
+
+/** Recommendation jurisdiction. Drives the 21-day s.9(21) clock (ON,
+ * hard deadline) vs CLC s.135(6) "as soon as possible" (CA-FED,
+ * informational). The legal-corpus picker scopes by this value. Mirrors
+ * the `statutes.jurisdiction` namespace, not `hazardJurisdiction` (which
+ * uses the short 'CA' tag — recommendations use the explicit 'CA-FED'
+ * form per ADR-0008 §3.2). */
+export const recommendationJurisdiction = ['ON', 'CA-FED'] as const;
+export type RecommendationJurisdiction = (typeof recommendationJurisdiction)[number];
+
+/** Link kind on recommendation_action_item_links. 'tracks' is the
+ * standard case used by 1.9 routes (the auto-created action item
+ * tracks management's response). 'replaces' is a forward seam per
+ * ADR-0008 §3.5 — the rec-supersedes-a-hazard-item pattern lands its
+ * UI in Release 2; 1.9 SQL accepts the value but the route never
+ * writes it. */
+export const recommendationLinkKind = ['tracks', 'replaces'] as const;
+export type RecommendationLinkKind = (typeof recommendationLinkKind)[number];
+
+/** New export_records.kind value introduced in 1.9. The existing
+ * 'single' / 'batch' values remain valid for inspection exports per
+ * ADR-0008 §3.11; only 'recommendation_single' is added here. The
+ * shared-types enum lists only the new value so callers writing
+ * recommendation exports use this constant; the union with the
+ * inspection-export values lives in the schema CHECK + the route
+ * Zod refinement, not as a single TS enum (matches the kind-vs-family
+ * separation in §3.11). */
+export const recommendationExportKind = ['recommendation_single'] as const;
+export type RecommendationExportKind = (typeof recommendationExportKind)[number];
+
+/** Workplace signing-key primitive. Ed25519 is the only algorithm
+ * supported in 1.9 per ADR-0008 §3.7; the enum is forward-seam shape
+ * for a future rotation (Ed448, post-quantum) without churning the
+ * column type. */
+export const workplaceSigningKeyAlgorithm = ['ed25519'] as const;
+export type WorkplaceSigningKeyAlgorithm = (typeof workplaceSigningKeyAlgorithm)[number];
+
+/**
+ * Compute the s.9(21) deadline for a submitted recommendation.
+ * ON: submitted_at + 21 days (hard statutory clock).
+ * CA-FED: null — CLC s.135(6) is "as soon as possible", no fixed clock
+ * per ADR-0008 §3.6 (we do NOT invent a default deadline; non-negotiable
+ * #5 forbids invention).
+ *
+ * Pure function; the route's projection calls this server-side so the
+ * client never re-computes day boundaries (matches the 1.6 action-flag
+ * posture).
+ */
+export function computeRecommendationDeadline(
+  submittedAt: Date,
+  jurisdiction: RecommendationJurisdiction,
+): Date | null {
+  if (jurisdiction === 'ON') {
+    const deadline = new Date(submittedAt.getTime());
+    deadline.setUTCDate(deadline.getUTCDate() + 21);
+    return deadline;
+  }
+  // CA-FED: informational only.
+  return null;
+}
+
+/** Deadline state surfaced on the badge per ADR-0008 §3.6.
+ * - 'no_deadline' — CA-FED or any caller passing a null deadline.
+ * - 'on_time' — now is at or before the deadline.
+ * - 'overdue' — now is past the deadline.
+ *
+ * Boundary is inclusive on `on_time` (the deadline second itself is
+ * still on-time; only strictly-after counts as overdue). Pure function.
+ */
+export type RecommendationDeadlineState = 'no_deadline' | 'on_time' | 'overdue';
+
+export function recommendationDeadlineState(
+  now: Date,
+  deadline: Date | null,
+): RecommendationDeadlineState {
+  if (deadline === null) return 'no_deadline';
+  if (now.getTime() <= deadline.getTime()) return 'on_time';
+  return 'overdue';
 }
 
 // ---------------------------------------------------------------------------
@@ -412,6 +528,23 @@ export type AuditPayload =
       readonly byteSize: number;
     }
   | {
+      // 1.9 close-out of 1.8 priv-F3 — every step-up-gated finding
+      // detail read emits a per-read anchor (ADR-0008 §3.12). PI-clean:
+      // ids only, no decrypted observation/corrective-action text.
+      readonly kind: 'inspection_finding.read';
+      readonly findingId: string;
+      readonly inspectionId: string;
+    }
+  | {
+      // 1.9 close-out of 1.8 priv-F5 — every export-download fires a
+      // per-download anchor (ADR-0008 §3.12). The actor's user id is
+      // already in the chain row's actor_id slot; the payload echo lets
+      // offline chain verifiers cross-reference without joining.
+      readonly kind: 'inspection.export.downloaded';
+      readonly exportId: string;
+      readonly downloadedByUserId: string;
+    }
+  | {
       readonly kind: 'audit.inspection_template.seeded';
       readonly templateCode: InspectionTemplateCode;
       readonly templateVersionId: string;
@@ -419,6 +552,68 @@ export type AuditPayload =
       readonly statusVocab: InspectionStatusVocabKind;
       readonly sectionCount: number;
       readonly structureSha256: string;
+    }
+  | {
+      // Recommendation lifecycle anchors (ADR-0008 §3.1 / §3.2).
+      // PI-clean: ids + jurisdiction enum + number only — NEVER title,
+      // body, citation prose, or response text.
+      readonly kind: 'recommendation.drafted';
+      readonly recommendationId: string;
+      readonly recommendationNumber: number;
+      readonly jurisdiction: RecommendationJurisdiction;
+    }
+  | {
+      readonly kind: 'recommendation.submitted';
+      readonly recommendationId: string;
+      readonly recommendationNumber: number;
+      readonly jurisdiction: RecommendationJurisdiction;
+      readonly citationCount: number;
+      readonly linkedActionItemId: string;
+    }
+  | {
+      readonly kind: 'recommendation.response_captured';
+      readonly recommendationId: string;
+      readonly responseId: string;
+      readonly position: number;
+    }
+  | {
+      readonly kind: 'recommendation.resolved';
+      readonly recommendationId: string;
+      readonly linkedActionItemId: string;
+    }
+  | {
+      // linkedActionItemId is null when withdrawal happens from `draft`
+      // (no action item was ever created — that only happens at submit
+      // per ADR-0008 §3.5). The withdrawal reason text is NEVER in the
+      // chain payload — it lives encrypted on the row (T-AC9 / risk
+      // documented in ADR-0008 Risks).
+      readonly kind: 'recommendation.withdrawn';
+      readonly recommendationId: string;
+      readonly linkedActionItemId: string | null;
+    }
+  | {
+      // Signed export anchor. The signing_key_id is the durable
+      // pointer to the historical workplace_signing_keys row that
+      // produced the signature; verification of past exports
+      // consults this id forever (ADR-0008 §3.7 rotation semantics).
+      readonly kind: 'recommendation.exported';
+      readonly exportId: string;
+      readonly recommendationId: string;
+      readonly outputSha256: string;
+      readonly signatureSha256: string;
+      readonly signingKeyId: string;
+      readonly citationsHash: string;
+      readonly byteSize: number;
+    }
+  | {
+      // Seed-time anchor for the workplace signing keypair (ADR-0008
+      // §3.7). publicKeySha256 is the hex SHA-256 of the 32-byte
+      // Ed25519 public key — the "fingerprint" surfaced in the
+      // verification UI and ZIP manifest.
+      readonly kind: 'audit.workplace_signing_key.seeded';
+      readonly signingKeyId: string;
+      readonly algorithm: WorkplaceSigningKeyAlgorithm;
+      readonly publicKeySha256: string;
     }
   | { readonly kind: 'signup'; readonly via: 'first_run' | 'invite' }
   | { readonly kind: 'login.passkey' }

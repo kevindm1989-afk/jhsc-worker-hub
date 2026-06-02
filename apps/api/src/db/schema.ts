@@ -688,6 +688,16 @@ export const inspectionFindings = pgTable(
     correctiveActionDekCt: bytea('corrective_action_dek_ct'),
     responsiblePartyCt: bytea('responsible_party_ct'),
     responsiblePartyDekCt: bytea('responsible_party_dek_ct'),
+    // 1.9 (ADR-0008 §3.12, priv-F8 close-out) — dual-shape responsible
+    // party. 'user_ref' → responsiblePartyUserId is set, _ct columns
+    // NULL. 'name_text' → _ct columns set, responsiblePartyUserId NULL.
+    // NULL kind → both refs NULL (open finding or pre-1.9 row that
+    // hasn't been edited since the migration).
+    responsiblePartyKind: text('responsible_party_kind'),
+    responsiblePartyUserId: uuid('responsible_party_user_id').references(() => users.id, {
+      onDelete: 'restrict',
+      onUpdate: 'restrict',
+    }),
     promotedActionItemId: uuid('promoted_action_item_id').references(() => actionItems.id, {
       onDelete: 'set null',
       onUpdate: 'restrict',
@@ -746,6 +756,13 @@ export const inspectionSignatures = pgTable(
 // step-up grant jti that authorized the export. expires_at is the
 // 30-day TTL hint (Tigris lifecycle is the actual enforcement).
 // inspection_ids[] is bounded by the SQL CHECK to 1..100 (T-I32).
+//
+// 1.9 (ADR-0008 §3.11) extends this row with three nullable columns
+// for recommendation exports (kind='recommendation_single'):
+//   - signingKeyId — FK to workplace_signing_keys.
+//   - signatureSha256 — SHA-256 of the Ed25519 detached signature.
+// Inspection exports keep both NULL; a SQL alignment CHECK enforces
+// the kind→signing-column relationship.
 
 export const exportRecords = pgTable(
   'export_records',
@@ -769,12 +786,213 @@ export const exportRecords = pgTable(
     auditIdx: bigint('audit_idx', { mode: 'number' })
       .notNull()
       .references(() => auditLog.idx, { onDelete: 'restrict', onUpdate: 'restrict' }),
+    // 1.9 additions — both nullable; populated only for
+    // kind='recommendation_single'. workplaceSigningKeys is declared
+    // below; the lazy callback in references() lets Drizzle resolve the
+    // FK at runtime after both tables are constructed.
+    signingKeyId: uuid('signing_key_id').references(() => workplaceSigningKeys.id, {
+      onDelete: 'restrict',
+      onUpdate: 'restrict',
+    }),
+    signatureSha256: bytea('signature_sha256'),
   },
   (t) => ({
     storageKeyUnique: uniqueIndex('export_records_storage_key_unique').on(t.storageKey),
     auditIdxUnique: uniqueIndex('export_records_audit_idx_unique').on(t.auditIdx),
     requestedByIdx: index('export_records_requested_by_idx').on(t.requestedByUserId),
     requestedAtIdx: index('export_records_requested_at_idx').on(t.requestedAt),
+  }),
+);
+
+// ---------------------------------------------------------------------------
+// Recommendations (1.9, ADR-0008)
+// ---------------------------------------------------------------------------
+
+// Workplace Ed25519 signing keypair (separate table from workplace_keys
+// per ADR-0008 §3.7 — different primitive, different rotation semantics,
+// different operational risk surface). Partial UNIQUE on (active)
+// WHERE active=true enforces at-most-one-active at the DB layer (T-R19).
+
+export const workplaceSigningKeys = pgTable(
+  'workplace_signing_keys',
+  {
+    id: uuid('id')
+      .primaryKey()
+      .default(sql`gen_random_uuid()`),
+    algorithm: text('algorithm').notNull().default('ed25519'),
+    active: boolean('active').notNull().default(true),
+    publicKey: bytea('public_key').notNull(),
+    privateKeyCt: bytea('private_key_ct').notNull(),
+    privateKeyDekCt: bytea('private_key_dek_ct').notNull(),
+    createdAt: timestamp('created_at', { withTimezone: true })
+      .notNull()
+      .default(sql`now()`),
+    retiredAt: timestamp('retired_at', { withTimezone: true }),
+  },
+  (t) => ({
+    activeIdx: index('workplace_signing_keys_active_idx').on(t.active),
+  }),
+);
+
+// Recommendations — envelope-encrypted title + body; per-jurisdiction
+// recommendation_number; state-machine lifecycle. See migration 0008
+// for the lifecycle CHECK that pins which timestamp columns must be
+// NULL vs NOT NULL per status. drafted_at / submitted_at /
+// resolved_at / withdrawn_at are the four lifecycle columns.
+
+export const recommendations = pgTable(
+  'recommendations',
+  {
+    id: uuid('id')
+      .primaryKey()
+      .default(sql`gen_random_uuid()`),
+    recommendationNumber: integer('recommendation_number').notNull(),
+    titleCt: bytea('title_ct').notNull(),
+    titleDekCt: bytea('title_dek_ct').notNull(),
+    bodyCt: bytea('body_ct').notNull(),
+    bodyDekCt: bytea('body_dek_ct').notNull(),
+    jurisdiction: text('jurisdiction').notNull(),
+    status: text('status').notNull().default('draft'),
+    draftedByUserId: uuid('drafted_by_user_id')
+      .notNull()
+      .references(() => users.id, { onDelete: 'restrict', onUpdate: 'restrict' }),
+    draftedAt: timestamp('drafted_at', { withTimezone: true })
+      .notNull()
+      .default(sql`now()`),
+    submittedAt: timestamp('submitted_at', { withTimezone: true }),
+    resolvedAt: timestamp('resolved_at', { withTimezone: true }),
+    withdrawnAt: timestamp('withdrawn_at', { withTimezone: true }),
+    // Template-supplied PI-clean enum-like reason; SQL caps at 200
+    // chars. The route's Zod enum is the tighter gate.
+    withdrawnReason: text('withdrawn_reason'),
+    auditIdx: bigint('audit_idx', { mode: 'number' })
+      .notNull()
+      .references(() => auditLog.idx, { onDelete: 'restrict', onUpdate: 'restrict' }),
+    createdAt: timestamp('created_at', { withTimezone: true })
+      .notNull()
+      .default(sql`now()`),
+    updatedAt: timestamp('updated_at', { withTimezone: true })
+      .notNull()
+      .default(sql`now()`),
+  },
+  (t) => ({
+    auditIdxUnique: uniqueIndex('recommendations_audit_idx_unique').on(t.auditIdx),
+    jurisdictionNumberUnique: uniqueIndex('recommendations_jurisdiction_number_unique').on(
+      t.jurisdiction,
+      t.recommendationNumber,
+    ),
+    statusIdx: index('recommendations_status_idx').on(t.status),
+    jurisdictionIdx: index('recommendations_jurisdiction_idx').on(t.jurisdiction),
+    draftedByIdx: index('recommendations_drafted_by_idx').on(t.draftedByUserId),
+    submittedAtIdx: index('recommendations_submitted_at_idx').on(t.submittedAt),
+  }),
+);
+
+// Position-ordered resolved citation triples (statute_code, clause_id,
+// version_date). NO FK to legal_clauses — the corpus is
+// append-only-versioned and the Zod check at submit is the gate
+// (documented residual T-R7). UNIQUE (recommendation_id, position)
+// enforces dense ordering at the structural layer.
+
+export const recommendationCitations = pgTable(
+  'recommendation_citations',
+  {
+    id: uuid('id')
+      .primaryKey()
+      .default(sql`gen_random_uuid()`),
+    recommendationId: uuid('recommendation_id')
+      .notNull()
+      .references(() => recommendations.id, { onDelete: 'restrict', onUpdate: 'restrict' }),
+    statuteCode: text('statute_code').notNull(),
+    clauseId: text('clause_id').notNull(),
+    versionDate: date('version_date', { mode: 'string' }).notNull(),
+    position: integer('position').notNull(),
+    createdAt: timestamp('created_at', { withTimezone: true })
+      .notNull()
+      .default(sql`now()`),
+  },
+  (t) => ({
+    recommendationPositionUnique: uniqueIndex(
+      'recommendation_citations_recommendation_position_unique',
+    ).on(t.recommendationId, t.position),
+    recommendationIdx: index('recommendation_citations_recommendation_idx').on(t.recommendationId),
+  }),
+);
+
+// Append-only positional response capture. SQL caps position <= 50
+// (T-R42); the route's serializing advisory-lock + UNIQUE backstop
+// closes T-R10 (concurrent appenders racing on MAX).
+
+export const recommendationResponses = pgTable(
+  'recommendation_responses',
+  {
+    id: uuid('id')
+      .primaryKey()
+      .default(sql`gen_random_uuid()`),
+    recommendationId: uuid('recommendation_id')
+      .notNull()
+      .references(() => recommendations.id, { onDelete: 'restrict', onUpdate: 'restrict' }),
+    position: integer('position').notNull(),
+    receivedAt: timestamp('received_at', { withTimezone: true })
+      .notNull()
+      .default(sql`now()`),
+    receivedByUserId: uuid('received_by_user_id')
+      .notNull()
+      .references(() => users.id, { onDelete: 'restrict', onUpdate: 'restrict' }),
+    authorRoleCt: bytea('author_role_ct').notNull(),
+    authorRoleDekCt: bytea('author_role_dek_ct').notNull(),
+    bodyCt: bytea('body_ct').notNull(),
+    bodyDekCt: bytea('body_dek_ct').notNull(),
+    auditIdx: bigint('audit_idx', { mode: 'number' })
+      .notNull()
+      .references(() => auditLog.idx, { onDelete: 'restrict', onUpdate: 'restrict' }),
+    createdAt: timestamp('created_at', { withTimezone: true })
+      .notNull()
+      .default(sql`now()`),
+  },
+  (t) => ({
+    auditIdxUnique: uniqueIndex('recommendation_responses_audit_idx_unique').on(t.auditIdx),
+    recommendationPositionUnique: uniqueIndex(
+      'recommendation_responses_recommendation_position_unique',
+    ).on(t.recommendationId, t.position),
+    recommendationIdx: index('recommendation_responses_recommendation_idx').on(t.recommendationId),
+  }),
+);
+
+// Link table for the recommendation→action_item bridge created at
+// submit time. link_kind 'tracks' is the 1.9 default; 'replaces' is a
+// forward seam (UI lands in Release 2 per ADR-0008 §3.5).
+// UNIQUE (action_item_id) enforces at-most-one-rec-per-action-item
+// (T-R13).
+
+export const recommendationActionItemLinks = pgTable(
+  'recommendation_action_item_links',
+  {
+    id: uuid('id')
+      .primaryKey()
+      .default(sql`gen_random_uuid()`),
+    recommendationId: uuid('recommendation_id')
+      .notNull()
+      .references(() => recommendations.id, { onDelete: 'restrict', onUpdate: 'restrict' }),
+    actionItemId: uuid('action_item_id')
+      .notNull()
+      .references(() => actionItems.id, { onDelete: 'restrict', onUpdate: 'restrict' }),
+    linkKind: text('link_kind').notNull(),
+    createdAt: timestamp('created_at', { withTimezone: true })
+      .notNull()
+      .default(sql`now()`),
+  },
+  (t) => ({
+    recommendationActionUnique: uniqueIndex(
+      'recommendation_action_item_links_recommendation_action_unique',
+    ).on(t.recommendationId, t.actionItemId),
+    actionItemUnique: uniqueIndex('recommendation_action_item_links_action_item_unique').on(
+      t.actionItemId,
+    ),
+    recommendationIdx: index('recommendation_action_item_links_recommendation_idx').on(
+      t.recommendationId,
+    ),
+    actionItemIdx: index('recommendation_action_item_links_action_item_idx').on(t.actionItemId),
   }),
 );
 
@@ -809,6 +1027,11 @@ export const schema = {
   inspectionFindings,
   inspectionSignatures,
   exportRecords,
+  workplaceSigningKeys,
+  recommendations,
+  recommendationCitations,
+  recommendationResponses,
+  recommendationActionItemLinks,
   loginAttemptOutcome,
   authEventKind,
   webauthnPurpose,

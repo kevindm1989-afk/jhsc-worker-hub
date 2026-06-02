@@ -1,8 +1,10 @@
 import { describe, expect, it } from 'vitest';
 import {
+  computeRecommendationDeadline,
   err,
   inspectionConductState,
   inspectionExportKind,
+  inspectionFindingResponsiblePartyKind,
   inspectionFindingStatusAbcx,
   inspectionFindingStatusGar,
   inspectionPromotability,
@@ -10,6 +12,12 @@ import {
   inspectionStatusVocabKind,
   inspectionTemplateCode,
   ok,
+  recommendationDeadlineState,
+  recommendationExportKind,
+  recommendationJurisdiction,
+  recommendationLinkKind,
+  recommendationStatus,
+  workplaceSigningKeyAlgorithm,
 } from './index';
 import type { AuditPayload, AuthError, AuthEventKind, Result } from './index';
 
@@ -115,6 +123,149 @@ describe('inspectionPromotability — CLAUDE.md #15 fail-closed gate', () => {
     expect(inspectionPromotability('ABC_X', 'G')).toBe(false);
     expect(inspectionPromotability('GAR', 'X')).toBe(false);
     expect(inspectionPromotability('ABC_X', '')).toBe(false);
+  });
+});
+
+describe('recommendation enums', () => {
+  it('recommendationStatus exports the five lifecycle states in order', () => {
+    expect([...recommendationStatus]).toEqual([
+      'draft',
+      'submitted',
+      'response_received',
+      'resolved',
+      'withdrawn',
+    ]);
+  });
+
+  it('recommendationJurisdiction exports ON + CA-FED', () => {
+    expect([...recommendationJurisdiction]).toEqual(['ON', 'CA-FED']);
+  });
+
+  it('recommendationLinkKind exports tracks + replaces', () => {
+    expect([...recommendationLinkKind]).toEqual(['tracks', 'replaces']);
+  });
+
+  it('recommendationExportKind exports the new recommendation_single value', () => {
+    expect([...recommendationExportKind]).toEqual(['recommendation_single']);
+  });
+
+  it('workplaceSigningKeyAlgorithm exports ed25519', () => {
+    expect([...workplaceSigningKeyAlgorithm]).toEqual(['ed25519']);
+  });
+
+  it('inspectionFindingResponsiblePartyKind exports user_ref + name_text', () => {
+    expect([...inspectionFindingResponsiblePartyKind]).toEqual(['user_ref', 'name_text']);
+  });
+});
+
+describe('recommendation deadline helpers (ADR-0008 §3.6)', () => {
+  const SUBMITTED = new Date('2026-06-01T12:00:00Z');
+
+  it('computeRecommendationDeadline returns submittedAt + 21 days for ON', () => {
+    const deadline = computeRecommendationDeadline(SUBMITTED, 'ON');
+    expect(deadline).not.toBeNull();
+    expect(deadline!.toISOString()).toBe('2026-06-22T12:00:00.000Z');
+  });
+
+  it('computeRecommendationDeadline returns null for CA-FED (s.135(6) "as soon as possible")', () => {
+    const deadline = computeRecommendationDeadline(SUBMITTED, 'CA-FED');
+    expect(deadline).toBeNull();
+  });
+
+  it('computeRecommendationDeadline does not mutate its input', () => {
+    const submittedAt = new Date('2026-06-01T12:00:00Z');
+    const before = submittedAt.getTime();
+    computeRecommendationDeadline(submittedAt, 'ON');
+    expect(submittedAt.getTime()).toBe(before);
+  });
+
+  it('recommendationDeadlineState returns no_deadline when deadline is null', () => {
+    expect(recommendationDeadlineState(new Date('2026-06-02T00:00:00Z'), null)).toBe('no_deadline');
+  });
+
+  it('recommendationDeadlineState returns on_time when now is before the deadline', () => {
+    const deadline = computeRecommendationDeadline(SUBMITTED, 'ON');
+    expect(recommendationDeadlineState(new Date('2026-06-15T00:00:00Z'), deadline)).toBe('on_time');
+  });
+
+  it('recommendationDeadlineState is inclusive on the deadline second itself (on_time)', () => {
+    const deadline = computeRecommendationDeadline(SUBMITTED, 'ON');
+    expect(recommendationDeadlineState(deadline!, deadline)).toBe('on_time');
+  });
+
+  it('recommendationDeadlineState returns overdue strictly after the deadline', () => {
+    const deadline = computeRecommendationDeadline(SUBMITTED, 'ON');
+    const overdue = new Date(deadline!.getTime() + 1);
+    expect(recommendationDeadlineState(overdue, deadline)).toBe('overdue');
+  });
+
+  it('recommendationDeadlineState ON: well past the deadline reads overdue', () => {
+    const deadline = computeRecommendationDeadline(SUBMITTED, 'ON');
+    expect(recommendationDeadlineState(new Date('2026-07-30T00:00:00Z'), deadline)).toBe('overdue');
+  });
+});
+
+describe('AuditPayload — new 1.9 variants (type-level)', () => {
+  it('recommendation.submitted carries jurisdiction + citationCount + linkedActionItemId', () => {
+    const p: AuditPayload = {
+      kind: 'recommendation.submitted',
+      recommendationId: 'r1',
+      recommendationNumber: 14,
+      jurisdiction: 'ON',
+      citationCount: 3,
+      linkedActionItemId: 'a1',
+    };
+    expect(p.kind).toBe('recommendation.submitted');
+  });
+
+  it('recommendation.withdrawn allows null linkedActionItemId for draft withdrawals', () => {
+    const p: AuditPayload = {
+      kind: 'recommendation.withdrawn',
+      recommendationId: 'r1',
+      linkedActionItemId: null,
+    };
+    if (p.kind === 'recommendation.withdrawn') {
+      expect(p.linkedActionItemId).toBeNull();
+    }
+  });
+
+  it('recommendation.exported carries the hex hashes + signing-key id', () => {
+    const p: AuditPayload = {
+      kind: 'recommendation.exported',
+      exportId: 'e1',
+      recommendationId: 'r1',
+      outputSha256: 'a'.repeat(64),
+      signatureSha256: 'b'.repeat(64),
+      signingKeyId: 'k1',
+      citationsHash: 'c'.repeat(64),
+      byteSize: 1024,
+    };
+    expect(p.kind).toBe('recommendation.exported');
+  });
+
+  it('audit.workplace_signing_key.seeded carries algorithm + publicKeySha256', () => {
+    const p: AuditPayload = {
+      kind: 'audit.workplace_signing_key.seeded',
+      signingKeyId: 'k1',
+      algorithm: 'ed25519',
+      publicKeySha256: 'd'.repeat(64),
+    };
+    expect(p.kind).toBe('audit.workplace_signing_key.seeded');
+  });
+
+  it('inspection_finding.read and inspection.export.downloaded close the 1.8 priv-F3/F5 gaps', () => {
+    const r: AuditPayload = {
+      kind: 'inspection_finding.read',
+      findingId: 'f1',
+      inspectionId: 'i1',
+    };
+    const d: AuditPayload = {
+      kind: 'inspection.export.downloaded',
+      exportId: 'e1',
+      downloadedByUserId: 'u1',
+    };
+    expect(r.kind).toBe('inspection_finding.read');
+    expect(d.kind).toBe('inspection.export.downloaded');
   });
 });
 
