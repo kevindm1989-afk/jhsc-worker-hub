@@ -51,11 +51,14 @@ import {
   sealField,
   sealOptionalField,
 } from '../../action-items/crypto';
+import { idempotencyKey } from '../../middleware/idempotency';
 import { rateLimit } from '../../middleware/rate-limit';
 
 export const actionItemsRoute = new Hono();
 
 actionItemsRoute.use('*', authMiddleware());
+// 1.10 (ADR-0009 §3.4): idempotencyKey AFTER auth, BEFORE rate-limit.
+actionItemsRoute.use('*', idempotencyKey());
 // sec-review F4 1.6: rateLimit runs BEFORE bodyLimit so an authenticated
 // rep spamming >64KB POSTs still drains the bucket. bodyLimit returns
 // onError without calling next(), so putting it first would let an
@@ -78,6 +81,8 @@ const isoDate = z.string().regex(/^\d{4}-\d{2}-\d{2}$/, 'must be YYYY-MM-DD');
 
 const createBody = z
   .object({
+    // 1.10 (ADR-0009 §3.3): optional client-generated UUID v4.
+    clientId: z.string().uuid().optional(),
     type: z.enum(actionItemType),
     typeSubtype: z.string().min(1).max(64).optional(),
     description: z.string().min(1).max(8000),
@@ -196,6 +201,48 @@ actionItemsRoute.post('/', async (c) => {
   const body = parsed.data;
   const db = getDb();
 
+  // 1.10 (ADR-0009 §3.3): ratchet-level idempotency. Action items
+  // don't have a `reported_by`-equivalent column (the rep is on the
+  // bootstrap action_item_moves row's `moved_by_user_id`). Use that
+  // to scope the "same actor" check: a rep replaying their own
+  // clientId returns the existing row at 200; a different actor
+  // returns 409 client_id_conflict.
+  if (body.clientId) {
+    const existing = (await db.execute(sql`
+      SELECT ai.id, ai.sequence_number, ai.status, ai.section,
+             ai.start_date::text AS start_date,
+             m.moved_by_user_id AS created_by_user_id
+      FROM action_items ai
+      LEFT JOIN action_item_moves m
+        ON m.action_item_id = ai.id AND m.from_section IS NULL
+      WHERE ai.id = ${body.clientId}
+      LIMIT 1
+    `)) as unknown as Array<{
+      id: string;
+      sequence_number: number;
+      status: string;
+      section: string;
+      start_date: string;
+      created_by_user_id: string | null;
+    }>;
+    if (existing.length > 0) {
+      const row = existing[0]!;
+      if (row.created_by_user_id !== auth.userId) {
+        return c.json({ error: 'client_id_conflict' }, 409);
+      }
+      return c.json(
+        {
+          id: row.id,
+          sequenceNumber: row.sequence_number,
+          status: row.status as ActionItemStatus,
+          section: row.section as ActionItemSection,
+          startDate: row.start_date,
+        },
+        200,
+      );
+    }
+  }
+
   const descSealed = sealField(body.description);
   const recommendedSealed = sealOptionalField(body.recommendedAction);
   const raisedBySealed = sealOptionalField(body.raisedBy);
@@ -204,43 +251,81 @@ actionItemsRoute.post('/', async (c) => {
   const created = await db.transaction(async (tx) => {
     const sequenceNumber = await allocateSequenceNumber(tx, body.section);
 
-    const inserted = (await tx.execute(sql`
-      INSERT INTO action_items (
-        sequence_number, type, type_subtype,
-        description_ct, description_dek_ct,
-        recommended_action_ct, recommended_action_dek_ct,
-        raised_by_ct, raised_by_dek_ct, raised_by_user_id,
-        follow_up_owner_ct, follow_up_owner_dek_ct, follow_up_owner_user_id,
-        department, status, risk, section,
-        start_date, target_date,
-        source_type, source_id, tags
-      )
-      VALUES (
-        ${sequenceNumber}, ${body.type}, ${body.typeSubtype ?? null},
-        ${Buffer.from(descSealed.ct) as unknown as Uint8Array},
-        ${Buffer.from(descSealed.dekCt) as unknown as Uint8Array},
-        ${recommendedSealed ? (Buffer.from(recommendedSealed.ct) as unknown as Uint8Array) : null},
-        ${recommendedSealed ? (Buffer.from(recommendedSealed.dekCt) as unknown as Uint8Array) : null},
-        ${raisedBySealed ? (Buffer.from(raisedBySealed.ct) as unknown as Uint8Array) : null},
-        ${raisedBySealed ? (Buffer.from(raisedBySealed.dekCt) as unknown as Uint8Array) : null},
-        ${body.raisedByUserId ?? null},
-        ${followUpSealed ? (Buffer.from(followUpSealed.ct) as unknown as Uint8Array) : null},
-        ${followUpSealed ? (Buffer.from(followUpSealed.dekCt) as unknown as Uint8Array) : null},
-        ${body.followUpOwnerUserId ?? null},
-        ${body.department ?? null}, ${body.status}, ${body.risk}, ${body.section},
-        ${body.startDate}, ${body.targetDate ?? null},
-        ${body.sourceType ?? 'manual'}, ${body.sourceId ?? null},
-        ${body.tags ?? []}::text[]
-      )
-      RETURNING id, sequence_number, status, section, start_date::text AS start_date, created_at
-    `)) as unknown as Array<{
-      id: string;
-      sequence_number: number;
-      status: string;
-      section: string;
-      start_date: string;
-      created_at: Date;
-    }>;
+    const inserted = body.clientId
+      ? ((await tx.execute(sql`
+          INSERT INTO action_items (
+            id, sequence_number, type, type_subtype,
+            description_ct, description_dek_ct,
+            recommended_action_ct, recommended_action_dek_ct,
+            raised_by_ct, raised_by_dek_ct, raised_by_user_id,
+            follow_up_owner_ct, follow_up_owner_dek_ct, follow_up_owner_user_id,
+            department, status, risk, section,
+            start_date, target_date,
+            source_type, source_id, tags
+          )
+          VALUES (
+            ${body.clientId}, ${sequenceNumber}, ${body.type}, ${body.typeSubtype ?? null},
+            ${Buffer.from(descSealed.ct) as unknown as Uint8Array},
+            ${Buffer.from(descSealed.dekCt) as unknown as Uint8Array},
+            ${recommendedSealed ? (Buffer.from(recommendedSealed.ct) as unknown as Uint8Array) : null},
+            ${recommendedSealed ? (Buffer.from(recommendedSealed.dekCt) as unknown as Uint8Array) : null},
+            ${raisedBySealed ? (Buffer.from(raisedBySealed.ct) as unknown as Uint8Array) : null},
+            ${raisedBySealed ? (Buffer.from(raisedBySealed.dekCt) as unknown as Uint8Array) : null},
+            ${body.raisedByUserId ?? null},
+            ${followUpSealed ? (Buffer.from(followUpSealed.ct) as unknown as Uint8Array) : null},
+            ${followUpSealed ? (Buffer.from(followUpSealed.dekCt) as unknown as Uint8Array) : null},
+            ${body.followUpOwnerUserId ?? null},
+            ${body.department ?? null}, ${body.status}, ${body.risk}, ${body.section},
+            ${body.startDate}, ${body.targetDate ?? null},
+            ${body.sourceType ?? 'manual'}, ${body.sourceId ?? null},
+            ${body.tags ?? []}::text[]
+          )
+          RETURNING id, sequence_number, status, section, start_date::text AS start_date, created_at
+        `)) as unknown as Array<{
+          id: string;
+          sequence_number: number;
+          status: string;
+          section: string;
+          start_date: string;
+          created_at: Date;
+        }>)
+      : ((await tx.execute(sql`
+          INSERT INTO action_items (
+            sequence_number, type, type_subtype,
+            description_ct, description_dek_ct,
+            recommended_action_ct, recommended_action_dek_ct,
+            raised_by_ct, raised_by_dek_ct, raised_by_user_id,
+            follow_up_owner_ct, follow_up_owner_dek_ct, follow_up_owner_user_id,
+            department, status, risk, section,
+            start_date, target_date,
+            source_type, source_id, tags
+          )
+          VALUES (
+            ${sequenceNumber}, ${body.type}, ${body.typeSubtype ?? null},
+            ${Buffer.from(descSealed.ct) as unknown as Uint8Array},
+            ${Buffer.from(descSealed.dekCt) as unknown as Uint8Array},
+            ${recommendedSealed ? (Buffer.from(recommendedSealed.ct) as unknown as Uint8Array) : null},
+            ${recommendedSealed ? (Buffer.from(recommendedSealed.dekCt) as unknown as Uint8Array) : null},
+            ${raisedBySealed ? (Buffer.from(raisedBySealed.ct) as unknown as Uint8Array) : null},
+            ${raisedBySealed ? (Buffer.from(raisedBySealed.dekCt) as unknown as Uint8Array) : null},
+            ${body.raisedByUserId ?? null},
+            ${followUpSealed ? (Buffer.from(followUpSealed.ct) as unknown as Uint8Array) : null},
+            ${followUpSealed ? (Buffer.from(followUpSealed.dekCt) as unknown as Uint8Array) : null},
+            ${body.followUpOwnerUserId ?? null},
+            ${body.department ?? null}, ${body.status}, ${body.risk}, ${body.section},
+            ${body.startDate}, ${body.targetDate ?? null},
+            ${body.sourceType ?? 'manual'}, ${body.sourceId ?? null},
+            ${body.tags ?? []}::text[]
+          )
+          RETURNING id, sequence_number, status, section, start_date::text AS start_date, created_at
+        `)) as unknown as Array<{
+          id: string;
+          sequence_number: number;
+          status: string;
+          section: string;
+          start_date: string;
+          created_at: Date;
+        }>);
     const row = inserted[0]!;
 
     const chainRow = await append(tx, {

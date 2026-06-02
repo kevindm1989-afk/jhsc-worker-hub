@@ -275,3 +275,69 @@ describe.skipIf(SKIP)('PATCH /api/hazards/:id/status', () => {
     expect(res.status).toBe(404);
   });
 });
+
+// ---------------------------------------------------------------------------
+// 1.10 (ADR-0009 §3.3): clientId ratchet — the row's id is the canonical
+// _local_id from the rep's device. Same-clientId + same-actor returns 200
+// with the same row (queue retry / two-device race). Same-clientId +
+// different payload but same-actor returns 200 because the existing row
+// still belongs to the actor (S2's If-Match etag is the source of truth
+// for PATCH-level conflicts; the ratchet itself is content-blind).
+// Cross-actor reuse returns 409 client_id_conflict.
+// ---------------------------------------------------------------------------
+
+describe.skipIf(SKIP)('POST /api/hazards — clientId idempotency (1.10 S1)', () => {
+  const CLIENT_ID = '11111111-1111-4111-8111-111111111111';
+  const basePayload = {
+    title: 'WBV exposure',
+    description: 'Long-form WBV exposure description for the dock cycle.',
+    severity: 'high' as const,
+    jurisdiction: 'ON' as const,
+  };
+
+  it('first POST with clientId returns 200 and uses clientId as the row id', async () => {
+    const { cookie } = await loginAsRep();
+    const res = await app.request('/api/hazards', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-requested-with': 'jhsc-web', cookie },
+      body: JSON.stringify({ ...basePayload, clientId: CLIENT_ID }),
+    });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { id: string; hazardCode: string };
+    expect(body.id).toBe(CLIENT_ID);
+    expect(body.hazardCode).toBe('H-001');
+  });
+
+  it('second POST with same clientId + same payload returns 200 with the existing row id', async () => {
+    const { cookie } = await loginAsRep();
+    await app.request('/api/hazards', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-requested-with': 'jhsc-web', cookie },
+      body: JSON.stringify({ ...basePayload, clientId: CLIENT_ID }),
+    });
+    const res = await app.request('/api/hazards', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-requested-with': 'jhsc-web', cookie },
+      body: JSON.stringify({ ...basePayload, clientId: CLIENT_ID }),
+    });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { id: string; hazardCode: string };
+    expect(body.id).toBe(CLIENT_ID);
+    // The sequence didn't advance — only one hazard row exists.
+    expect(body.hazardCode).toBe('H-001');
+  });
+
+  it('absent clientId falls back to gen_random_uuid() default', async () => {
+    const { cookie } = await loginAsRep();
+    const res = await app.request('/api/hazards', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-requested-with': 'jhsc-web', cookie },
+      body: JSON.stringify(basePayload),
+    });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { id: string };
+    // UUID v4 from gen_random_uuid().
+    expect(body.id).toMatch(/^[0-9a-f-]{36}$/);
+    expect(body.id).not.toBe(CLIENT_ID);
+  });
+});

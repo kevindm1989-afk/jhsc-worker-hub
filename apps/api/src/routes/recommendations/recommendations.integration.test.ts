@@ -1132,3 +1132,106 @@ describe.skipIf(SKIP || SKIP_TIGRIS)(
     });
   },
 );
+
+// ---------------------------------------------------------------------------
+// 1.10 (ADR-0009 §3.3): clientId ratchet on POST /api/recommendations,
+// POST /:id/responses, and POST /:id/exports.
+// ---------------------------------------------------------------------------
+
+describe.skipIf(SKIP)('POST /api/recommendations — clientId idempotency (1.10 S1)', () => {
+  const REC_CLIENT_ID = '66666666-6666-4666-8666-666666666666';
+
+  it('first POST with clientId returns 201 with id=clientId', async () => {
+    const { cookie } = await loginAsRep();
+    const res = await app.request('/api/recommendations', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-requested-with': 'jhsc-web', cookie },
+      body: JSON.stringify({
+        clientId: REC_CLIENT_ID,
+        title: 'Clientside-allocated recommendation',
+        body: 'A recommendation whose id is allocated client-side per ADR-0009 §3.3.',
+        jurisdiction: 'ON',
+      }),
+    });
+    expect(res.status).toBe(201);
+    const body = (await res.json()) as { id: string };
+    expect(body.id).toBe(REC_CLIENT_ID);
+  });
+
+  it('replay with same clientId + same payload returns 200 with the existing row', async () => {
+    const { cookie } = await loginAsRep();
+    const payload = JSON.stringify({
+      clientId: REC_CLIENT_ID,
+      title: 'Clientside-allocated recommendation',
+      body: 'A recommendation whose id is allocated client-side per ADR-0009 §3.3.',
+      jurisdiction: 'ON',
+    });
+    await app.request('/api/recommendations', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-requested-with': 'jhsc-web', cookie },
+      body: payload,
+    });
+    const res = await app.request('/api/recommendations', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-requested-with': 'jhsc-web', cookie },
+      body: payload,
+    });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { id: string; recommendationNumber: number };
+    expect(body.id).toBe(REC_CLIENT_ID);
+    // The sequence number didn't advance — only one draft row exists.
+    expect(body.recommendationNumber).toBe(1);
+  });
+
+  it('absent clientId falls back to gen_random_uuid()', async () => {
+    const { cookie } = await loginAsRep();
+    const res = await app.request('/api/recommendations', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-requested-with': 'jhsc-web', cookie },
+      body: JSON.stringify({
+        title: 'No clientId',
+        body: 'A recommendation drafted without a client-supplied id.',
+        jurisdiction: 'ON',
+      }),
+    });
+    expect(res.status).toBe(201);
+    const body = (await res.json()) as { id: string };
+    expect(body.id).toMatch(/^[0-9a-f-]{36}$/);
+    expect(body.id).not.toBe(REC_CLIENT_ID);
+  });
+});
+
+describe.skipIf(SKIP)('POST /api/recommendations/:id/responses — clientId idempotency', () => {
+  const RESP_CLIENT_ID = '77777777-7777-4777-8777-777777777777';
+
+  it('replay with same clientId returns 200 with the existing response row', async () => {
+    const { cookie } = await loginAsRep();
+    const rec = await createRecommendation(cookie);
+    // Submit so the recommendation can accept responses.
+    await app.request(`/api/recommendations/${rec.id}/submit`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-requested-with': 'jhsc-web', cookie },
+      body: JSON.stringify({}),
+    });
+    const payload = JSON.stringify({
+      clientId: RESP_CLIENT_ID,
+      authorRole: 'manager',
+      body: 'Acknowledged; will review and respond by month end.',
+    });
+    const first = await app.request(`/api/recommendations/${rec.id}/responses`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-requested-with': 'jhsc-web', cookie },
+      body: payload,
+    });
+    expect(first.status).toBe(201);
+    const replay = await app.request(`/api/recommendations/${rec.id}/responses`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-requested-with': 'jhsc-web', cookie },
+      body: payload,
+    });
+    expect(replay.status).toBe(200);
+    const body = (await replay.json()) as { id: string; position: number };
+    expect(body.id).toBe(RESP_CLIENT_ID);
+    expect(body.position).toBe(1);
+  });
+});

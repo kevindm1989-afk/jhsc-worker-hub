@@ -54,6 +54,7 @@ import {
 import { loadWorkplaceConfig, type ZoneId } from '../../../../../config/workplace';
 import { getDb } from '../../db/client';
 import { authMiddleware, checkStepUpFreshness } from '../../auth/step-up';
+import { idempotencyKey } from '../../middleware/idempotency';
 import { rateLimit } from '../../middleware/rate-limit';
 import {
   deleteEvidenceObject,
@@ -73,6 +74,8 @@ import {
 export const inspectionsExportsRoute = new Hono();
 
 inspectionsExportsRoute.use('*', authMiddleware());
+// 1.10 (ADR-0009 §3.4): idempotencyKey AFTER auth, BEFORE rate-limit.
+inspectionsExportsRoute.use('*', idempotencyKey());
 // Same rate-limit shape as the inspections route group. The per-actor
 // 5/hour export ceiling is layered on top of this (see exportTokenBucket
 // below) so the IP-keyed bucket here remains the DoS bound for the
@@ -136,6 +139,13 @@ export function _resetExportBucketsForTests(): void {
 
 const exportCreateBody = z
   .object({
+    // 1.10 (ADR-0009 §3.3): optional client-generated UUID v4 — the
+    // canonical export_records.id. Exports are require-online (the rep
+    // can't queue a PDF render offline per §3.6), but the queue may
+    // still surround the call with Idempotency-Key for retry-safe
+    // semantics so a network blip on the response leg doesn't double-
+    // render the PDF + double-anchor the chain.
+    clientId: z.string().uuid().optional(),
     kind: z.enum(inspectionExportKind),
     // T-I29 + T-I32: hard bound at 100 inspections per request (the SQL
     // CHECK on export_records.inspection_ids enforces the same).
@@ -596,8 +606,50 @@ inspectionsExportsRoute.post('/', async (c) => {
     }
 
     // 5. Pre-allocate the exportId so the storage_key is stable across
-    //    the upload and DB write.
-    const exportId = randomUUID();
+    //    the upload and DB write. 1.10 (ADR-0009 §3.3): when the client
+    //    supplied a clientId, use it. Same-actor idempotency is enforced
+    //    upstream of the render here — if the export_records row with
+    //    this id already exists for this actor, return the existing row
+    //    rather than re-rendering. Cross-actor → 409.
+    let exportId: string;
+    if (body.clientId) {
+      const existing = (await db.execute(sql`
+        SELECT id, kind, encode(output_sha256, 'hex') AS output_sha256_hex,
+               byte_size, expires_at::text AS expires_at, audit_idx,
+               requested_by_user_id
+        FROM export_records
+        WHERE id = ${body.clientId}
+        LIMIT 1
+      `)) as unknown as Array<{
+        id: string;
+        kind: string;
+        output_sha256_hex: string;
+        byte_size: string | number;
+        expires_at: string;
+        audit_idx: number | string;
+        requested_by_user_id: string;
+      }>;
+      if (existing.length > 0) {
+        const row = existing[0]!;
+        if (row.requested_by_user_id !== auth.userId) {
+          return c.json({ error: 'client_id_conflict' }, 409);
+        }
+        return c.json(
+          {
+            exportId: row.id,
+            kind: row.kind as InspectionExportKind,
+            outputSha256: row.output_sha256_hex,
+            byteSize: Number(row.byte_size),
+            expiresAt: row.expires_at,
+            chainIdx: Number(row.audit_idx),
+          },
+          200,
+        );
+      }
+      exportId = body.clientId;
+    } else {
+      exportId = randomUUID();
+    }
     const storageKey = `exports/${exportId}/inspection-${exportId}.pdf`;
 
     // 6. Render the PDF. The chainIdx is filled in *after* render —

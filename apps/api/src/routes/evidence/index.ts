@@ -33,6 +33,7 @@ import {
 } from '@jhsc/shared-types';
 import { getDb } from '../../db/client';
 import { authMiddleware, checkStepUpFreshness } from '../../auth/step-up';
+import { idempotencyKey } from '../../middleware/idempotency';
 import { rateLimit } from '../../middleware/rate-limit';
 import {
   fetchEvidenceCiphertext,
@@ -44,6 +45,8 @@ import { getActiveWorkplacePublicKey, openWorkplacePrivateKey } from '../../evid
 export const evidenceRoute = new Hono();
 
 evidenceRoute.use('*', authMiddleware());
+// 1.10 (ADR-0009 §3.4): idempotencyKey AFTER auth, BEFORE rate-limit.
+evidenceRoute.use('*', idempotencyKey());
 // Same middleware order as 1.6 close-out: rate-limit BEFORE body-limit
 // so spammed oversize POSTs still drain the bucket.
 evidenceRoute.use('*', rateLimit({ name: 'evidence', capacity: 60, refillPerSecond: 10 }));
@@ -87,6 +90,13 @@ const acceptedLinkedTypes: ReadonlyArray<EvidenceLinkedType> = [
 
 const uploadUrlBody = z
   .object({
+    // 1.10 (ADR-0009 §3.3 + §3.8): optional client-generated UUID v4
+    // — the same id the finalize POST will carry as `clientId`, so the
+    // presign and finalize legs share a stable identity. The storage
+    // key derives from this id when supplied, making the three-step
+    // queue operation (presign → Tigris PUT → finalize) fully
+    // idempotent across retries.
+    clientId: z.string().uuid().optional(),
     mimeType: z.enum(evidenceMimeType),
     byteSizeEstimate: z.number().int().min(1).max(MAX_BYTE_SIZE),
   })
@@ -94,6 +104,11 @@ const uploadUrlBody = z
 
 const finalizeBody = z
   .object({
+    // 1.10 (ADR-0009 §3.3): optional client-generated UUID v4 — the
+    // canonical evidence_files.id. Pairs with the upload-url clientId
+    // so the three-step queue operation lands a single row even after
+    // a retry storm (§3.8 + SECURITY.md T-S27).
+    clientId: z.string().uuid().optional(),
     storageKey: z.string().min(1).max(256),
     ciphertextSha256: SHA256_HEX,
     sealedDekB64: B64,
@@ -147,7 +162,13 @@ evidenceRoute.post('/upload-url', async (c) => {
   if (!workplaceKey) {
     return c.json({ error: 'workplace_key_not_ready' }, 503);
   }
-  const storageKey = `evidence/${randomUUID()}/blob`;
+  // 1.10 (ADR-0009 §3.3 + §3.8): derive the storage key from clientId
+  // when present so a presign retry lands on the same Tigris path.
+  // The finalize POST will assert the resulting evidence_files.id ==
+  // clientId, completing the three-step idempotency contract.
+  const storageKey = parsed.data.clientId
+    ? `evidence/${parsed.data.clientId}/blob`
+    : `evidence/${randomUUID()}/blob`;
   const { uploadUrl, expiresInSeconds } = await presignEvidenceUpload({
     storageKey,
     mimeType: parsed.data.mimeType,
@@ -174,6 +195,45 @@ evidenceRoute.post('/', async (c) => {
   const auth = c.get('auth');
   const body = parsed.data;
   const db = getDb();
+
+  // 1.10 (ADR-0009 §3.3): ratchet-level idempotency on the finalize
+  // leg. uploaded_by_user_id anchors the actor. Same-actor + same
+  // clientId returns existing row at 200; cross-actor → 409. The
+  // three-step queue operation (presign → Tigris PUT → finalize) is
+  // retry-safe across all three legs (§3.8 + SECURITY.md T-S27): a
+  // retried finalize after the original landed returns the original
+  // evidence_files row without re-INSERTing or re-emitting the
+  // evidence.uploaded chain anchor.
+  if (body.clientId) {
+    const existing = (await db.execute(sql`
+      SELECT id, linked_type, linked_id, uploaded_at::text AS uploaded_at,
+             uploaded_by_user_id
+      FROM evidence_files
+      WHERE id = ${body.clientId}
+      LIMIT 1
+    `)) as unknown as Array<{
+      id: string;
+      linked_type: string;
+      linked_id: string;
+      uploaded_at: string;
+      uploaded_by_user_id: string;
+    }>;
+    if (existing.length > 0) {
+      const row = existing[0]!;
+      if (row.uploaded_by_user_id !== auth.userId) {
+        return c.json({ error: 'client_id_conflict' }, 409);
+      }
+      return c.json(
+        {
+          id: row.id,
+          linkedType: row.linked_type as EvidenceLinkedType,
+          linkedId: row.linked_id,
+          uploadedAt: row.uploaded_at,
+        },
+        200,
+      );
+    }
+  }
 
   // Verify the object actually landed in Tigris with the expected size.
   // The route NEVER fetches the ciphertext here; HeadObject is cheap
@@ -232,7 +292,9 @@ evidenceRoute.post('/', async (c) => {
   // sec-F1 close-out: pre-allocate the evidence row id so the
   // evidence.uploaded chain payload (canonicalised + hashed at append
   // time) carries the real evidenceId, not a zero-UUID placeholder.
-  const evidenceId = randomUUID();
+  // 1.10 §3.3: use clientId when supplied so the queue's _local_id ==
+  // server id end-to-end.
+  const evidenceId = body.clientId ?? randomUUID();
 
   const inserted = await db.transaction(async (tx) => {
     const chainRow = await append(tx, {

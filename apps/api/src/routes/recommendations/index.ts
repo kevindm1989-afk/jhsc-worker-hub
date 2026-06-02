@@ -84,6 +84,7 @@ import {
 } from '@jhsc/shared-types';
 import { getDb } from '../../db/client';
 import { authMiddleware, checkStepUpFreshness } from '../../auth/step-up';
+import { idempotencyKey } from '../../middleware/idempotency';
 import { rateLimit } from '../../middleware/rate-limit';
 import { openRecommendationField, sealRecommendationField } from '../../recommendations/crypto';
 import { sealField as sealActionItemField } from '../../action-items/crypto';
@@ -95,6 +96,8 @@ import { registerRecommendationExportHandlers } from './exports';
 export const recommendationsRoute = new Hono();
 
 recommendationsRoute.use('*', authMiddleware());
+// 1.10 (ADR-0009 §3.4): idempotencyKey AFTER auth, BEFORE rate-limit.
+recommendationsRoute.use('*', idempotencyKey());
 // Same ordering rationale as inspections: rateLimit BEFORE bodyLimit so
 // spammed oversize POSTs still drain the bucket.
 recommendationsRoute.use(
@@ -152,6 +155,8 @@ const citationSchema = z
 // with the inspections route.
 const createBody = z
   .object({
+    // 1.10 (ADR-0009 §3.3): optional client-generated UUID v4.
+    clientId: z.string().uuid().optional(),
     title: noHtmlBounded({ min: 1, max: 200 }),
     body: noHtmlBounded({ min: 1, max: 16000 }),
     jurisdiction: z.enum(recommendationJurisdiction),
@@ -184,6 +189,8 @@ const resolveBody = z.object({}).strict();
 
 const responseBody = z
   .object({
+    // 1.10 (ADR-0009 §3.3): optional client-generated UUID v4.
+    clientId: z.string().uuid().optional(),
     // S5 priv-F14 close-out: noHtmlBounded refinement on both fields
     // — same rationale as the create / patch bodies above.
     authorRole: noHtmlBounded({ min: 1, max: 120 }),
@@ -387,10 +394,47 @@ recommendationsRoute.post('/', async (c) => {
   const auth = c.get('auth');
   const db = getDb();
 
+  // 1.10 (ADR-0009 §3.3): ratchet-level idempotency. drafted_by_user_id
+  // anchors the actor. Same-actor clientId reuse → 200 with existing
+  // row; cross-actor → 409. Runs before the citation gate so a clientId
+  // replay doesn't burn the citation Zod budget.
+  if (body.clientId) {
+    const existing = (await db.execute(sql`
+      SELECT id, recommendation_number, jurisdiction, status,
+             drafted_at::text AS drafted_at, drafted_by_user_id
+      FROM recommendations
+      WHERE id = ${body.clientId}
+      LIMIT 1
+    `)) as unknown as Array<{
+      id: string;
+      recommendation_number: number;
+      jurisdiction: string;
+      status: string;
+      drafted_at: string;
+      drafted_by_user_id: string;
+    }>;
+    if (existing.length > 0) {
+      const row = existing[0]!;
+      if (row.drafted_by_user_id !== auth.userId) {
+        return c.json({ error: 'client_id_conflict' }, 409);
+      }
+      return c.json(
+        {
+          id: row.id,
+          recommendationNumber: row.recommendation_number,
+          jurisdiction: row.jurisdiction as RecommendationJurisdiction,
+          status: row.status as RecommendationStatus,
+          draftedAt: row.drafted_at,
+        },
+        200,
+      );
+    }
+  }
+
   // sec-F1-style anchor-first ordering: chain row first so the
   // recommendations.audit_idx FK has a real target. Mirrors hazards /
-  // inspections create paths.
-  const recommendationId = crypto.randomUUID();
+  // inspections create paths. 1.10 §3.3: use clientId when present.
+  const recommendationId = body.clientId ?? crypto.randomUUID();
 
   try {
     const created = await db.transaction(async (tx) => {
@@ -1157,7 +1201,32 @@ recommendationsRoute.post('/:id/responses', async (c) => {
   const auth = c.get('auth');
   const body = parsed.data;
   const db = getDb();
-  const responseId = crypto.randomUUID();
+
+  // 1.10 (ADR-0009 §3.3): ratchet-level idempotency on the response
+  // row. received_by_user_id is the actor scope; same-actor returns
+  // existing at 200, cross-actor 409.
+  if (body.clientId) {
+    const existing = (await db.execute(sql`
+      SELECT id, position, received_at::text AS received_at, received_by_user_id
+      FROM recommendation_responses
+      WHERE id = ${body.clientId} AND recommendation_id = ${idParsed.data}
+      LIMIT 1
+    `)) as unknown as Array<{
+      id: string;
+      position: number;
+      received_at: string;
+      received_by_user_id: string;
+    }>;
+    if (existing.length > 0) {
+      const row = existing[0]!;
+      if (row.received_by_user_id !== auth.userId) {
+        return c.json({ error: 'client_id_conflict' }, 409);
+      }
+      return c.json({ id: row.id, position: row.position, receivedAt: row.received_at }, 200);
+    }
+  }
+
+  const responseId = body.clientId ?? crypto.randomUUID();
 
   try {
     const result = await db.transaction(async (tx) => {

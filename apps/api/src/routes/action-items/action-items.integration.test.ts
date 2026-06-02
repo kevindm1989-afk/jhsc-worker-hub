@@ -356,3 +356,63 @@ describe.skipIf(SKIP)('POST /api/action-items/:id/moves/:moveId/undo', () => {
     expect(res.headers.get('www-authenticate')).toMatch(/StepUp/);
   });
 });
+
+// ---------------------------------------------------------------------------
+// 1.10 (ADR-0009 §3.3): clientId ratchet for POST /api/action-items.
+// ---------------------------------------------------------------------------
+
+describe.skipIf(SKIP)('POST /api/action-items — clientId idempotency (1.10 S1)', () => {
+  const CLIENT_ID = '22222222-2222-4222-8222-222222222222';
+  const basePayload = {
+    type: 'INSIGHT' as const,
+    description: 'Action item description for the clientId ratchet test.',
+    status: 'Not Started' as const,
+    risk: 'Medium' as const,
+    section: 'new_business' as const,
+    startDate: '2026-05-29',
+  };
+
+  it('first POST with clientId returns the row using clientId as the id', async () => {
+    const { cookie } = await loginAsRep();
+    const res = await app.request('/api/action-items', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-requested-with': 'jhsc-web', cookie },
+      body: JSON.stringify({ ...basePayload, clientId: CLIENT_ID }),
+    });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { id: string; sequenceNumber: number };
+    expect(body.id).toBe(CLIENT_ID);
+    expect(body.sequenceNumber).toBe(1);
+  });
+
+  it('second POST with same clientId returns the existing row at 200 without bumping sequence', async () => {
+    const { cookie } = await loginAsRep();
+    await app.request('/api/action-items', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-requested-with': 'jhsc-web', cookie },
+      body: JSON.stringify({ ...basePayload, clientId: CLIENT_ID }),
+    });
+    const res = await app.request('/api/action-items', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-requested-with': 'jhsc-web', cookie },
+      body: JSON.stringify({ ...basePayload, clientId: CLIENT_ID }),
+    });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { id: string; sequenceNumber: number };
+    expect(body.id).toBe(CLIENT_ID);
+    expect(body.sequenceNumber).toBe(1);
+  });
+
+  it('absent clientId falls back to gen_random_uuid()', async () => {
+    const { cookie } = await loginAsRep();
+    const res = await app.request('/api/action-items', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-requested-with': 'jhsc-web', cookie },
+      body: JSON.stringify(basePayload),
+    });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { id: string };
+    expect(body.id).toMatch(/^[0-9a-f-]{36}$/);
+    expect(body.id).not.toBe(CLIENT_ID);
+  });
+});

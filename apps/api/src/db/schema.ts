@@ -359,6 +359,11 @@ export const hazards = pgTable(
     assessedAt: timestamp('assessed_at', { withTimezone: true }),
     resolvedAt: timestamp('resolved_at', { withTimezone: true }),
     archivedAt: timestamp('archived_at', { withTimezone: true }),
+    // Optimistic-concurrency etag (1.10, ADR-0009 §3.7). Auto-bumped
+    // by the bump_version_on_update trigger in migration 0009. The
+    // PATCH ratchet (S2) compares client `If-Match` against this column
+    // under FOR UPDATE.
+    version: integer('version').notNull().default(1),
     createdAt: timestamp('created_at', { withTimezone: true })
       .notNull()
       .default(sql`now()`),
@@ -456,6 +461,8 @@ export const actionItems = pgTable(
       .array()
       .notNull()
       .default(sql`'{}'::text[]`),
+    // Optimistic-concurrency etag (1.10, ADR-0009 §3.7).
+    version: integer('version').notNull().default(1),
     createdAt: timestamp('created_at', { withTimezone: true })
       .notNull()
       .default(sql`now()`),
@@ -642,6 +649,8 @@ export const inspections = pgTable(
     auditIdx: bigint('audit_idx', { mode: 'number' })
       .notNull()
       .references(() => auditLog.idx, { onDelete: 'restrict', onUpdate: 'restrict' }),
+    // Optimistic-concurrency etag (1.10, ADR-0009 §3.7).
+    version: integer('version').notNull().default(1),
     createdAt: timestamp('created_at', { withTimezone: true })
       .notNull()
       .default(sql`now()`),
@@ -705,6 +714,8 @@ export const inspectionFindings = pgTable(
     auditIdx: bigint('audit_idx', { mode: 'number' })
       .notNull()
       .references(() => auditLog.idx, { onDelete: 'restrict', onUpdate: 'restrict' }),
+    // Optimistic-concurrency etag (1.10, ADR-0009 §3.7).
+    version: integer('version').notNull().default(1),
     createdAt: timestamp('created_at', { withTimezone: true })
       .notNull()
       .default(sql`now()`),
@@ -868,6 +879,8 @@ export const recommendations = pgTable(
     auditIdx: bigint('audit_idx', { mode: 'number' })
       .notNull()
       .references(() => auditLog.idx, { onDelete: 'restrict', onUpdate: 'restrict' }),
+    // Optimistic-concurrency etag (1.10, ADR-0009 §3.7).
+    version: integer('version').notNull().default(1),
     createdAt: timestamp('created_at', { withTimezone: true })
       .notNull()
       .default(sql`now()`),
@@ -997,6 +1010,73 @@ export const recommendationActionItemLinks = pgTable(
 );
 
 // ---------------------------------------------------------------------------
+// Sync infrastructure (1.10, ADR-0009)
+// ---------------------------------------------------------------------------
+
+// The Idempotency-Key middleware (apps/api/src/middleware/idempotency.ts)
+// caches (actor, action_kind, entity_local_id, payload_hash) → cached
+// response so a queue retry that drained but lost the response leg
+// returns the cached body without re-running the handler — preserving
+// the once-per-logical-operation chain-anchor invariant (CLAUDE.md #2 +
+// SECURITY.md §2.10 T-S4). Mirrors migration 0009 exactly.
+//
+// The cached response body is envelope-encrypted at rest (response_body_ct
+// + response_body_dek_ct) because it can carry server-allocated ids
+// (recommendation_number, action_item.id, hazardCode) and the cache is
+// operational infrastructure that should not sit as plaintext alongside
+// the encrypted entity tables.
+//
+// The four-way UNIQUE is split into two partial indexes (one for
+// entity_local_id IS NOT NULL, one for entity_local_id IS NULL) because
+// PostgreSQL UNIQUE treats NULLs as distinct — a single UNIQUE over the
+// four-tuple would let two different routes with NULL entity_local_id
+// but the same actor/action/payload both insert successfully.
+
+export const syncIdempotency = pgTable(
+  'sync_idempotency',
+  {
+    id: uuid('id')
+      .primaryKey()
+      .default(sql`gen_random_uuid()`),
+    actorUserId: uuid('actor_user_id')
+      .notNull()
+      .references(() => users.id, { onDelete: 'restrict', onUpdate: 'restrict' }),
+    // REST verb + path template, e.g. 'POST /api/recommendations'.
+    // Single text column to keep the middleware lookup fast.
+    actionKind: text('action_kind').notNull(),
+    // The client-generated UUID v4 (ClientId) the body carried, when
+    // present. Nullable — not every route accepts clientId yet (transition
+    // / promote / resolve / withdraw routes don't create top-level rows
+    // per ADR-0009 §3.3).
+    entityLocalId: uuid('entity_local_id'),
+    // SHA-256 of canonical-JSON of the request body. 32 bytes.
+    payloadHash: bytea('payload_hash').notNull(),
+    responseStatusCode: integer('response_status_code').notNull(),
+    // Envelope-encrypted cached response body (sealed JSON).
+    responseBodyCt: bytea('response_body_ct').notNull(),
+    responseBodyDekCt: bytea('response_body_dek_ct').notNull(),
+    createdAt: timestamp('created_at', { withTimezone: true })
+      .notNull()
+      .default(sql`now()`),
+    // 7-day TTL per ADR-0009 §3.4.
+    expiresAt: timestamp('expires_at', { withTimezone: true }).notNull(),
+  },
+  (t) => ({
+    // The two partial UNIQUE indexes from migration 0009 — Drizzle's
+    // pg-core uniqueIndex builder with `.where()` produces the same
+    // CREATE UNIQUE INDEX ... WHERE statement.
+    keyWithEntityUnique: uniqueIndex('sync_idempotency_key_with_entity_unique')
+      .on(t.actorUserId, t.actionKind, t.entityLocalId, t.payloadHash)
+      .where(sql`${t.entityLocalId} IS NOT NULL`),
+    keyWithoutEntityUnique: uniqueIndex('sync_idempotency_key_without_entity_unique')
+      .on(t.actorUserId, t.actionKind, t.payloadHash)
+      .where(sql`${t.entityLocalId} IS NULL`),
+    expiresAtIdx: index('sync_idempotency_expires_at_idx').on(t.expiresAt),
+    createdAtIdx: index('sync_idempotency_created_at_idx').on(t.createdAt),
+  }),
+);
+
+// ---------------------------------------------------------------------------
 // Re-export for Drizzle adapters
 // ---------------------------------------------------------------------------
 
@@ -1032,6 +1112,7 @@ export const schema = {
   recommendationCitations,
   recommendationResponses,
   recommendationActionItemLinks,
+  syncIdempotency,
   loginAttemptOutcome,
   authEventKind,
   webauthnPurpose,

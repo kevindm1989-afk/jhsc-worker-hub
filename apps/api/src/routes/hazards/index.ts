@@ -36,11 +36,16 @@ import {
   sealField,
   sealOptionalField,
 } from '../../hazards/crypto';
+import { idempotencyKey } from '../../middleware/idempotency';
 import { rateLimit } from '../../middleware/rate-limit';
 
 export const hazardsRoute = new Hono();
 
 hazardsRoute.use('*', authMiddleware());
+// 1.10 (ADR-0009 §3.4): idempotencyKey runs AFTER auth (needs auth.userId
+// for the four-way UNIQUE) but BEFORE rate-limit so a cache hit replay
+// doesn't burn a token. Opt-in per request via Idempotency-Key header.
+hazardsRoute.use('*', idempotencyKey());
 
 // sec-review F1 (1.5): bound the request size before c.req.json() buffers
 // a malicious 100MB blob in memory. The largest legitimate body is the
@@ -66,6 +71,12 @@ hazardsRoute.use('*', rateLimit({ name: 'hazards', capacity: 60, refillPerSecond
 
 const createBody = z
   .object({
+    // 1.10 (ADR-0009 §3.3): optional client-generated UUID v4. When
+    // present the row INSERTs with id=clientId so the rep's offline
+    // URL is canonical from the moment they typed; when absent the
+    // server's gen_random_uuid() default applies (backwards compat
+    // with online-only clients).
+    clientId: z.string().uuid().optional(),
     title: z.string().min(1).max(120),
     description: z.string().min(1).max(8000),
     severity: z.enum(hazardSeverity),
@@ -103,6 +114,43 @@ hazardsRoute.post('/', async (c) => {
   }
   const body = parsed.data;
   const db = getDb();
+
+  // 1.10 (ADR-0009 §3.3): ratchet-level idempotency. If clientId is
+  // present + already exists, check whether the existing row was
+  // reported by the same actor. Same-actor + clientId reuse → 200 with
+  // the existing row (the queue retry case before the middleware can
+  // cache, or a clientId race within the same actor's two devices).
+  // Cross-actor reuse → 409 client_id_conflict (T-S13 — the multi-rep
+  // forward seam still treats the actor as the bound; a forged clientId
+  // from a different rep cannot alias another rep's row).
+  if (body.clientId) {
+    const existing = (await db.execute(sql`
+      SELECT id, hazard_code, status, reported_at::text AS reported_at, reported_by
+      FROM hazards WHERE id = ${body.clientId} LIMIT 1
+    `)) as unknown as Array<{
+      id: string;
+      hazard_code: string;
+      status: string;
+      reported_at: string;
+      reported_by: string;
+    }>;
+    if (existing.length > 0) {
+      const row = existing[0]!;
+      if (row.reported_by !== auth.userId) {
+        return c.json({ error: 'client_id_conflict' }, 409);
+      }
+      return c.json(
+        {
+          id: row.id,
+          hazardCode: row.hazard_code,
+          status: row.status,
+          reportedAt: row.reported_at,
+        },
+        200,
+      );
+    }
+  }
+
   const descSealed = sealField(body.description);
   const reporterSealed = sealOptionalField(body.reporterIdentity);
   const locationSealed = sealOptionalField(body.locationDetail);
@@ -114,33 +162,64 @@ hazardsRoute.post('/', async (c) => {
       n: string | number;
     }>;
     const hazardCode = `H-${String(code[0]!.n).padStart(3, '0')}`;
-    const rows = (await tx.execute(sql`
-      INSERT INTO hazards (
-        hazard_code, title, description_ct, description_dek_ct,
-        reporter_identity_ct, reporter_identity_dek_ct,
-        reported_by, severity, status,
-        location_zone, location_detail_ct, location_detail_dek_ct,
-        jurisdiction
-      )
-      VALUES (
-        ${hazardCode}, ${body.title},
-        ${Buffer.from(descSealed.ct) as unknown as Uint8Array},
-        ${Buffer.from(descSealed.dekCt) as unknown as Uint8Array},
-        ${reporterSealed ? (Buffer.from(reporterSealed.ct) as unknown as Uint8Array) : null},
-        ${reporterSealed ? (Buffer.from(reporterSealed.dekCt) as unknown as Uint8Array) : null},
-        ${auth.userId}, ${body.severity}, 'open',
-        ${body.locationZone ?? null},
-        ${locationSealed ? (Buffer.from(locationSealed.ct) as unknown as Uint8Array) : null},
-        ${locationSealed ? (Buffer.from(locationSealed.dekCt) as unknown as Uint8Array) : null},
-        ${body.jurisdiction}
-      )
-      RETURNING id, hazard_code, status, reported_at::text AS reported_at
-    `)) as unknown as Array<{
-      id: string;
-      hazard_code: string;
-      status: string;
-      reported_at: string;
-    }>;
+    // Use clientId as the row id when provided (1.10 §3.3); fall back
+    // to gen_random_uuid() default otherwise. The DEFAULT clause on
+    // `id` only fires when we omit the column from the INSERT list.
+    const rows = body.clientId
+      ? ((await tx.execute(sql`
+          INSERT INTO hazards (
+            id, hazard_code, title, description_ct, description_dek_ct,
+            reporter_identity_ct, reporter_identity_dek_ct,
+            reported_by, severity, status,
+            location_zone, location_detail_ct, location_detail_dek_ct,
+            jurisdiction
+          )
+          VALUES (
+            ${body.clientId}, ${hazardCode}, ${body.title},
+            ${Buffer.from(descSealed.ct) as unknown as Uint8Array},
+            ${Buffer.from(descSealed.dekCt) as unknown as Uint8Array},
+            ${reporterSealed ? (Buffer.from(reporterSealed.ct) as unknown as Uint8Array) : null},
+            ${reporterSealed ? (Buffer.from(reporterSealed.dekCt) as unknown as Uint8Array) : null},
+            ${auth.userId}, ${body.severity}, 'open',
+            ${body.locationZone ?? null},
+            ${locationSealed ? (Buffer.from(locationSealed.ct) as unknown as Uint8Array) : null},
+            ${locationSealed ? (Buffer.from(locationSealed.dekCt) as unknown as Uint8Array) : null},
+            ${body.jurisdiction}
+          )
+          RETURNING id, hazard_code, status, reported_at::text AS reported_at
+        `)) as unknown as Array<{
+          id: string;
+          hazard_code: string;
+          status: string;
+          reported_at: string;
+        }>)
+      : ((await tx.execute(sql`
+          INSERT INTO hazards (
+            hazard_code, title, description_ct, description_dek_ct,
+            reporter_identity_ct, reporter_identity_dek_ct,
+            reported_by, severity, status,
+            location_zone, location_detail_ct, location_detail_dek_ct,
+            jurisdiction
+          )
+          VALUES (
+            ${hazardCode}, ${body.title},
+            ${Buffer.from(descSealed.ct) as unknown as Uint8Array},
+            ${Buffer.from(descSealed.dekCt) as unknown as Uint8Array},
+            ${reporterSealed ? (Buffer.from(reporterSealed.ct) as unknown as Uint8Array) : null},
+            ${reporterSealed ? (Buffer.from(reporterSealed.dekCt) as unknown as Uint8Array) : null},
+            ${auth.userId}, ${body.severity}, 'open',
+            ${body.locationZone ?? null},
+            ${locationSealed ? (Buffer.from(locationSealed.ct) as unknown as Uint8Array) : null},
+            ${locationSealed ? (Buffer.from(locationSealed.dekCt) as unknown as Uint8Array) : null},
+            ${body.jurisdiction}
+          )
+          RETURNING id, hazard_code, status, reported_at::text AS reported_at
+        `)) as unknown as Array<{
+          id: string;
+          hazard_code: string;
+          status: string;
+          reported_at: string;
+        }>);
     const row = rows[0]!;
 
     const chainRow = await append(tx, {

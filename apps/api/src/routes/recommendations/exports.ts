@@ -159,6 +159,17 @@ class ExportAborted extends Error {
 
 const uuidParam = z.string().uuid();
 
+// 1.10 (ADR-0009 §3.3): optional clientId body for the export create
+// path. Exports are require-online per §3.6 (server-side PDF render +
+// sign + Tigris PUT) but the queue may still surround the call with
+// Idempotency-Key + clientId for retry-safe semantics — a network blip
+// on the response leg must not double-render + double-anchor the chain.
+const exportCreateBody = z
+  .object({
+    clientId: z.string().uuid().optional(),
+  })
+  .strict();
+
 // ---------------------------------------------------------------------------
 // Resolve the recommendation into the renderable bundle. Decrypts the
 // title + body + every response field; resolves each citation to its
@@ -477,6 +488,56 @@ export function registerRecommendationExportHandlers(group: Hono): void {
       return c.json({ error: 'cannot_export_draft', status }, 422);
     }
 
+    // 1.10 (ADR-0009 §3.3): parse the optional clientId body. The body
+    // is optional (legacy callers pass nothing); when present, the
+    // clientId becomes the canonical export_records.id.
+    const rawBody = await c.req.json().catch(() => null);
+    const bodyParsed = exportCreateBody.safeParse(rawBody ?? {});
+    if (!bodyParsed.success) {
+      return c.json({ error: 'invalid_body', issues: bodyParsed.error.flatten() }, 400);
+    }
+    const exportClientId = bodyParsed.data.clientId;
+
+    // 1.10 §3.3 ratchet-level idempotency. requested_by_user_id anchors
+    // the actor. Same-actor + clientId reuse → 200 with existing row;
+    // cross-actor → 409.
+    if (exportClientId) {
+      const existing = (await db.execute(sql`
+        SELECT id, encode(output_sha256, 'hex') AS output_sha256_hex,
+               byte_size, audit_idx, expires_at::text AS expires_at,
+               requested_by_user_id, encode(signature_sha256, 'hex') AS signature_sha256_hex
+        FROM export_records
+        WHERE id = ${exportClientId}
+        LIMIT 1
+      `)) as unknown as Array<{
+        id: string;
+        output_sha256_hex: string;
+        byte_size: string | number;
+        audit_idx: number | string;
+        expires_at: string;
+        requested_by_user_id: string;
+        signature_sha256_hex: string | null;
+      }>;
+      if (existing.length > 0) {
+        const row = existing[0]!;
+        if (row.requested_by_user_id !== auth.userId) {
+          return c.json({ error: 'client_id_conflict' }, 409);
+        }
+        return c.json(
+          {
+            exportId: row.id,
+            recommendationId,
+            outputSha256: row.output_sha256_hex,
+            signatureSha256: row.signature_sha256_hex,
+            byteSize: Number(row.byte_size),
+            chainIdx: Number(row.audit_idx),
+            expiresAt: row.expires_at,
+          },
+          200,
+        );
+      }
+    }
+
     // Buffers we own and must memzero on every exit path. JS strings
     // (decrypted title / body / response prose) are intentionally
     // omitted — they're immutable and cannot be wiped from the V8 heap
@@ -494,8 +555,8 @@ export function registerRecommendationExportHandlers(group: Hono): void {
       const { renderable, citationsHash } = await resolveRecommendation(recommendationId, db);
 
       // Pre-allocate exportId so the storage key is stable across PUT +
-      // INSERT.
-      const exportId = randomUUID();
+      // INSERT. 1.10 §3.3: use clientId when supplied.
+      const exportId = exportClientId ?? randomUUID();
       const exportedAtIso = new Date().toISOString();
 
       // 2. Render the PDF. The chainIdx footer is dropped per the 1.8

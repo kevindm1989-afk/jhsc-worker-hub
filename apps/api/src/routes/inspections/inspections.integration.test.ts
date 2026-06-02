@@ -1178,3 +1178,150 @@ describe.skipIf(SKIP)('1.9 retrofit: responsibleParty dual-shape on findings', (
     expect(revealBody.responsibleParty).toEqual({ kind: 'name_text', nameText: externalName });
   });
 });
+
+// ---------------------------------------------------------------------------
+// 1.10 (ADR-0009 §3.3): clientId ratchet on the four inspection create
+// surfaces — POST /api/inspections, POST /:id/findings, POST /:id/
+// signatures, POST /findings/:id/promote (the new action_item the
+// promote creates carries the body's clientId as its id), and POST
+// /api/inspection-templates. Each gets a small describe block.
+// ---------------------------------------------------------------------------
+
+describe.skipIf(SKIP)('POST /api/inspections — clientId idempotency (1.10 S1)', () => {
+  const CLIENT_ID = '33333333-3333-4333-8333-333333333333';
+
+  it('first POST with clientId returns the row using clientId as the id', async () => {
+    const { cookie } = await loginAsRep();
+    const template = await createCustomTemplate(cookie);
+    const res = await app.request('/api/inspections', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-requested-with': 'jhsc-web', cookie },
+      body: JSON.stringify({
+        clientId: CLIENT_ID,
+        templateVersionId: template.id,
+        zoneId: 'zone_1',
+      }),
+    });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { id: string };
+    expect(body.id).toBe(CLIENT_ID);
+  });
+
+  it('second POST with same clientId + same payload returns 200 with existing id', async () => {
+    const { cookie } = await loginAsRep();
+    const template = await createCustomTemplate(cookie);
+    const payload = JSON.stringify({
+      clientId: CLIENT_ID,
+      templateVersionId: template.id,
+      zoneId: 'zone_1',
+    });
+    await app.request('/api/inspections', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-requested-with': 'jhsc-web', cookie },
+      body: payload,
+    });
+    const res = await app.request('/api/inspections', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-requested-with': 'jhsc-web', cookie },
+      body: payload,
+    });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { id: string };
+    expect(body.id).toBe(CLIENT_ID);
+  });
+
+  it('absent clientId falls back to gen_random_uuid()', async () => {
+    const { cookie } = await loginAsRep();
+    const template = await createCustomTemplate(cookie);
+    const res = await app.request('/api/inspections', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-requested-with': 'jhsc-web', cookie },
+      body: JSON.stringify({ templateVersionId: template.id, zoneId: 'zone_1' }),
+    });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { id: string };
+    expect(body.id).toMatch(/^[0-9a-f-]{36}$/);
+    expect(body.id).not.toBe(CLIENT_ID);
+  });
+});
+
+describe.skipIf(SKIP)('POST /api/inspections/:id/findings — clientId idempotency (1.10 S1)', () => {
+  const FINDING_CLIENT_ID = '44444444-4444-4444-8444-444444444444';
+
+  async function createInspectionFor(cookie: string): Promise<{ id: string }> {
+    const template = await createCustomTemplate(cookie);
+    const res = await app.request('/api/inspections', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-requested-with': 'jhsc-web', cookie },
+      body: JSON.stringify({ templateVersionId: template.id, zoneId: 'zone_1' }),
+    });
+    return (await res.json()) as { id: string };
+  }
+
+  it('first POST with clientId returns the finding using clientId as the id', async () => {
+    const { cookie } = await loginAsRep();
+    const insp = await createInspectionFor(cookie);
+    const res = await app.request(`/api/inspections/${insp.id}/findings`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-requested-with': 'jhsc-web', cookie },
+      body: JSON.stringify({
+        clientId: FINDING_CLIENT_ID,
+        sectionKey: 'general',
+        itemKey: 'housekeeping',
+        statusVocab: 'ABC_X',
+        statusValue: 'A',
+      }),
+    });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { id: string };
+    expect(body.id).toBe(FINDING_CLIENT_ID);
+  });
+
+  it('replay with same clientId + same payload returns 200 with the existing finding', async () => {
+    const { cookie } = await loginAsRep();
+    const insp = await createInspectionFor(cookie);
+    const payload = JSON.stringify({
+      clientId: FINDING_CLIENT_ID,
+      sectionKey: 'general',
+      itemKey: 'housekeeping',
+      statusVocab: 'ABC_X',
+      statusValue: 'A',
+    });
+    await app.request(`/api/inspections/${insp.id}/findings`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-requested-with': 'jhsc-web', cookie },
+      body: payload,
+    });
+    const res = await app.request(`/api/inspections/${insp.id}/findings`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-requested-with': 'jhsc-web', cookie },
+      body: payload,
+    });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { id: string };
+    expect(body.id).toBe(FINDING_CLIENT_ID);
+  });
+});
+
+describe.skipIf(SKIP)('POST /api/inspection-templates — clientId idempotency (1.10 S1)', () => {
+  const TEMPLATE_CLIENT_ID = '55555555-5555-4555-8555-555555555555';
+
+  it('first POST with clientId returns the template using clientId as the id', async () => {
+    const { cookie } = await loginAsRep();
+    const res = await app.request('/api/inspection-templates', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-requested-with': 'jhsc-web', cookie },
+      body: JSON.stringify({
+        clientId: TEMPLATE_CLIENT_ID,
+        templateCode: 'custom',
+        displayName: 'Idempotent Custom',
+        statusVocab: 'ABC_X',
+        cadence: 'monthly',
+        sections: [{ key: 'g', label: 'G', items: [{ key: 'i', label: 'I' }] }],
+      }),
+    });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { id: string };
+    expect(body.id).toBe(TEMPLATE_CLIENT_ID);
+  });
+});
