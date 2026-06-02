@@ -212,6 +212,7 @@ actionItemsRoute.post('/', async (c) => {
     const existing = (await db.execute(sql`
       SELECT ai.id, ai.sequence_number, ai.status, ai.section,
              ai.start_date::text AS start_date,
+             ai.version,
              m.moved_by_user_id AS created_by_user_id
       FROM action_items ai
       LEFT JOIN action_item_moves m
@@ -224,6 +225,7 @@ actionItemsRoute.post('/', async (c) => {
       status: string;
       section: string;
       start_date: string;
+      version: number;
       created_by_user_id: string | null;
     }>;
     if (existing.length > 0) {
@@ -238,6 +240,10 @@ actionItemsRoute.post('/', async (c) => {
           status: row.status as ActionItemStatus,
           section: row.section as ActionItemSection,
           startDate: row.start_date,
+          // sec-F7 close-out (T-S55): version on the clientId-reuse
+          // path so the typed-client's _server_version is correct
+          // for the next PATCH's If-Match.
+          version: row.version,
         },
         200,
       );
@@ -358,6 +364,8 @@ actionItemsRoute.post('/', async (c) => {
     status: created.status as ActionItemStatus,
     section: created.section as ActionItemSection,
     startDate: created.start_date,
+    // sec-F7 close-out (T-S55): version=1 for freshly-INSERTed row.
+    version: 1,
   });
 });
 

@@ -200,6 +200,74 @@ describe('syncify — mutation create', () => {
     // that later.
     expect(original).not.toHaveBeenCalled();
   });
+
+  it('sec-F10 close-out (T-S57): skips optimistic write + queue when a CLEAN row already exists at the clientId', async () => {
+    // Seed a clean row at a known clientId.
+    const LOCAL_ID = 'cccccccc-cccc-4ccc-8ccc-cccccccccccc';
+    await db.hazards.put({
+      id: LOCAL_ID,
+      hazardCode: 'H-007',
+      title: 'Already canonical',
+      severity: 'high',
+      status: 'open',
+      jurisdiction: 'ON',
+      locationZone: null,
+      reportedAt: '2026-06-02T10:00:00.000Z',
+      description_ct_b64: null,
+      description_dek_ct_b64: null,
+      _sync_state: 'clean',
+      _local_id: LOCAL_ID,
+      _server_version: 3,
+      _base_state_json: '{}',
+      _updated_at_client: '2026-06-02T10:00:00.000Z',
+      _synced_at: '2026-06-02T10:00:00.000Z',
+    });
+
+    const original = vi.fn(async (..._args: unknown[]) => ({ id: 'never-called' }));
+    const routes: Record<string, RouteSpec> = {
+      create: {
+        kind: 'mutation',
+        httpMethod: 'POST',
+        opKind: 'create',
+        entityKind: 'hazard',
+        dexieTable: 'hazards',
+        endpointBuilder: () => '/api/hazards',
+      },
+    };
+    const wrapped = syncify({ create: original }, routes) as {
+      create: (...args: unknown[]) => Promise<unknown>;
+    };
+
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+
+    // Re-fire the create with the SAME clientId + a different title.
+    // The old path would have spread the new body over the clean row +
+    // reset _sync_state to 'dirty_create' + enqueued a second create.
+    const result = (await wrapped.create({
+      clientId: LOCAL_ID,
+      title: 'DIFFERENT title that should NOT clobber',
+      description: 'new desc',
+      severity: 'high',
+      jurisdiction: 'ON',
+    })) as { id: string; _sync_state: string; title: string };
+
+    // The returned row is the EXISTING clean row, unchanged.
+    expect(result.id).toBe(LOCAL_ID);
+    expect(result._sync_state).toBe('clean');
+    expect(result.title).toBe('Already canonical');
+
+    // No queue row was enqueued.
+    const queue = await db.sync_queue.toArray();
+    expect(queue).toHaveLength(0);
+
+    // The Dexie row itself was NOT mutated.
+    const row = await db.hazards.get(LOCAL_ID);
+    expect(row?.title).toBe('Already canonical');
+    expect(row?._sync_state).toBe('clean');
+
+    // A warn fires so the bug is discoverable in dev.
+    expect(warnSpy).toHaveBeenCalled();
+  });
 });
 
 describe('syncify — mutation PATCH', () => {

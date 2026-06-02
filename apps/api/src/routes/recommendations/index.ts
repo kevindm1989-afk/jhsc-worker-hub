@@ -402,7 +402,7 @@ recommendationsRoute.post('/', async (c) => {
   if (body.clientId) {
     const existing = (await db.execute(sql`
       SELECT id, recommendation_number, jurisdiction, status,
-             drafted_at::text AS drafted_at, drafted_by_user_id
+             drafted_at::text AS drafted_at, drafted_by_user_id, version
       FROM recommendations
       WHERE id = ${body.clientId}
       LIMIT 1
@@ -413,6 +413,7 @@ recommendationsRoute.post('/', async (c) => {
       status: string;
       drafted_at: string;
       drafted_by_user_id: string;
+      version: number;
     }>;
     if (existing.length > 0) {
       const row = existing[0]!;
@@ -426,6 +427,10 @@ recommendationsRoute.post('/', async (c) => {
           jurisdiction: row.jurisdiction as RecommendationJurisdiction,
           status: row.status as RecommendationStatus,
           draftedAt: row.drafted_at,
+          // sec-F7 close-out (T-S55): version field on the clientId-
+          // reuse path so the typed-client's _server_version is
+          // correct for the next PATCH.
+          version: row.version,
         },
         200,
       );
@@ -510,6 +515,9 @@ recommendationsRoute.post('/', async (c) => {
         jurisdiction: body.jurisdiction,
         status: 'draft' as RecommendationStatus,
         draftedAt: created.draftedAt,
+        // sec-F7 close-out (T-S55): freshly-INSERTed recommendation
+        // row has version=1 (migration 0009 DEFAULT).
+        version: 1,
       },
       201,
     );

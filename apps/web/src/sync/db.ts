@@ -1,47 +1,67 @@
 // Dexie schema for offline-first sync (Milestone 1.10 S2, ADR-0009 §3.1).
 //
-// One Dexie database, fifteen tables. Every mutable entity row carries six
-// synthetic `_sync_` columns so the queue worker (queue-worker.ts) and the
-// conflict resolution UI (S3) can reason uniformly about local vs server
-// state. The schema-version constant is exported for tests; future
-// migrations append a `.version(N).upgrade()` block (Dexie idiom — append-
-// only forward migrations matching the server-side migrations posture from
-// CLAUDE.md "migrations are append-only").
+// One Dexie database, thirteen tables. Every mutable entity row carries
+// six synthetic `_sync_` columns so the queue worker (queue-worker.ts)
+// and the conflict resolution UI (S3) can reason uniformly about local
+// vs server state. The schema-version constant is exported for tests;
+// future migrations append a `.version(N).upgrade()` block (Dexie idiom
+// — append-only forward migrations matching the server-side migrations
+// posture from CLAUDE.md "migrations are append-only").
 //
-// On-disk encryption posture (per ADR §3.1, SECURITY.md §2.10 T-S1..T-S3).
+// On-disk encryption posture (per ADR §3.1, SECURITY.md §2.10 T-S1..T-S3,
+// priv-F1 close-out — S5 fix bundle, deferred to 1.12 per user
+// authorization).
 //
-// IndexedDB is NOT encrypted at rest on the device. The rep's phone may be
-// lost, stolen, or seized; the bytes on disk are recoverable by anyone
-// with physical access and a forensic tool. The Dexie store therefore
-// carries:
+// IndexedDB is NOT encrypted at rest on the device. The rep's phone may
+// be lost, stolen, or seized; the bytes on disk are recoverable by
+// anyone with physical access and a forensic tool. The Dexie store
+// CURRENTLY carries:
 //
-//   - Envelope-encrypted ciphertext for every sensitive field (the same
-//     sealed-box shape the server uses on /api/auth/session via the
-//     workplace public key). A forensic dump yields blobs whose DEKs are
-//     sealed to a key the rep doesn't have. The workplace private key
-//     never leaves the server.
-//   - Plaintext for non-PI metadata only (status enums, timestamps, ids,
-//     section keys, jurisdiction codes, zone ids, citation markers, recom-
-//     mendation numbers, action-item types). These were never encrypted in
-//     Postgres either; the local cache mirrors the server's projection
-//     shape.
-//   - NEVER plaintext decrypt results. Reveal endpoints are always live-
-//     fetched from the server and the plaintext lives in JS heap memory
-//     for the lifetime of the view component only. The reveal route is
-//     online-only (ADR §3.6); offline reveal is structurally impossible
-//     because the workplace private key lives on the server.
+//   - Plaintext rep-typed PI for offline-draft / pending-sync rows
+//     (description, body, observation, corrective_action, responsible_
+//     party, signature_note, reporter_identity, recommendation title /
+//     body). The original 1.10 plan was to envelope-encrypt these
+//     fields under the workplace public key at write time on the
+//     client, mirroring the server-side ciphertext shape; that plan
+//     would have required refactoring every prior milestone's wire
+//     format to accept ciphertext (massive blast radius across 1.5
+//     through 1.9). The S5 reviewer's priv-F1 critical finding
+//     documented the gap honestly: see SECURITY.md §2.10 T-S1 + T-S2
+//     mitigation text + docs/runbooks/offline-sync.md §"1.12
+//     hardening backlog" for the deferral.
+//   - Plaintext for non-PI metadata (status enums, timestamps, ids,
+//     section keys, jurisdiction codes, zone ids, citation markers,
+//     recommendation numbers, action-item types). These were never
+//     encrypted in Postgres either; the local cache mirrors the
+//     server's projection shape.
+//   - NEVER plaintext decrypt results from reveal endpoints. Reveal
+//     responses are always live-fetched from the server (require-
+//     online, see service-worker.ts REQUIRE_ONLINE_PATTERNS) and the
+//     plaintext lives in JS heap memory for the lifetime of the view
+//     component only. The sec-F1 close-out (T-S51) closed the
+//     service-worker cache hole that previously let a once-revealed
+//     plaintext live in the workbox cache.
 //   - NEVER step-up grants. The auth cookie is `SameSite=Strict` +
-//     `HttpOnly` and never visible to JS, let alone persisted to Dexie.
-//     Step-up freshness state lives only in the session cookie's claims;
-//     it cannot be cached offline.
-//   - `evidence_pending_uploads._local_ciphertext_b64` IS allowed because
-//     it is envelope-encrypted under the workplace public key at capture
-//     time (1.7 sealed-box pattern). It is dropped from the row after the
-//     three-step upload finalizes (§3.8).
+//     `HttpOnly` and never visible to JS, let alone persisted to
+//     Dexie. Step-up freshness state lives only in the session
+//     cookie's claims; it cannot be cached offline.
+//   - `evidence_pending_uploads._local_ciphertext_b64` IS envelope-
+//     encrypted under the workplace public key at capture time (1.7
+//     sealed-box pattern). It is dropped from the row after the
+//     three-step upload finalizes (§3.8). Evidence captures are
+//     therefore SAFER on the device than rep-typed hazard / finding /
+//     recommendation drafts (which are plaintext per the priv-F1
+//     gap above).
 //
-// A future 1.12 schema change for IndexedDB-at-rest encryption (deferred
-// per the ADR §"Don't") would be a version 2 bump that copies rows into
-// an encrypted shape — out of scope for 1.10.
+// LOST-DEVICE INCIDENT RESPONSE (priv-F1 close-out): the rep's draft
+// rows + sync_queue payloads leak plaintext on a lost / stolen /
+// seized phone. Revoke-the-session is the immediate mitigation
+// (docs/runbooks/offline-sync.md §11 "Lost or stolen device" covers
+// the procedure). The 1.12 hardening backlog includes the structural
+// fix: WebAuthn PRF or session-derived Dexie at-rest encryption that
+// transparently wraps the entire database without changing wire
+// formats. Until then the rep treats the device as carrying
+// sensitive data.
 //
 // Schema-version bumps follow the Dexie idiom:
 //
@@ -54,6 +74,17 @@
 // The `.version(N)` chain MUST stay strictly increasing; never edit a
 // prior `.version(N)` block (Dexie writes the version into the database
 // file and refuses to open older shapes).
+//
+// REMOVED IN S5 FIX BUNDLE (per priv-F1 close-out + the unmerged
+// branch posture — no production device has ever opened a v1 with
+// these tables): the workplace_keys_cache and
+// workplace_signing_keys_cache tables were declared in the original
+// S2 schema but never populated by any code path. They were reserved
+// for the at-rest envelope-encrypted Dexie cache that priv-F1
+// describes as deferred to 1.12. Keeping empty tables in the schema
+// was misleading dead code that the next reviewer would have to
+// re-litigate; the next bump (when the 1.12 hardening lands) will
+// re-introduce them with the actual population path.
 
 import Dexie, { type Table } from 'dexie';
 import type { SyncEntityKind, SyncOperationKind, SyncOperationState } from '@jhsc/shared-types';
@@ -319,22 +350,12 @@ export interface LegalClauseRow {
   readonly cachedAt: string;
 }
 
-/** Cached workplace public key (the envelope-encryption recipient).
- * Refreshed on each successful sync drain via /api/auth/session. */
-export interface WorkplaceKeyCacheRow {
-  readonly id: string;
-  readonly publicKeyB64: string;
-  readonly cachedAt: string;
-}
-
-/** Cached workplace signing key (Ed25519 — verification of past exports
- * in offline mode). */
-export interface WorkplaceSigningKeyCacheRow {
-  readonly id: string;
-  readonly algorithm: string;
-  readonly publicKeyB64: string;
-  readonly cachedAt: string;
-}
+// REMOVED in S5 fix bundle (priv-F1 close-out, T-S1 update):
+// WorkplaceKeyCacheRow + WorkplaceSigningKeyCacheRow were declared
+// here but never populated. They were reserved for the 1.12 at-rest
+// Dexie envelope-encryption design. Removing the dead types prevents
+// the next reviewer from reading them as evidence that client-side
+// sealing is wired (it isn't — see the file header).
 
 /** A row in the sync queue — the in-flight work the queue worker drains
  * (ADR §3.2). */
@@ -443,8 +464,10 @@ export class JhscOfflineDb extends Dexie {
   // Read-only caches.
   inspection_templates!: Table<InspectionTemplateRow, string>;
   legal_clauses!: Table<LegalClauseRow, string>;
-  workplace_keys_cache!: Table<WorkplaceKeyCacheRow, string>;
-  workplace_signing_keys_cache!: Table<WorkplaceSigningKeyCacheRow, string>;
+  // priv-F1 close-out: workplace_keys_cache + workplace_signing_keys_
+  // cache removed (declared but never populated; misleading dead
+  // code). Re-added in the 1.12 hardening bump when the at-rest
+  // encryption design lands.
   // Plumbing.
   sync_queue!: Table<SyncQueueRow, number>;
   sync_conflicts!: Table<SyncConflictRow, number>;
@@ -510,9 +533,10 @@ export class JhscOfflineDb extends Dexie {
       // Read-only legal corpus cache (small enough to scan; an index on
       // statute_code + clause_id is the primary picker shape).
       legal_clauses: 'id, statuteCode, clauseId, jurisdiction',
-      // Workplace KEK + signing-key caches.
-      workplace_keys_cache: 'id, cachedAt',
-      workplace_signing_keys_cache: 'id, cachedAt',
+      // priv-F1 close-out: workplace_keys_cache +
+      // workplace_signing_keys_cache table declarations removed (see
+      // file header). 1.12 hardening re-introduces them with an actual
+      // populate path.
       // Sync queue: PK ++id; the hot-path index is nextAttemptAt for the
       // worker's "what's ready to drain?" query.
       sync_queue:
@@ -581,4 +605,58 @@ export function cleanSyncMetadata(
     _updated_at_client: t,
     _synced_at: t,
   };
+}
+
+/**
+ * sec-F9 close-out (T-S56): drop the per-session tables on logout so a
+ * subsequent rep signing in on the same device doesn't inherit the
+ * prior session's queue, conflicts, base-state cache, or background-
+ * refreshed caches.
+ *
+ * Tables cleared:
+ *   - sync_queue: rep's queued ops are bound to their actor identity
+ *     server-side (Idempotency-Key is keyed on actor_user_id +
+ *     payload_hash). A queued op shipped under a different rep's
+ *     auth cookie would either 404 (different actor) or land in the
+ *     other rep's chain — neither is the right shape.
+ *   - sync_conflicts: conflict rows reference local-vs-server state
+ *     that's only meaningful within the original session.
+ *   - _base_state: cached server-state snapshots indexed by entity
+ *     local id; safe to drop and re-fetch on next login.
+ *   - legal_clauses: the corpus snapshot may have changed between
+ *     sessions; refresh-on-next-online is the right shape (1.4
+ *     T-LC3).
+ *   - inspection_templates: cached template snapshots; same shape.
+ *
+ * Tables NOT cleared:
+ *   - hazards / action_items / inspections / etc.: the entity caches
+ *     can be re-reconciled from the server via background-refresh on
+ *     next login. Dropping them would force a full re-download on
+ *     every sign-in which is hostile on metered connections. The
+ *     priv-F1 plaintext-at-rest residual is the only privacy concern
+ *     here and that's handled by the lost-device runbook (revoke-
+ *     the-session). For the same-rep-signs-back-in case, preserving
+ *     the entity caches matches the rep's mental model ("my drafts
+ *     are still here").
+ *   - evidence_pending_uploads: same shape — the rep wants their
+ *     pre-capture uploads to survive a session bounce.
+ *
+ * The queue worker singleton (worker-singleton.ts) is reset
+ * separately by the auth/logout handler via setWorkerForTests(null);
+ * the test seam doubles as the production reset hook because the
+ * shape is the same — drop the singleton, the next getWorker() call
+ * builds a fresh one.
+ */
+export async function clearOnLogout(): Promise<void> {
+  await db.transaction(
+    'rw',
+    [db.sync_queue, db.sync_conflicts, db._base_state, db.legal_clauses, db.inspection_templates],
+    async () => {
+      await db.sync_queue.clear();
+      await db.sync_conflicts.clear();
+      await db._base_state.clear();
+      await db.legal_clauses.clear();
+      await db.inspection_templates.clear();
+    },
+  );
 }

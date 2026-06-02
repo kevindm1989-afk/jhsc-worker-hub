@@ -5,12 +5,34 @@
 // file uses it via workbox-precaching to install the app shell. The
 // rest of the SW handles `/api/*` interception:
 //
-//   - Safe methods (GET/HEAD/OPTIONS): network-first; cache fallback.
-//   - Mutating methods on the require-online allow-list: synthetic 503
-//     `network_required` (the typed-client wrapper surfaces the banner).
+//   - Require-online routes (reveals, exports, downloads, auth
+//     lifecycle): network-only for ALL methods (GET + mutation). On
+//     network error, synthetic 503 `network_required`. NEVER cached
+//     (see sec-F1 close-out below).
+//   - Safe methods (GET/HEAD/OPTIONS) elsewhere: network-first; cache
+//     fallback. Workbox CacheableResponsePlugin filters on status only;
+//     the require-online check above is the upstream gate that prevents
+//     reveal plaintext from ever entering this cache.
 //   - Mutating methods elsewhere: try network with a 5s timeout; on
 //     failure, postMessage the foreground (so the queue worker can
 //     enqueue the request) and return a synthetic 202 `sw_queued`.
+//
+// sec-F1 close-out (S5 fix bundle, T-S51): the require-online
+// allow-list check now runs OUTSIDE the if(isMutation) branch — every
+// GET reveal (e.g. /api/evidence/:id/decrypt, /api/hazards/:id/reporter,
+// /api/inspections/findings/:id, /api/recommendations/:id/reveal,
+// /api/recommendations/exports/:id/download,
+// /api/inspections/exports/:id/download) is network-only with no
+// cache write. The prior S2 path routed those GETs through NetworkFirst
+// + CacheableResponsePlugin({statuses:[200]}); workbox's
+// CacheableResponsePlugin ignores Cache-Control: no-store, so a once-
+// successful reveal lived in `jhsc-api-reads-v1` indefinitely and
+// served the cached plaintext on offline re-request without firing a
+// fresh step-up check OR a new chain anchor. The fix preserves
+// CLAUDE.md #2 (chain-of-custody on every reveal) + CLAUDE.md #16
+// (step-up gating on every export). Per the threat model T-S3 / T-S22
+// the invariant is "no decrypted plaintext at rest"; this closes the
+// hole the workbox cache was opening.
 //
 // Notes on what the SW does NOT do:
 //   - It does NOT read Dexie directly. Dexie runs in the foreground only.
@@ -138,8 +160,23 @@ self.addEventListener('fetch', (event: FetchEvent) => {
   if (!req.url.startsWith(self.location.origin)) return; // cross-origin: pass-through
   const url = new URL(req.url);
   if (!url.pathname.startsWith('/api/')) return; // app shell handled by precache
+  // sec-F1 close-out (T-S51): require-online routes are network-only
+  // for ALL methods (GET + mutation). The GET branch previously fell
+  // through to NetworkFirst, which workbox cached on 200 — caching
+  // step-up-gated reveal plaintext indefinitely. Now reveals never
+  // touch the cache; if the network fails we return synthetic 503
+  // `network_required` so the typed-client wrapper surfaces the
+  // NetworkRequiredBanner instead of replaying stale plaintext.
+  if (isRequireOnline(url)) {
+    event.respondWith(handleRequireOnline(req, url));
+    return;
+  }
   if (!isMutation(req.method)) {
-    // Safe method: network-first with cache fallback.
+    // Safe method (and NOT require-online): network-first with cache
+    // fallback. The require-online gate above prevents reveal /
+    // export / download plaintext from ever entering this cache;
+    // remaining GETs are list/detail metadata projections that are
+    // PI-clean by construction (T-S22).
     event.respondWith(
       new NetworkFirst({
         cacheName: 'jhsc-api-reads-v1',
@@ -147,11 +184,6 @@ self.addEventListener('fetch', (event: FetchEvent) => {
         networkTimeoutSeconds: 4,
       }).handle({ event, request: req }),
     );
-    return;
-  }
-  // Mutation: branch on the require-online allow-list.
-  if (isRequireOnline(url)) {
-    event.respondWith(handleRequireOnline(req, url));
     return;
   }
   event.respondWith(handleQueueableMutation(req));

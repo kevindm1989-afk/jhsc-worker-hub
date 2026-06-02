@@ -584,6 +584,11 @@ inspectionsRoute.post('/', async (c) => {
       if (row.conducted_by_user_id !== auth.userId) {
         return c.json({ error: 'client_id_conflict' }, 409);
       }
+      // sec-F7 close-out (T-S55): fetch version for the clientId-
+      // reuse path so the typed-client's _server_version is correct.
+      const versionRow = (await db.execute(sql`
+        SELECT version FROM inspections WHERE id = ${row.id} LIMIT 1
+      `)) as unknown as Array<{ version: number }>;
       return c.json(
         {
           id: row.id,
@@ -592,6 +597,7 @@ inspectionsRoute.post('/', async (c) => {
           zoneId: row.zone_id,
           state: row.state as InspectionConductState,
           scheduledFor: row.scheduled_for,
+          version: versionRow[0]?.version ?? 1,
         },
         200,
       );
@@ -651,6 +657,9 @@ inspectionsRoute.post('/', async (c) => {
       zoneId: body.zoneId,
       state: 'scheduled' as InspectionConductState,
       scheduledFor: body.scheduledFor ?? null,
+      // sec-F7 close-out (T-S55): version=1 for the freshly INSERTed
+      // inspection row.
+      version: 1,
     });
   } catch (err) {
     if (err instanceof InspectionWriteAborted) {
@@ -1085,6 +1094,11 @@ inspectionsRoute.post('/:id/findings', async (c) => {
       if (row.conducted_by_user_id !== auth.userId) {
         return c.json({ error: 'client_id_conflict' }, 409);
       }
+      // sec-F7 close-out (T-S55): fetch version for the reuse path
+      // so the typed-client's _server_version is correct.
+      const versionRow = (await db.execute(sql`
+        SELECT version FROM inspection_findings WHERE id = ${row.id} LIMIT 1
+      `)) as unknown as Array<{ version: number }>;
       return c.json(
         {
           id: row.id,
@@ -1098,6 +1112,7 @@ inspectionsRoute.post('/:id/findings', async (c) => {
           hasObservation: row.has_observation,
           hasCorrectiveAction: row.has_corrective_action,
           hasResponsibleParty: row.has_responsible_party,
+          version: versionRow[0]?.version ?? 1,
         },
         200,
       );
@@ -1161,6 +1176,9 @@ inspectionsRoute.post('/:id/findings', async (c) => {
     hasObservation: obsSealed !== null,
     hasCorrectiveAction: correctiveSealed !== null,
     hasResponsibleParty,
+    // sec-F7 close-out (T-S55): freshly-INSERTed finding row has
+    // version=1 (migration 0009 DEFAULT).
+    version: 1,
   });
 });
 

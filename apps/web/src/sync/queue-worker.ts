@@ -771,6 +771,23 @@ export async function enqueueOp(args: EnqueueArgs): Promise<number> {
     }
   }
 
+  // priv-F1 close-out (S5 fix bundle, T-S1 update): sync_queue.payload
+  // stores the rep-typed body as PLAINTEXT JSON. For hazard / action_
+  // item / inspection_finding / recommendation creates this includes
+  // description, body, observation, corrective_action, responsible_
+  // party, signature_note, reporter_identity, recommendation title /
+  // body — fields the server seals before persisting. The original
+  // 1.10 plan had the client envelope-encrypt under the workplace
+  // public key before enqueue (mirroring the server's seal shape) so
+  // a forensic dump of Dexie would yield only ciphertext; that plan
+  // required refactoring every prior milestone's wire format to
+  // accept ciphertext on the input side, which was out of scope for
+  // 1.10. The 1.12 hardening backlog (docs/runbooks/offline-sync.md
+  // §12) covers the structural fix via WebAuthn PRF / session-
+  // derived Dexie at-rest encryption that wraps the entire DB
+  // transparently without changing wire formats. Until then, the
+  // rep's device carries plaintext drafts; lost-device incident
+  // response is documented in the runbook §11.
   const newRow: Omit<SyncQueueRow, 'id'> = {
     kind: args.kind,
     entityKind: args.entityKind,

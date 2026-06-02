@@ -13,6 +13,8 @@ import {
   JhscOfflineDb,
   baseStateKey,
   cleanSyncMetadata,
+  clearOnLogout,
+  db,
   freshSyncMetadata,
 } from './db';
 
@@ -45,6 +47,9 @@ describe('JhscOfflineDb schema', () => {
   it('has every expected mutable-entity table', async () => {
     await testDb.open();
     const names = testDb.tables.map((t) => t.name).sort();
+    // priv-F1 close-out: workplace_keys_cache +
+    // workplace_signing_keys_cache removed in S5 fix bundle
+    // (declared but never populated; deferred to 1.12 hardening).
     const expected = [
       '_base_state',
       'action_item_moves',
@@ -63,12 +68,13 @@ describe('JhscOfflineDb schema', () => {
       'recommendations',
       'sync_conflicts',
       'sync_queue',
-      'workplace_keys_cache',
-      'workplace_signing_keys_cache',
     ];
     for (const name of expected) {
       expect(names).toContain(name);
     }
+    // Assert the removed tables are NOT present.
+    expect(names).not.toContain('workplace_keys_cache');
+    expect(names).not.toContain('workplace_signing_keys_cache');
   });
 
   it('indexes _sync_state on every mutable-entity table', async () => {
@@ -106,12 +112,9 @@ describe('JhscOfflineDb schema', () => {
     await testDb.open();
     // The read-only caches mirror the server's canonical id and refresh
     // on each sync drain; they don't carry the _sync_ metadata.
-    const readOnlyTables = [
-      'inspection_templates',
-      'legal_clauses',
-      'workplace_keys_cache',
-      'workplace_signing_keys_cache',
-    ];
+    // workplace_keys_cache / workplace_signing_keys_cache removed in
+    // S5 fix bundle per priv-F1 close-out.
+    const readOnlyTables = ['inspection_templates', 'legal_clauses'];
     for (const tableName of readOnlyTables) {
       const table = testDb.table(tableName);
       const indexNames = table.schema.indexes.map((i) => i.name);
@@ -222,5 +225,120 @@ describe('JhscOfflineDb schema', () => {
   it('_base_state composite key helper is stable', () => {
     expect(baseStateKey('hazard', 'aaaa-bbbb')).toBe('hazard:aaaa-bbbb');
     expect(baseStateKey('recommendation', 'xyz')).toBe('recommendation:xyz');
+  });
+});
+
+describe('clearOnLogout (sec-F9 close-out, T-S56)', () => {
+  beforeEach(async () => {
+    await db.open();
+    await db.sync_queue.clear();
+    await db.sync_conflicts.clear();
+    await db._base_state.clear();
+    await db.legal_clauses.clear();
+    await db.inspection_templates.clear();
+    await db.hazards.clear();
+  });
+
+  afterEach(async () => {
+    await db.sync_queue.clear();
+    await db.sync_conflicts.clear();
+    await db._base_state.clear();
+    await db.legal_clauses.clear();
+    await db.inspection_templates.clear();
+    await db.hazards.clear();
+  });
+
+  it('drops sync_queue, sync_conflicts, _base_state, legal_clauses, inspection_templates', async () => {
+    // Seed each table.
+    await db.sync_queue.add({
+      kind: 'create',
+      entityKind: 'hazard',
+      entityLocalId: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+      payload: '{}',
+      httpMethod: 'POST',
+      endpoint: '/api/hazards',
+      ifMatchEtag: null,
+      idempotencyKey: 'idem-1',
+      attemptCount: 0,
+      nextAttemptAt: '2026-06-02T10:00:00.000Z',
+      state: 'queued',
+      lastError: null,
+      createdAt: '2026-06-02T10:00:00.000Z',
+      dependsOnQueueId: null,
+      pauseReason: null,
+    });
+    await db.sync_conflicts.add({
+      entityKind: 'hazard',
+      entityLocalId: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+      localStateJson: '{}',
+      serverStateJson: '{}',
+      baseStateJson: '{}',
+      serverVersion: 1,
+      detectedAt: '2026-06-02T10:00:00.000Z',
+      resolved: 0,
+    });
+    await db._base_state.put({
+      key: 'hazard:aaaa-bbbb',
+      entityKind: 'hazard',
+      entityLocalId: 'aaaa-bbbb',
+      version: 1,
+      stateJson: '{}',
+      cachedAt: '2026-06-02T10:00:00.000Z',
+    });
+    await db.legal_clauses.put({
+      id: 'lc-1',
+      statuteCode: 'OHSA',
+      clauseId: 's.9(20)',
+      versionDate: '2024-01-01',
+      citation: 'OHSA s.9(20)',
+      summary: 'Notice of Recommendation',
+      jurisdiction: 'ON',
+      cachedAt: '2026-06-02T10:00:00.000Z',
+    });
+    await db.inspection_templates.put({
+      id: 't-1',
+      templateCode: 'zone_monthly',
+      versionNumber: 1,
+      displayName: 'Zone Monthly',
+      statusVocab: 'standard',
+      cadence: 'monthly',
+      requiresThreeSignatures: false,
+      sections: [],
+      cachedAt: '2026-06-02T10:00:00.000Z',
+    });
+    // Seed an entity row that should SURVIVE the logout clear.
+    await db.hazards.put({
+      id: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+      hazardCode: 'H-001',
+      title: 'Test',
+      severity: 'low',
+      status: 'open',
+      jurisdiction: 'ON',
+      locationZone: null,
+      reportedAt: '2026-06-02T10:00:00.000Z',
+      description_ct_b64: null,
+      description_dek_ct_b64: null,
+      ...cleanSyncMetadata('aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa', 1, '{}'),
+    });
+
+    // Sanity: rows exist.
+    expect(await db.sync_queue.count()).toBe(1);
+    expect(await db.sync_conflicts.count()).toBe(1);
+    expect(await db._base_state.count()).toBe(1);
+    expect(await db.legal_clauses.count()).toBe(1);
+    expect(await db.inspection_templates.count()).toBe(1);
+    expect(await db.hazards.count()).toBe(1);
+
+    await clearOnLogout();
+
+    // Per-session tables are drained.
+    expect(await db.sync_queue.count()).toBe(0);
+    expect(await db.sync_conflicts.count()).toBe(0);
+    expect(await db._base_state.count()).toBe(0);
+    expect(await db.legal_clauses.count()).toBe(0);
+    expect(await db.inspection_templates.count()).toBe(0);
+    // Entity caches survive (the rep may sign back in and expect
+    // their drafts to still be there).
+    expect(await db.hazards.count()).toBe(1);
   });
 });

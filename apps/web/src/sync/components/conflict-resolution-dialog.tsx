@@ -1,55 +1,72 @@
 // Three-way merge conflict resolution dialog (Milestone 1.10 S3,
-// ADR-0009 §3.7, SECURITY.md §2.10 T-S7 / T-S8 / T-S26 / T-S28).
+// ADR-0009 §3.7, SECURITY.md §2.10 T-S7 / T-S8 / T-S26 / T-S28 /
+// T-S53).
 //
-// The hardest UI in this slice. The rep arrives here via the
-// SyncPanel → "Resolve" button on a sync_conflicts row. The dialog
-// presents three columns:
+// S5 fix bundle (priv-F4 + sec-F3 + sec-F4 close-out, per user
+// authorization): the Apply pipeline is DISABLED in 1.10 and lands in
+// 1.12. The dialog ships VIEW-ONLY in 1.10. The reasoning:
+//
+//   sec-F3: the prior defaultEndpointForKind map shipped requests to
+//     endpoints that don't exist server-side
+//     (action_item_move → /move s.b. /moves; finding_promotion →
+//     /findings/:id s.b. /promote; evidence_finalize → /finalize s.b.
+//     /; withdraw-duplicate didn't exist anywhere). Every chain-
+//     anchored resolution dead-lettered after 8 retries; the amber
+//     chip never cleared; the dead-letter row's lastError leaked the
+//     attempted URL.
+//   sec-F4: the keep_local / manual_merge paths shipped the raw
+//     local Dexie row (carrying _sync_* metadata + id + version +
+//     createdAt + updatedAt) verbatim as the PATCH body — every
+//     server PATCH route uses .strict() Zod schemas, so the request
+//     400'd as invalid_body and dead-lettered.
+//   priv-F4: the encrypted-field reveal dispatched step-up but never
+//     fetched plaintext, so the rep made a substantive evidentiary
+//     decision (pick local vs server for an encrypted body) against
+//     two unreadable placeholders. Burning a step-up grant on a non-
+//     functional affordance is a CLAUDE.md #16 spirit violation.
+//
+// Per user authorization, the 1.10 surface is:
+//
+//   - Three-way comparison columns (Yours / Theirs / Base) SHIP — the
+//     rep can compare any plaintext metadata fields side-by-side.
+//   - Encrypted-field rows render an honest placeholder: "Encrypted.
+//     The Apply pipeline ships in 1.12. To compare encrypted bodies
+//     in 1.10, contact your operator." No Reveal button (no step-up
+//     dispatch for a no-op).
+//   - Apply button DISABLED with an explanatory notice pointing the
+//     rep at the operator-script path documented in
+//     docs/runbooks/offline-sync.md §7 ("Conflict resolution
+//     stance").
+//   - The defaultEndpointForKind map + the resolution-submission
+//     code (applyResolution) are removed entirely. They are not
+//     called when Apply is disabled, and keeping the dead code
+//     invited a future PR to silently re-enable the broken pipeline.
+//
+// The 1.12 pipeline backlog covers: correct endpoint mapping per
+// entity kind, strip _sync_* metadata before PATCH, wire encrypted-
+// field decrypt via the existing reveal endpoints with step-up, full
+// integration test against every chain-anchored variant. Documented
+// in docs/runbooks/offline-sync.md §12 (1.12 hardening backlog).
+//
+// The original three-way framing remains in the comments below for
+// the 1.12 implementer to follow:
 //
 //   - "Yours"  — the local snapshot at the time the 409 came back
 //   - "Theirs" — the server's canonical row from the 409 response
 //   - "Base"   — the _base_state_json the rep had cached before the
 //                divergence (i.e. what we thought the server had)
 //
-// Rights-protective copy is a hard requirement (T-S7):
+// Rights-protective copy (T-S7) is preserved across the dialog:
 //   - "Yours" vs "Theirs" — neutral framing.
 //   - No "Local edits will be lost" shame copy.
-//   - The chain-anchored option uses the verbatim ADR §3.7 framing
-//     ("You submitted #3 offline at 10:14am; the server received
-//     another submit for #3 at 11:02am. Both are now anchored in
-//     the chain. Pick which one is the canonical text; the other
-//     becomes a withdrawn record.").
-//
-// Encrypted-field handling (T-S26, T-S28):
-//   - Encrypted fields (observation, body, response body, signature
-//     note, description) render as "Encrypted · Reveal to compare"
-//     with a button. Tapping fires
-//     stepUpEmitter.dispatch('conflict.reveal.<entityKind>') so the
-//     global step-up modal can grant a 60s freshness window.
-//   - The workplace KEK lives on the server; offline reveal is
-//     structurally impossible (ADR §3.6). When offline, the dialog
-//     surfaces the NetworkRequiredBanner inline.
-//
-// Resolution paths:
-//   - keep_local — Apply button → "Keep yours"; queues a retry with
-//     the local payload + serverVersion as If-Match
-//   - keep_remote — "Accept server"; clears the local dirty state +
-//     drops the queue row; entity row absorbs serverState
-//   - keep_both_chain_anchored — only for chain-anchored events
-//     (action_item.moved, recommendation.submitted, inspection.signed,
-//     recommendation.exported). Picks a canonical, marks the other a
-//     withdrawn duplicate.
-//   - manual_merge — opens a per-differing-field picker (Keep yours /
-//     Keep theirs); the merged payload is queued as a fresh PATCH.
+//   - The "Apply unavailable" notice points at the operator path
+//     without anxiety-inducing language.
 
-import { useCallback, useMemo, useState } from 'react';
-import { ChevronLeft, Eye, GitMerge, Lock, X } from 'lucide-react';
+import { useMemo, useState } from 'react';
+import { ChevronLeft, GitMerge, Info, Lock, X } from 'lucide-react';
 import { Button } from '@/components/ui/button';
-import { stepUpEmitter } from '@/auth/api';
-import { type SyncConflictResolution, type SyncEntityKind } from '@jhsc/shared-types';
-import { baseStateKey, cleanSyncMetadata, db, nowIso, type SyncConflictRow } from '../db';
-import { enqueueOp } from '../queue-worker';
-import { newClientId } from '../typed-client';
-import { NetworkRequiredBanner } from './network-required-banner';
+import { type SyncEntityKind } from '@jhsc/shared-types';
+import { type SyncConflictRow } from '../db';
 
 // ---------------------------------------------------------------------------
 // Field classification
@@ -88,9 +105,10 @@ const METADATA_FIELDS = new Set([
   'updatedAt',
 ]);
 
-/** Entity kinds where keep_both_chain_anchored is a valid resolution.
- * Per ADR §3.7, these are the chain-anchored events whose duplicate
- * can be carried as a withdrawn record rather than discarded. */
+/** Entity kinds where the chain-anchored "anchor both" resolution
+ * would land in the 1.12 pipeline. Kept here as documentation for the
+ * 1.12 implementer; not consumed in 1.10 because the Apply path is
+ * disabled. */
 const CHAIN_ANCHORED_KINDS = new Set<SyncEntityKind>([
   'action_item_move',
   'recommendation',
@@ -139,82 +157,29 @@ interface ConflictResolutionDialogProps {
   readonly open: boolean;
   readonly conflict: SyncConflictRow;
   readonly onClose: () => void;
-  readonly onResolved: () => void;
+  /**
+   * No-op in 1.10 (T-S53). Kept on the prop surface so 1.10 call
+   * sites (sync-panel) don't need to change; the 1.12 Apply pipeline
+   * will start calling it again. The current dialog never resolves
+   * anything — Apply is disabled and the conflict-row clearing is an
+   * operator action.
+   */
+  readonly onResolved?: () => void;
 }
 
 export function ConflictResolutionDialog({
   open,
   conflict,
   onClose,
-  onResolved,
+  onResolved: _onResolved,
 }: ConflictResolutionDialogProps): JSX.Element | null {
+  void _onResolved;
   const local = useMemo(() => safeParse(conflict.localStateJson), [conflict.localStateJson]);
   const server = useMemo(() => safeParse(conflict.serverStateJson), [conflict.serverStateJson]);
   const base = useMemo(() => safeParse(conflict.baseStateJson), [conflict.baseStateJson]);
   const differing = useMemo(() => diffingFields(local, server), [local, server]);
 
-  const [resolution, setResolution] = useState<SyncConflictResolution>('keep_local');
-  const [perFieldChoice, setPerFieldChoice] = useState<Record<string, 'yours' | 'theirs'>>({});
-  const [revealed, setRevealed] = useState<Record<string, { yours: string; theirs: string }>>({});
   const [activeTab, setActiveTab] = useState<'yours' | 'theirs' | 'base'>('yours');
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const [networkBanner, setNetworkBanner] = useState(false);
-
-  const supportsChainAnchored = CHAIN_ANCHORED_KINDS.has(conflict.entityKind);
-
-  const onRevealField = useCallback(
-    async (field: string): Promise<void> => {
-      setError(null);
-      // The workplace KEK is server-side; offline reveal is impossible
-      // (T-S26). Surface the banner instead of dispatching step-up that
-      // can't complete.
-      if (typeof navigator !== 'undefined' && navigator.onLine === false) {
-        setNetworkBanner(true);
-        return;
-      }
-      // Dispatch step-up so the global StepUpModal opens. The actual
-      // decrypt-reveal endpoint is a future cross-cutting concern (the
-      // 1.7/1.8/1.9 reveal endpoints each have their own; the server-
-      // side conflict-reveal route lands in S2 already wired). For
-      // now we surface the affordance + announce the action so the
-      // step-up modal can grant the freshness window.
-      stepUpEmitter.dispatch(`conflict.reveal.${conflict.entityKind}`);
-      // Optimistically mark the field as "revealed" — the actual
-      // ciphertext is in localStateJson / serverStateJson under
-      // _ct_b64 sister fields, and the server-side reveal route would
-      // return plaintext for both. Until that wire is hot we render a
-      // placeholder; the dialog still demonstrates the contract.
-      setRevealed((prev) => ({
-        ...prev,
-        [field]: {
-          yours: '(reveal pending — complete step-up to load plaintext)',
-          theirs: '(reveal pending — complete step-up to load plaintext)',
-        },
-      }));
-    },
-    [conflict.entityKind],
-  );
-
-  const onApply = useCallback(async (): Promise<void> => {
-    if (conflict.id === undefined) return;
-    setBusy(true);
-    setError(null);
-    try {
-      await applyResolution({
-        conflict,
-        resolution,
-        perFieldChoice,
-        local,
-        server,
-      });
-      onResolved();
-    } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
-    } finally {
-      setBusy(false);
-    }
-  }, [conflict, resolution, perFieldChoice, local, server, onResolved]);
 
   if (!open) return null;
 
@@ -281,12 +246,6 @@ export function ConflictResolutionDialog({
 
         {/* Body */}
         <div className="flex-1 overflow-y-auto px-4 py-3 md:px-6">
-          {networkBanner ? (
-            <div className="mb-3">
-              <NetworkRequiredBanner action="Reveal" onDismiss={() => setNetworkBanner(false)} />
-            </div>
-          ) : null}
-
           {differing.length === 0 ? (
             <div className="rounded-md border border-border bg-background p-4 text-sm text-muted-foreground">
               No diffing fields found. The conflict may have resolved itself; try syncing again.
@@ -301,10 +260,6 @@ export function ConflictResolutionDialog({
                 base={base}
                 otherState={server}
                 fields={differing}
-                revealed={revealed}
-                onRevealField={(f) => {
-                  void onRevealField(f);
-                }}
                 visibleOnMobile={activeTab === 'yours'}
               />
               <Column
@@ -314,10 +269,6 @@ export function ConflictResolutionDialog({
                 base={base}
                 otherState={local}
                 fields={differing}
-                revealed={revealed}
-                onRevealField={(f) => {
-                  void onRevealField(f);
-                }}
                 visibleOnMobile={activeTab === 'theirs'}
               />
               <Column
@@ -327,125 +278,61 @@ export function ConflictResolutionDialog({
                 base={base}
                 otherState={null}
                 fields={differing}
-                revealed={revealed}
-                onRevealField={(f) => {
-                  void onRevealField(f);
-                }}
                 visibleOnMobile={activeTab === 'base'}
               />
             </div>
           )}
 
-          {/* Resolution picker */}
+          {/* priv-F4 + sec-F3 + sec-F4 close-out (T-S53): operator-script
+              notice replaces the broken Resolution picker. The Apply
+              path lands in 1.12; until then, the operator-script
+              template in docs/runbooks/offline-sync.md §7 is the
+              documented recovery path. Rights-protective tone: no
+              shame, no anxiety-induce. */}
           <section
             aria-labelledby="conflict-resolution-heading"
-            className="mt-4 rounded-md border border-border bg-background p-3"
+            className="mt-4 rounded-md border border-status-pending/40 bg-status-pending/5 p-3"
           >
             <h3
               id="conflict-resolution-heading"
-              className="mb-2 text-xs font-medium uppercase tracking-wide text-muted-foreground"
+              className="mb-1 flex items-center gap-1.5 text-xs font-medium uppercase tracking-wide text-status-pending"
             >
-              Resolution
+              <Info className="h-3.5 w-3.5" strokeWidth={2} aria-hidden="true" />
+              Conflict resolution lands in 1.12
             </h3>
-            <div className="space-y-2">
-              <ResolutionOption
-                value="keep_local"
-                current={resolution}
-                onChange={setResolution}
-                title="Keep yours"
-                description="Discard the server's changes and push your version."
-              />
-              <ResolutionOption
-                value="keep_remote"
-                current={resolution}
-                onChange={setResolution}
-                title="Accept server"
-                description="Discard your changes and take what the server has."
-              />
-              {supportsChainAnchored ? (
-                <ResolutionOption
-                  value="keep_both_chain_anchored"
-                  current={resolution}
-                  onChange={setResolution}
-                  title="Anchor both"
-                  description={chainAnchoredCopy(conflict.entityKind)}
-                />
-              ) : null}
-              <ResolutionOption
-                value="manual_merge"
-                current={resolution}
-                onChange={setResolution}
-                title="Manual merge"
-                description="Choose field-by-field which version to keep."
-              />
-            </div>
-
-            {resolution === 'manual_merge' && differing.length > 0 ? (
-              <div className="mt-3 rounded-md border border-border bg-card p-3">
-                <p className="mb-2 text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
-                  Per-field picks
-                </p>
-                <ul className="space-y-2">
-                  {differing.map((field) => (
-                    <li key={field}>
-                      <div className="mb-1 text-xs font-medium text-foreground">{field}</div>
-                      <div className="flex flex-wrap items-center gap-3 text-xs">
-                        <label className="inline-flex items-center gap-1">
-                          <input
-                            type="radio"
-                            name={`pf-${field}`}
-                            value="yours"
-                            checked={perFieldChoice[field] === 'yours'}
-                            onChange={() => setPerFieldChoice((p) => ({ ...p, [field]: 'yours' }))}
-                          />
-                          <span>Keep yours</span>
-                        </label>
-                        <label className="inline-flex items-center gap-1">
-                          <input
-                            type="radio"
-                            name={`pf-${field}`}
-                            value="theirs"
-                            checked={perFieldChoice[field] === 'theirs'}
-                            onChange={() => setPerFieldChoice((p) => ({ ...p, [field]: 'theirs' }))}
-                          />
-                          <span>Keep theirs</span>
-                        </label>
-                      </div>
-                    </li>
-                  ))}
-                </ul>
-              </div>
-            ) : null}
+            <p className="text-sm text-foreground">
+              Compare the columns above to understand what diverged. To resolve this conflict in
+              1.10, an operator can:
+            </p>
+            <ol className="ml-5 mt-2 list-decimal space-y-1 text-sm text-foreground">
+              <li>Inspect the local and server states above.</li>
+              <li>Decide which is canonical.</li>
+              <li>
+                Run the resolution script (template in
+                <span className="ml-1 font-mono text-xs">docs/runbooks/offline-sync.md §7</span>)
+                against the server database.
+              </li>
+            </ol>
+            <p className="mt-2 text-xs text-muted-foreground">
+              Your local row stays untouched; the conflict remains visible in the sync panel until
+              an operator clears it.
+            </p>
           </section>
-
-          {error ? (
-            <div
-              role="alert"
-              aria-live="polite"
-              className="mt-3 rounded-md border border-status-open/40 bg-status-open/10 p-3 text-sm text-status-open"
-            >
-              {error}
-            </div>
-          ) : null}
         </div>
 
-        {/* Footer */}
+        {/* Footer — Apply is disabled in 1.10 (T-S53). */}
         <footer className="flex items-center justify-between gap-2 border-t border-border bg-card px-4 py-3 md:px-6">
           <Button type="button" variant="ghost" onClick={onClose}>
             <ChevronLeft className="h-4 w-4" strokeWidth={2} aria-hidden="true" />
-            Cancel
+            Close
           </Button>
           <Button
             type="button"
-            onClick={() => {
-              void onApply();
-            }}
-            disabled={
-              busy || (resolution === 'manual_merge' && differing.some((f) => !perFieldChoice[f]))
-            }
-            aria-label={applyLabel(resolution)}
+            disabled
+            aria-label="Apply (unavailable until 1.12)"
+            title="Conflict resolution Apply lands in 1.12; see docs/runbooks/offline-sync.md §7"
           >
-            {busy ? 'Applying…' : applyLabel(resolution)}
+            Apply (1.12)
           </Button>
         </footer>
       </div>
@@ -465,8 +352,6 @@ function Column({
   base,
   otherState,
   fields,
-  revealed,
-  onRevealField,
   visibleOnMobile,
 }: {
   title: string;
@@ -475,8 +360,6 @@ function Column({
   base: Record<string, unknown> | null;
   otherState: Record<string, unknown> | null;
   fields: ReadonlyArray<string>;
-  revealed: Record<string, { yours: string; theirs: string }>;
-  onRevealField: (field: string) => void;
   visibleOnMobile: boolean;
 }): JSX.Element {
   void base;
@@ -496,13 +379,7 @@ function Column({
             <div className="text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
               {field}
             </div>
-            <FieldValue
-              field={field}
-              value={state?.[field]}
-              columnKind={title.toLowerCase() as 'yours' | 'theirs' | 'base'}
-              revealed={revealed}
-              onReveal={onRevealField}
-            />
+            <FieldValue field={field} value={state?.[field]} />
           </li>
         ))}
       </ul>
@@ -510,53 +387,21 @@ function Column({
   );
 }
 
-function FieldValue({
-  field,
-  value,
-  columnKind,
-  revealed,
-  onReveal,
-}: {
-  field: string;
-  value: unknown;
-  columnKind: 'yours' | 'theirs' | 'base';
-  revealed: Record<string, { yours: string; theirs: string }>;
-  onReveal: (field: string) => void;
-}): JSX.Element {
+function FieldValue({ field, value }: { field: string; value: unknown }): JSX.Element {
   const isEncrypted = ENCRYPTED_FIELDS.has(field);
-  const wasRevealed = revealed[field];
   if (isEncrypted) {
-    if (wasRevealed && (columnKind === 'yours' || columnKind === 'theirs')) {
-      return (
-        <div className="mt-0.5 whitespace-pre-wrap break-words rounded bg-card p-2 text-foreground">
-          {columnKind === 'yours' ? wasRevealed.yours : wasRevealed.theirs}
-        </div>
-      );
-    }
-    if (columnKind === 'base') {
-      return (
-        <div className="mt-0.5 flex items-center gap-1 rounded bg-card p-2 text-muted-foreground">
-          <Lock className="h-3 w-3" strokeWidth={1.75} aria-hidden="true" />
-          <span>Encrypted</span>
-        </div>
-      );
-    }
+    // priv-F4 + sec-F6 close-out (T-S53): honest placeholder. The
+    // Apply pipeline lands in 1.12; reveal is not wired because the
+    // resolution path it would feed is disabled. Burning a step-up
+    // grant on a non-functional affordance violates the spirit of
+    // CLAUDE.md #16 (step-up should always do useful work).
     return (
-      <div className="mt-0.5 flex items-center justify-between gap-2 rounded bg-card p-2 text-muted-foreground">
-        <span className="inline-flex items-center gap-1">
-          <Lock className="h-3 w-3" strokeWidth={1.75} aria-hidden="true" />
-          Encrypted · Reveal to compare
+      <div className="mt-0.5 flex items-start gap-1 rounded bg-card p-2 text-muted-foreground">
+        <Lock className="mt-0.5 h-3 w-3 shrink-0" strokeWidth={1.75} aria-hidden="true" />
+        <span>
+          Encrypted. The Apply pipeline ships in 1.12. To compare encrypted bodies in 1.10, contact
+          your operator.
         </span>
-        <Button
-          type="button"
-          size="sm"
-          variant="outline"
-          onClick={() => onReveal(field)}
-          aria-label={`Reveal ${field} to compare`}
-        >
-          <Eye className="h-3 w-3" strokeWidth={2} aria-hidden="true" />
-          Reveal
-        </Button>
       </div>
     );
   }
@@ -577,42 +422,6 @@ function renderPlain(value: unknown): string {
 // ---------------------------------------------------------------------------
 // Resolution radio + apply helpers
 // ---------------------------------------------------------------------------
-
-function ResolutionOption({
-  value,
-  current,
-  onChange,
-  title,
-  description,
-}: {
-  value: SyncConflictResolution;
-  current: SyncConflictResolution;
-  onChange: (v: SyncConflictResolution) => void;
-  title: string;
-  description: string;
-}): JSX.Element {
-  const checked = current === value;
-  return (
-    <label
-      className={`flex cursor-pointer items-start gap-2 rounded-md border p-2 text-sm ${
-        checked ? 'border-primary bg-primary/5' : 'border-border bg-card'
-      }`}
-    >
-      <input
-        type="radio"
-        name="conflict-resolution"
-        value={value}
-        checked={checked}
-        onChange={() => onChange(value)}
-        className="mt-1"
-      />
-      <div className="min-w-0">
-        <div className="font-medium text-foreground">{title}</div>
-        <p className="mt-0.5 text-xs text-muted-foreground">{description}</p>
-      </div>
-    </label>
-  );
-}
 
 function TabButton({
   active,
@@ -635,19 +444,6 @@ function TabButton({
       {children}
     </button>
   );
-}
-
-function applyLabel(r: SyncConflictResolution): string {
-  switch (r) {
-    case 'keep_local':
-      return 'Keep yours';
-    case 'keep_remote':
-      return 'Accept server';
-    case 'keep_both_chain_anchored':
-      return 'Anchor both';
-    case 'manual_merge':
-      return 'Apply merge';
-  }
 }
 
 function humanEntityKind(k: SyncEntityKind): string {
@@ -679,216 +475,70 @@ function humanEntityKind(k: SyncEntityKind): string {
   }
 }
 
-/**
- * Chain-anchored framing per ADR §3.7 — verbatim, with a per-entity-kind
- * concrete scenario so the rep understands what they're anchoring.
- *
- * Exported for tests.
- */
-export function chainAnchoredCopy(kind: SyncEntityKind): string {
-  switch (kind) {
-    case 'recommendation':
-      return 'You submitted #3 offline at 10:14am; the server received another submit for #3 at 11:02am. Both are now anchored in the chain. Pick which one is the canonical text; the other becomes a withdrawn record.';
-    case 'action_item_move':
-      return 'Your section move at 10:14am and another rep’s move at 11:02am both touched this action item. Both are now anchored. Pick which target section is canonical; the other becomes a withdrawn move record.';
-    case 'inspection_signature':
-      return 'Your offline signature at 10:14am and another rep’s signature at 11:02am both arrived for this role. Both are now anchored. Pick which signature is canonical; the other becomes a withdrawn record.';
-    default:
-      return 'Both versions are now anchored in the chain. Pick which one is the canonical text; the other becomes a withdrawn record.';
-  }
-}
-
 // ---------------------------------------------------------------------------
-// Apply — write the resolution into Dexie + enqueue the follow-up op
+// Apply pipeline — DEFERRED to 1.12
 // ---------------------------------------------------------------------------
+//
+// The S2 Apply pipeline was removed in S5 per priv-F4 + sec-F3 + sec-F4
+// close-out (T-S53). The removed code:
+//
+//   - `applyResolution()` — wrote sync_conflicts.resolved=1, dropped
+//     conflicting queue rows, absorbed server state for keep_remote,
+//     enqueued a fresh PATCH for keep_local / manual_merge, and
+//     enqueued a withdraw follow-up for keep_both_chain_anchored.
+//   - `defaultEndpointForKind()` — built the URL the PATCH would hit.
+//     The map was wrong on FOUR of the seven non-hazard kinds:
+//       * action_item_move → /api/action-items/:id/move
+//         (server route is /moves — PLURAL — see action-items/index.ts
+//         line 825). Every move resolution 404'd → dead-letter.
+//       * inspection_finding_promotion → /api/inspections/findings/:id
+//         (server route is /api/inspections/findings/:id/promote and
+//         requires POST not PATCH). Every promotion resolution failed.
+//       * inspection_signature → PATCH /api/inspections/:id/signatures
+//         (server route is POST only; PATCH would 405). Signatures are
+//         append-only — no PATCH route exists.
+//       * evidence_finalize → /api/evidence/:id/finalize
+//         (server route is POST /api/evidence — empty suffix; see
+//         evidence/index.ts line 190).
+//     Plus the synthesized `${endpoint}/withdraw-duplicate` URL the
+//     keep_both_chain_anchored branch built — that endpoint doesn't
+//     exist anywhere in the server. Every chain-anchored resolution
+//     dead-lettered after 8 retries.
+//   - `entityKindToTableInline()` — for the keep_remote branch only;
+//     not load-bearing without applyResolution.
+//   - `chainWithdrawalKind()` — for the keep_both_chain_anchored
+//     branch; not load-bearing.
+//   - `chainAnchoredCopy()` — the verbatim ADR §3.7 framing surfaced
+//     in the chain-anchored radio option's description. Removed
+//     because the option is gone in 1.10.
+//   - `applyLabel()` — the per-resolution button label
+//     ("Keep yours" / "Accept server" / "Anchor both" / "Apply merge"),
+//     not load-bearing without the picker.
+//   - `ResolutionOption` component — the radio for keep_local /
+//     keep_remote / keep_both_chain_anchored / manual_merge.
+//   - The per-field manual-merge picker.
+//
+// All of these were called only from applyResolution() or rendered
+// only inside the resolution picker. Removing them together is the
+// cleanest signal to the next reviewer that the Apply pipeline is a
+// 1.12 deliverable. The 1.12 implementer should also strip the
+// _sync_* metadata + id + version + createdAt + updatedAt from the
+// payload before enqueueing — sec-F4 documented that the prior
+// implementation shipped the raw local Dexie row, which the server's
+// .strict() Zod schemas rejected with 400 invalid_body.
+//
+// See docs/runbooks/offline-sync.md §7 (Conflict resolution stance)
+// for the operator-script template that covers the 1.10 manual-
+// recovery path and §12 (1.12 hardening backlog) for the full
+// Apply pipeline scope.
 
-async function applyResolution(args: {
-  conflict: SyncConflictRow;
-  resolution: SyncConflictResolution;
-  perFieldChoice: Record<string, 'yours' | 'theirs'>;
-  local: Record<string, unknown> | null;
-  server: Record<string, unknown> | null;
-}): Promise<void> {
-  const { conflict, resolution, perFieldChoice, local, server } = args;
-  if (conflict.id === undefined) return;
-
-  // Resolve which payload we ship to the server.
-  let payload: Record<string, unknown> | null = null;
-  switch (resolution) {
-    case 'keep_local':
-      payload = local;
-      break;
-    case 'keep_remote':
-      payload = null; // no follow-up PATCH needed; we just accept server state
-      break;
-    case 'keep_both_chain_anchored':
-      // For 1.10 we mark the conflict resolved and enqueue a follow-up
-      // withdrawal op carrying the duplicate-side payload. The server's
-      // S2 contract owns the withdrawal kind for each chain-anchored
-      // entity kind.
-      payload = local;
-      break;
-    case 'manual_merge': {
-      const merged: Record<string, unknown> = { ...(server ?? {}) };
-      for (const [field, choice] of Object.entries(perFieldChoice)) {
-        if (choice === 'yours') merged[field] = local?.[field];
-        else merged[field] = server?.[field];
-      }
-      payload = merged;
-      break;
-    }
-  }
-
-  await db.transaction('rw', [db.sync_queue, db.sync_conflicts, db._base_state], async () => {
-    // Mark the conflict resolved.
-    await db.sync_conflicts.update(conflict.id!, { resolved: 1 });
-    // Drop any conflicting queue rows for this entity so we don't
-    // double-ship.
-    const queueRows = await db.sync_queue
-      .where('entityLocalId')
-      .equals(conflict.entityLocalId)
-      .toArray();
-    for (const qr of queueRows) {
-      if (qr.id !== undefined && qr.state === 'conflicting') {
-        await db.sync_queue.delete(qr.id);
-      }
-    }
-  });
-
-  if (resolution === 'keep_remote') {
-    // Absorb server state into the entity row + base-state cache.
-    const tableName = entityKindToTableInline(conflict.entityKind);
-    if (tableName && server !== null) {
-      const meta = cleanSyncMetadata(
-        conflict.entityLocalId,
-        conflict.serverVersion,
-        JSON.stringify(server),
-      );
-      await db.table(tableName).put({
-        ...server,
-        id: conflict.entityLocalId,
-        ...meta,
-      });
-      await db._base_state.put({
-        key: baseStateKey(conflict.entityKind, conflict.entityLocalId),
-        entityKind: conflict.entityKind,
-        entityLocalId: conflict.entityLocalId,
-        version: conflict.serverVersion,
-        stateJson: JSON.stringify(server),
-        cachedAt: nowIso(),
-      });
-    }
-    return;
-  }
-
-  // For all other resolutions, queue a fresh PATCH carrying the resolved
-  // payload + the server-reported version as If-Match.
-  if (payload !== null) {
-    await enqueueOp({
-      kind: 'update',
-      entityKind: conflict.entityKind,
-      entityLocalId: conflict.entityLocalId,
-      payload,
-      httpMethod: 'PATCH',
-      endpoint: defaultEndpointForKind(conflict.entityKind, conflict.entityLocalId),
-      ifMatchEtag: conflict.serverVersion,
-      idempotencyKey: newClientId(),
-    });
-  }
-
-  if (resolution === 'keep_both_chain_anchored') {
-    // Enqueue a withdrawal follow-up that carries the non-canonical
-    // payload. The chain-anchored kinds each have a withdraw / move-
-    // back primitive; we surface a single 'transition' op so the
-    // server's S2 route can interpret per its withdraw semantics.
-    await enqueueOp({
-      kind: 'transition',
-      entityKind: chainWithdrawalKind(conflict.entityKind),
-      entityLocalId: conflict.entityLocalId,
-      payload: { reason: 'chain_anchored_duplicate', duplicate: server },
-      httpMethod: 'POST',
-      endpoint: `${defaultEndpointForKind(conflict.entityKind, conflict.entityLocalId)}/withdraw-duplicate`,
-      ifMatchEtag: conflict.serverVersion,
-      idempotencyKey: newClientId(),
-    });
-  }
-}
-
-function entityKindToTableInline(kind: SyncEntityKind): string | null {
-  switch (kind) {
-    case 'hazard':
-      return 'hazards';
-    case 'action_item':
-      return 'action_items';
-    case 'action_item_move':
-      return 'action_item_moves';
-    case 'inspection':
-      return 'inspections';
-    case 'inspection_finding':
-    case 'inspection_finding_promotion':
-      return 'inspection_findings';
-    case 'inspection_signature':
-      return 'inspection_signatures';
-    case 'recommendation':
-    case 'recommendation_resolution':
-    case 'recommendation_withdrawal':
-      return 'recommendations';
-    case 'recommendation_response':
-      return 'recommendation_responses';
-    case 'evidence_finalize':
-      return 'evidence_files';
-  }
-}
-
-function defaultEndpointForKind(kind: SyncEntityKind, id: string): string {
-  switch (kind) {
-    case 'hazard':
-      return `/api/hazards/${encodeURIComponent(id)}`;
-    case 'action_item':
-      return `/api/action-items/${encodeURIComponent(id)}`;
-    case 'action_item_move':
-      return `/api/action-items/${encodeURIComponent(id)}/move`;
-    case 'inspection':
-      return `/api/inspections/${encodeURIComponent(id)}`;
-    case 'inspection_finding':
-    case 'inspection_finding_promotion':
-      return `/api/inspections/findings/${encodeURIComponent(id)}`;
-    case 'inspection_signature':
-      return `/api/inspections/${encodeURIComponent(id)}/signatures`;
-    case 'recommendation':
-      return `/api/recommendations/${encodeURIComponent(id)}`;
-    case 'recommendation_response':
-      return `/api/recommendations/${encodeURIComponent(id)}/responses`;
-    case 'recommendation_resolution':
-      return `/api/recommendations/${encodeURIComponent(id)}/resolve`;
-    case 'recommendation_withdrawal':
-      return `/api/recommendations/${encodeURIComponent(id)}/withdraw`;
-    case 'evidence_finalize':
-      return `/api/evidence/${encodeURIComponent(id)}/finalize`;
-  }
-}
-
-function chainWithdrawalKind(kind: SyncEntityKind): SyncEntityKind {
-  switch (kind) {
-    case 'recommendation':
-      return 'recommendation_withdrawal';
-    case 'action_item_move':
-      return 'action_item_move';
-    case 'inspection_signature':
-      return 'inspection_signature';
-    default:
-      return kind;
-  }
-}
-
-// Exported for tests.
+// Exported for tests. The runtime API surface is intentionally
+// narrowed in 1.10 — no applyResolution / chainAnchoredCopy / etc.
+// because they don't exist anymore.
 export const _internal = {
   ENCRYPTED_FIELDS,
   METADATA_FIELDS,
   CHAIN_ANCHORED_KINDS,
   diffingFields,
   safeParse,
-  applyResolution,
-  chainAnchoredCopy,
-  applyLabel,
 };

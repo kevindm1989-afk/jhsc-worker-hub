@@ -505,6 +505,34 @@ async function enqueueMutation(
   if (spec.dexieTable) {
     const table = db.table(spec.dexieTable);
     const existing = await table.get(entityLocalId);
+    // sec-F10 close-out (T-S57): if a CLEAN row already exists at
+    // this id, refuse to overwrite it. The original 1.10 S2 path
+    // spread `bodyForQueue` over `existing` and reset _sync_state to
+    // 'dirty_create' — which clobbered any field the rep had not
+    // re-typed (e.g. a background-refresh that landed the canonical
+    // row between the rep tapping "Add hazard" and the optimistic
+    // write committing). The clobbered row would then enqueue a
+    // second create with the same entityLocalId; the server's
+    // clientId-reuse 200 path would return the EXISTING row,
+    // silently discarding the rep's new payload fields.
+    //
+    // Fix shape: for opKind === 'create' on a clean existing row,
+    // skip the optimistic write entirely (the row is already there
+    // and clean — there's nothing to optimistically materialize)
+    // and skip the queue enqueue too (no work to do; the rep can
+    // PATCH the row via a normal update flow if they want to
+    // change it). We still return the existing row to the caller so
+    // the Promise<T> contract is preserved.
+    if (
+      spec.opKind === 'create' &&
+      existing &&
+      (existing as BaseEntityRow)._sync_state === 'clean'
+    ) {
+      console.warn(
+        `[typed-client] create against existing clean row ${entityLocalId} — skipping optimistic write + queue enqueue (sec-F10 / T-S57). The caller likely re-fired a create handler against a row that already synced; use the PATCH path instead.`,
+      );
+      return existing;
+    }
     const meta = freshSyncMetadata(entityLocalId);
     const optimistic = {
       ...(existing ?? {}),

@@ -16,7 +16,7 @@
 
 import { sql } from 'drizzle-orm';
 import { Hono } from 'hono';
-import { beforeAll, beforeEach, describe, expect, it } from 'vitest';
+import { beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { getDb } from '../db/client';
 import { bootAuthTestEnv } from '../auth/test-setup';
 import { cleanAuthTables, hasDb } from '../auth/test-db';
@@ -306,5 +306,80 @@ describe.skipIf(SKIP)('idempotencyKey() middleware (ADR-0009 §3.4)', () => {
       n: number;
     }>;
     expect(cached[0]!.n).toBe(0);
+  });
+
+  it('sec-F2 / sec-F8 close-out (T-S52): cache-INSERT failure logs at warn level instead of swallowing', async () => {
+    // The cache-INSERT happens in the after-handler block. To force
+    // it to fail we delete the actor_user_id row BETWEEN the
+    // handler completing and the INSERT firing. The middleware's
+    // INSERT has a FK to users(id); deleting the user makes the
+    // INSERT fail with a FK violation, which is exactly the
+    // pathological case the close-out documents.
+    //
+    // We assert two things:
+    //   (1) the request still succeeds (the response was already
+    //       shipped to the client before the cache-INSERT runs).
+    //   (2) console.warn was called with the documented warning
+    //       prefix.
+    //
+    // The prior swallow path called console.warn with a different
+    // message; the post-S5 message ends with the
+    // "(chain anchor is still bounded by the entity-table UNIQUE):"
+    // qualifier so we match against that.
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+
+    const spy = { callCount: 0 };
+    const app = new Hono();
+    let killedUser = false;
+    app.use('*', async (c, next) => {
+      c.set('auth', {
+        userId: testUserId,
+        sessionId: 'test-session',
+        stepUpUntil: null,
+      });
+      await next();
+    });
+    app.use('*', idempotencyKey());
+    app.post('/test/:id', async (c) => {
+      spy.callCount += 1;
+      // Run the handler; after it returns the middleware's after-block
+      // attempts the cache INSERT. We delete the user row right BEFORE
+      // returning so the INSERT's FK fails.
+      if (!killedUser) {
+        killedUser = true;
+        // Note: this can't actually happen in production (the auth
+        // middleware would not have populated c.set('auth') with a
+        // deleted user), but it's the cleanest way to force an
+        // INSERT failure in test.
+        await getDb().execute(sql`DELETE FROM users WHERE id = ${testUserId}`);
+      }
+      return c.json({ ok: true }, 200);
+    });
+
+    const res = await app.request('/test/abc', {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        [IDEMPOTENCY_KEY_HEADER]: 'key-warn-001',
+      },
+      body: JSON.stringify({
+        clientId: '99999999-9999-4999-8999-999999999999',
+        value: 'ok',
+      }),
+    });
+
+    // (1) The request still succeeded — the cache-INSERT failure is
+    // non-fatal for the rep.
+    expect(res.status).toBe(200);
+    expect(spy.callCount).toBe(1);
+
+    // (2) console.warn fired with the documented prefix.
+    const warnCalls = warnSpy.mock.calls.flat().filter((x) => typeof x === 'string');
+    const matched = warnCalls.some((msg) =>
+      (msg as string).includes('[idempotency] cache INSERT failed'),
+    );
+    expect(matched).toBe(true);
+
+    warnSpy.mockRestore();
   });
 });

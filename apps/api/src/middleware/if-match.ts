@@ -32,6 +32,16 @@ import type { Context } from 'hono';
  *   - `123`    — bare integer; older clients without quotes.
  *   - `W/"123"` — REJECTED. Weak etags don't satisfy the strong
  *     comparison required by If-Match per RFC 9110 §8.8.3.4.
+ *   - `"0"`    — REJECTED (S5 LOW close-out). Migration 0009 sets
+ *     `version` DEFAULT 1 and the bump trigger only increments; no
+ *     server-side row ever holds version=0. The typed-client's
+ *     `_server_version` starts at 0 and is only ratcheted to 1+ after
+ *     the first successful create response includes `version`. A
+ *     client that ships `If-Match: "0"` is symptomatic of the
+ *     sec-F7 / T-S55 close-out gap (POST omits the version field);
+ *     rejecting at parse time surfaces the misconfiguration as a
+ *     clean 428 rather than letting it slip through and 409 with a
+ *     misleading currentVersion=1.
  *
  * Returns null on any parse failure; the handler returns 428.
  */
@@ -45,7 +55,7 @@ export function parseIfMatchVersion(header: string | null | undefined): number |
   const inner = trimmed.startsWith('"') && trimmed.endsWith('"') ? trimmed.slice(1, -1) : trimmed;
   if (!/^[0-9]+$/.test(inner)) return null;
   const n = Number.parseInt(inner, 10);
-  if (!Number.isInteger(n) || n < 0) return null;
+  if (!Number.isInteger(n) || n < 1) return null;
   return n;
 }
 

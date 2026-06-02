@@ -1,19 +1,28 @@
 // Unit tests for the conflict resolution dialog (Milestone 1.10 S3).
 //
-// Covers:
-//   - Three-way columns render (Yours / Theirs / Base)
-//   - Encrypted-field "Reveal" triggers stepUpEmitter
-//   - Chain-anchored variant exposes the ADR §3.7 verbatim copy
-//   - Apply submits the resolution (writes sync_conflicts.resolved=1 +
-//     enqueues a follow-up op)
+// S5 fix bundle (priv-F4 + sec-F3 + sec-F4 close-out, T-S53): the
+// Apply pipeline is DISABLED in 1.10 and lands in 1.12. The dialog
+// ships VIEW-ONLY in 1.10. These tests now assert the view-only
+// shape:
+//   - Three-way columns (Yours / Theirs / Base) render so the rep
+//     can compare plaintext metadata fields.
+//   - Encrypted-field rows render the honest placeholder (no Reveal
+//     button — burning a step-up on a no-op affordance is a
+//     CLAUDE.md #16 spirit violation, see priv-F4).
+//   - Apply button is disabled with the "1.12" label.
+//   - The operator-script notice points at the runbook §7.
+//   - Closing the dialog does NOT mark the conflict resolved or
+//     enqueue any follow-up op.
+//
+// The prior Apply-related tests (keep_local enqueues PATCH; chain-
+// anchored Anchor both copy; apply-label varies by resolution) are
+// REMOVED because the surface they tested no longer exists.
 
 import 'fake-indexeddb/auto';
-import { act, render, screen } from '@testing-library/react';
-import userEvent from '@testing-library/user-event';
+import { render, screen } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { ConflictResolutionDialog } from '../sync/components/conflict-resolution-dialog';
 import { db, type SyncConflictRow } from '../sync/db';
-import { stepUpEmitter } from '../auth/api';
 
 beforeEach(async () => {
   await db.open();
@@ -66,14 +75,11 @@ async function seedConflict(c: SyncConflictRow): Promise<void> {
   await db.sync_conflicts.put(c);
 }
 
-describe('ConflictResolutionDialog', () => {
-  it('renders the three columns on desktop (Yours / Theirs / Base)', async () => {
+describe('ConflictResolutionDialog (1.10 view-only, T-S53)', () => {
+  it('renders the three comparison columns on desktop (Yours / Theirs / Base)', async () => {
     const conflict = makeConflict();
     await seedConflict(conflict);
-    render(
-      <ConflictResolutionDialog open conflict={conflict} onClose={vi.fn()} onResolved={vi.fn()} />,
-    );
-    // Tab buttons are also "Yours" / "Theirs" / "Base"; use sections.
+    render(<ConflictResolutionDialog open conflict={conflict} onClose={vi.fn()} />);
     const yoursSection = screen.getByRole('region', { name: 'Yours' });
     const theirsSection = screen.getByRole('region', { name: 'Theirs' });
     const baseSection = screen.getByRole('region', { name: 'Base' });
@@ -82,90 +88,52 @@ describe('ConflictResolutionDialog', () => {
     expect(baseSection).toBeInTheDocument();
   });
 
-  it('renders encrypted-field Reveal buttons and fires stepUpEmitter on click', async () => {
+  it('encrypted-field rows render the 1.12-defer placeholder (no Reveal button)', async () => {
     const conflict = makeConflict();
     await seedConflict(conflict);
-    const stepUpSpy = vi.spyOn(stepUpEmitter, 'dispatch');
-    render(
-      <ConflictResolutionDialog open conflict={conflict} onClose={vi.fn()} onResolved={vi.fn()} />,
+    render(<ConflictResolutionDialog open conflict={conflict} onClose={vi.fn()} />);
+    // The 1.10 placeholder copy is the contract the rep sees in lieu
+    // of a working reveal. Asserting the exact verbiage locks in the
+    // honest-shape disclosure.
+    const placeholders = screen.getAllByText(
+      /Encrypted\. The Apply pipeline ships in 1\.12\. To compare encrypted bodies in 1\.10, contact your operator\./,
     );
-    // The "title" field is encrypted; expect at least one Reveal button.
-    const revealBtns = screen.getAllByRole('button', { name: /Reveal .* to compare/ });
-    expect(revealBtns.length).toBeGreaterThan(0);
-    const user = userEvent.setup();
-    await user.click(revealBtns[0]!);
-    expect(stepUpSpy).toHaveBeenCalledWith(
-      expect.stringMatching(/^conflict\.reveal\.recommendation$/),
-    );
+    expect(placeholders.length).toBeGreaterThan(0);
+    // The Reveal button is gone — no step-up dispatch occurs.
+    expect(screen.queryAllByRole('button', { name: /Reveal .* to compare/ })).toHaveLength(0);
   });
 
-  it('shows the chain-anchored option with verbatim ADR §3.7 copy for recommendation', async () => {
-    const conflict = makeConflict({ entityKind: 'recommendation' });
+  it('Apply button is disabled with the 1.12 label and operator-script notice is visible', async () => {
+    const conflict = makeConflict();
     await seedConflict(conflict);
-    render(
-      <ConflictResolutionDialog open conflict={conflict} onClose={vi.fn()} onResolved={vi.fn()} />,
-    );
-    // The chain-anchored copy includes the explicit "10:14am" + "11:02am"
-    // verbatim framing.
-    expect(screen.getByText(/You submitted #3 offline at 10:14am/)).toBeInTheDocument();
-    expect(
-      screen.getByText(/the server received another submit for #3 at 11:02am/),
-    ).toBeInTheDocument();
+    render(<ConflictResolutionDialog open conflict={conflict} onClose={vi.fn()} />);
+    const applyBtn = screen.getByRole('button', { name: /Apply \(unavailable until 1\.12\)/ });
+    expect(applyBtn).toBeDisabled();
+    // Operator-script notice points at the runbook section.
+    expect(screen.getByText(/Conflict resolution lands in 1\.12/)).toBeInTheDocument();
+    expect(screen.getByText(/docs\/runbooks\/offline-sync\.md/)).toBeInTheDocument();
   });
 
-  it('hides chain-anchored option for non-chain-anchored kinds (hazard)', async () => {
+  it('closing the dialog does NOT mark the conflict resolved or enqueue any op', async () => {
+    const conflict = makeConflict();
+    await seedConflict(conflict);
+    const onClose = vi.fn();
+    render(<ConflictResolutionDialog open conflict={conflict} onClose={onClose} />);
+    // The conflict row stays unresolved; no queue rows are added.
+    const fresh = await db.sync_conflicts.get(conflict.id!);
+    expect(fresh?.resolved).toBe(0);
+    const queueRows = await db.sync_queue.toArray();
+    expect(queueRows).toHaveLength(0);
+  });
+
+  it('renders the hazard variant the same way (no per-kind branching in 1.10)', async () => {
     const conflict = makeConflict({ entityKind: 'hazard' });
     await seedConflict(conflict);
-    render(
-      <ConflictResolutionDialog open conflict={conflict} onClose={vi.fn()} onResolved={vi.fn()} />,
-    );
+    render(<ConflictResolutionDialog open conflict={conflict} onClose={vi.fn()} />);
+    expect(screen.getByRole('region', { name: 'Yours' })).toBeInTheDocument();
+    // The chain-anchored option used to be hazard-gated; in 1.10 the
+    // entire resolution picker is gone, so no "Anchor both" text on
+    // any kind.
     expect(screen.queryByText(/Anchor both/i)).not.toBeInTheDocument();
-  });
-
-  it('Apply with keep_local enqueues a follow-up update op + marks conflict resolved', async () => {
-    const conflict = makeConflict();
-    await seedConflict(conflict);
-    const onResolved = vi.fn();
-    const user = userEvent.setup();
-    render(
-      <ConflictResolutionDialog
-        open
-        conflict={conflict}
-        onClose={vi.fn()}
-        onResolved={onResolved}
-      />,
-    );
-    // Default resolution is keep_local; click the matching Apply button.
-    const apply = screen.getByRole('button', { name: /^Keep yours$/ });
-    await act(async () => {
-      await user.click(apply);
-    });
-    // The conflict is now resolved.
-    const fresh = await db.sync_conflicts.get(conflict.id!);
-    expect(fresh?.resolved).toBe(1);
-    // A follow-up queue row has been added.
-    const queueRows = await db.sync_queue.toArray();
-    expect(queueRows.length).toBe(1);
-    expect(queueRows[0]?.kind).toBe('update');
-    expect(queueRows[0]?.ifMatchEtag).toBe(2);
-    expect(onResolved).toHaveBeenCalled();
-  });
-
-  it('Apply label varies per resolution (Accept server / Anchor both / Apply merge)', async () => {
-    const conflict = makeConflict();
-    await seedConflict(conflict);
-    const user = userEvent.setup();
-    render(
-      <ConflictResolutionDialog open conflict={conflict} onClose={vi.fn()} onResolved={vi.fn()} />,
-    );
-    // keep_remote
-    await user.click(screen.getByRole('radio', { name: /Accept server/i }));
-    expect(screen.getByRole('button', { name: /^Accept server$/ })).toBeInTheDocument();
-    // keep_both_chain_anchored
-    await user.click(screen.getByRole('radio', { name: /Anchor both/i }));
-    expect(screen.getByRole('button', { name: /^Anchor both$/ })).toBeInTheDocument();
-    // manual_merge
-    await user.click(screen.getByRole('radio', { name: /Manual merge/i }));
-    expect(screen.getByRole('button', { name: /^Apply merge$/ })).toBeInTheDocument();
   });
 });

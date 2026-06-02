@@ -341,9 +341,33 @@ export function idempotencyKey(): MiddlewareHandler {
         `);
       }
     } catch (err) {
-      // INSERT failure on the cache is non-fatal — the rep already
-      // got their response; the next retry just won't dedupe. Log + swallow.
-      console.warn('[idempotency] cache insert failed:', err);
+      // sec-F2 / sec-F8 close-out (S5 fix bundle, T-S52): log the
+      // cache-INSERT failure at warn level instead of silently
+      // swallowing it. The request already succeeded (the response was
+      // shipped to the client before we entered this block, see
+      // `return undefined;` shape above), so a cache-INSERT failure
+      // here cannot fail the request — the rep got their bytes. What
+      // CAN happen is a retry of the SAME Idempotency-Key landing the
+      // handler a second time (the cache row that would have dedupe'd
+      // the retry never landed). For the chain-anchor double-emit
+      // concern (sec-F2): every chain-anchored route runs its append()
+      // inside the same db.transaction() that INSERTs into the
+      // entity's content-addressed row (evidence_files.storage_key +
+      // plaintext_sha256, action_item_moves(action_item_id + audit_idx
+      // UNIQUE), recommendation.recommendation_number sequence,
+      // inspection_signatures(inspection_id, role) UNIQUE,
+      // inspection_findings(inspection_id, item_key) UNIQUE) — the
+      // second invocation cannot land a duplicate chain row because
+      // its INSERT path catches the UNIQUE collision FIRST and the
+      // route handler maps it to its existing clientId-reuse 200
+      // (same shape as the cache hit would have produced). The
+      // chain-anchor invariant therefore survives a cache-INSERT
+      // failure; the warn log is the operational signal that the
+      // dedupe window degraded.
+      console.warn(
+        '[idempotency] cache INSERT failed; retries of this key will re-run the handler (chain anchor is still bounded by the entity-table UNIQUE):',
+        err,
+      );
     }
     return undefined;
   };

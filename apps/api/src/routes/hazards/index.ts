@@ -48,6 +48,23 @@ hazardsRoute.use('*', authMiddleware());
 // doesn't burn a token. Opt-in per request via Idempotency-Key header.
 hazardsRoute.use('*', idempotencyKey());
 
+// sec-F5 close-out (S5 fix bundle, T-S58): rate-limit runs BEFORE
+// body-limit, mirroring the documented order in action-items (line 62-67),
+// evidence, inspections, and recommendations. The prior order (body-limit
+// first) let an authenticated rep spam >64KB POSTs against hazards routes
+// — each 413 returned without decrementing the rate-limit bucket because
+// bodyLimit's onError short-circuits without calling next(). The corrected
+// order ensures a spammed oversize POST still burns a token (defense-in-
+// depth against malicious-insider / compromised-credential surge).
+//
+// sec-review F1 (1.5): per-IP token-bucket rate limit. The POST + PATCH
+// paths run server-side libsodium ops (envelope seal/open); the GET list
+// path runs N envelope opens (one per row in the safeSummary projection).
+// Authenticated users still get throttled because the failure mode we
+// care about is an authenticated rep -- compromised credential or
+// malicious insider -- not anonymous probing.
+hazardsRoute.use('*', rateLimit({ name: 'hazards', capacity: 60, refillPerSecond: 10 }));
+
 // sec-review F1 (1.5): bound the request size before c.req.json() buffers
 // a malicious 100MB blob in memory. The largest legitimate body is the
 // POST create with description<=8000 + reporter<=200 + locationDetail<=2000
@@ -57,14 +74,6 @@ const HAZARDS_BODY_LIMIT = bodyLimit({
   onError: (c) => c.json({ error: 'payload_too_large' }, 413),
 });
 hazardsRoute.use('*', HAZARDS_BODY_LIMIT);
-
-// sec-review F1 (1.5): per-IP token-bucket rate limit. The POST + PATCH
-// paths run server-side libsodium ops (envelope seal/open); the GET list
-// path runs N envelope opens (one per row in the safeSummary projection).
-// Authenticated users still get throttled because the failure mode we
-// care about is an authenticated rep -- compromised credential or
-// malicious insider -- not anonymous probing.
-hazardsRoute.use('*', rateLimit({ name: 'hazards', capacity: 60, refillPerSecond: 10 }));
 
 // ---------------------------------------------------------------------------
 // Schemas
@@ -126,7 +135,7 @@ hazardsRoute.post('/', async (c) => {
   // from a different rep cannot alias another rep's row).
   if (body.clientId) {
     const existing = (await db.execute(sql`
-      SELECT id, hazard_code, status, reported_at::text AS reported_at, reported_by
+      SELECT id, hazard_code, status, reported_at::text AS reported_at, reported_by, version
       FROM hazards WHERE id = ${body.clientId} LIMIT 1
     `)) as unknown as Array<{
       id: string;
@@ -134,6 +143,7 @@ hazardsRoute.post('/', async (c) => {
       status: string;
       reported_at: string;
       reported_by: string;
+      version: number;
     }>;
     if (existing.length > 0) {
       const row = existing[0]!;
@@ -146,6 +156,13 @@ hazardsRoute.post('/', async (c) => {
           hazardCode: row.hazard_code,
           status: row.status,
           reportedAt: row.reported_at,
+          // sec-F7 close-out (T-S55): version field on the clientId-
+          // reuse 200 path so the typed-client wrapper's
+          // `extractVersion(body)` populates `_server_version`
+          // correctly. Without it, the row's _server_version=0 and
+          // the next PATCH ships `If-Match: "0"` — which the post-
+          // S5 if-match parser rejects with 428 (LOW close-out).
+          version: row.version,
         },
         200,
       );
@@ -249,6 +266,12 @@ hazardsRoute.post('/', async (c) => {
     hazardCode: inserted.hazard_code,
     status: inserted.status,
     reportedAt: inserted.reported_at,
+    // sec-F7 close-out (T-S55): freshly-INSERTed row has version=1
+    // (migration 0009 DEFAULT). Returning it here lets the typed-
+    // client's optimistic row land with _server_version=1 so the
+    // next PATCH's If-Match matches without a spurious 409 on the
+    // first edit of a newly-created row.
+    version: 1,
   });
 });
 
