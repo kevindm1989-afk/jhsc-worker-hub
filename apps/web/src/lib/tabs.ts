@@ -1,8 +1,8 @@
 import {
   AlertTriangle,
   ClipboardList,
-  FileText,
   MoreHorizontal,
+  Scale,
   ScrollText,
   type LucideIcon,
 } from 'lucide-react';
@@ -58,7 +58,10 @@ export const TABS: readonly TabDefinition[] = [
     path: '/recommendations',
     label: 'Recommendations',
     shortLabel: 'Recs',
-    icon: FileText,
+    // Scale carries the legal-document semantic without union iconography
+    // (CLAUDE.md non-negotiable #10). The 1.9 surface is the formal
+    // Notice of Recommendation under OHSA s.9(20) / CLC s.135(5).
+    icon: Scale,
   },
   {
     id: 'more',

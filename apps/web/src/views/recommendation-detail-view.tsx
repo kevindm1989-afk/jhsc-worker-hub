@@ -1,0 +1,920 @@
+// /recommendations/:id — decrypted reveal + lifecycle controls.
+//
+// IMPORTANT:
+//   - Does NOT auto-fetch the reveal endpoint on mount. The user must tap
+//     "Reveal" — step-up is intentional friction (mirror of T-I12 from
+//     1.8 finding-detail). The detail metadata IS fetched on mount
+//     because it's PI-clean (presence flags + counts + timestamps only).
+//   - On 401 step_up_required the API client dispatches the
+//     stepUpEmitter; the global modal opens and the caller re-clicks
+//     Reveal after the modal closes.
+//   - Lifecycle controls render conditionally on status — draft shows
+//     edit + submit + withdraw; submitted shows capture-response +
+//     withdraw; response_received shows resolve + withdraw + more
+//     responses; resolved + withdrawn are read-only.
+//
+// Statutory anchor copy (ADR-0008 §3.6):
+//   - ON jurisdiction: "OHSA s.9(21) — written response required within
+//     21 days." Days remaining badge derives from the server-computed
+//     deadline.
+//   - CA-FED jurisdiction: "CLC s.135(6) — no fixed clock; written
+//     response required 'as soon as possible.'" No countdown.
+
+import { useCallback, useEffect, useState } from 'react';
+import { Link, useNavigate, useParams } from 'react-router-dom';
+import {
+  CalendarClock,
+  ChevronLeft,
+  Edit3,
+  Eye,
+  FileSignature,
+  Link2,
+  Lock,
+  MessageSquarePlus,
+  ScrollText,
+  Send,
+  ShieldAlert,
+  XCircle,
+} from 'lucide-react';
+import { Button } from '@/components/ui/button';
+import { cn } from '@/lib/utils';
+import { RecommendationResolveDialog } from '@/components/recommendation-resolve-dialog';
+import { RecommendationResponseSheet } from '@/components/recommendation-response-sheet';
+import { RecommendationWithdrawDialog } from '@/components/recommendation-withdraw-dialog';
+import { legalApi, type LegalClause } from '@/legal/api';
+import {
+  isStepUpRequired,
+  RecommendationApiError,
+  recommendationsApi,
+  type RecommendationCitation,
+  type RecommendationDetail,
+  type RecommendationReveal,
+} from '@/recommendations/api';
+import {
+  DeadlineBadge,
+  JurisdictionBadge,
+  RecommendationStatusBadge,
+} from '@/recommendations/components';
+import { recommendationDeadlineState } from '@jhsc/shared-types';
+
+export function RecommendationDetailView(): JSX.Element {
+  const { id } = useParams<{ id: string }>();
+  if (!id) {
+    return <div className="p-4 text-sm text-status-rejected">Invalid recommendation id.</div>;
+  }
+  return <RecommendationDetailInner key={id} id={id} />;
+}
+
+function RecommendationDetailInner({ id }: { id: string }): JSX.Element {
+  const navigate = useNavigate();
+  const [detail, setDetail] = useState<RecommendationDetail | null>(null);
+  const [reveal, setReveal] = useState<RecommendationReveal | null>(null);
+  const [revealing, setRevealing] = useState(false);
+  const [needsStepUp, setNeedsStepUp] = useState(false);
+  const [notFound, setNotFound] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [actionError, setActionError] = useState<string | null>(null);
+  const [pendingAction, setPendingAction] = useState<
+    'submit' | 'withdraw' | 'resolve' | 'response' | null
+  >(null);
+  const [submitConfirmOpen, setSubmitConfirmOpen] = useState(false);
+  const [withdrawOpen, setWithdrawOpen] = useState(false);
+  const [resolveOpen, setResolveOpen] = useState(false);
+  const [responseSheetOpen, setResponseSheetOpen] = useState(false);
+
+  const refresh = useCallback(async (): Promise<void> => {
+    try {
+      const fresh = await recommendationsApi.get(id);
+      setDetail(fresh);
+    } catch (e) {
+      if (e instanceof RecommendationApiError && e.status === 404) setNotFound(true);
+      else setError(e instanceof Error ? e.message : String(e));
+    }
+  }, [id]);
+
+  useEffect(() => {
+    let cancelled = false;
+    recommendationsApi
+      .get(id)
+      .then((fresh) => {
+        if (!cancelled) setDetail(fresh);
+      })
+      .catch((e: unknown) => {
+        if (cancelled) return;
+        if (e instanceof RecommendationApiError && e.status === 404) setNotFound(true);
+        else setError(e instanceof Error ? e.message : String(e));
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [id]);
+
+  // Reveal handler — intentionally NOT called on mount.
+  const onReveal = useCallback(async (): Promise<void> => {
+    setRevealing(true);
+    setError(null);
+    setNeedsStepUp(false);
+    try {
+      const r = await recommendationsApi.reveal(id);
+      if (isStepUpRequired(r)) {
+        setNeedsStepUp(true);
+        return;
+      }
+      setReveal(r);
+    } catch (e) {
+      if (e instanceof RecommendationApiError && e.status === 404) {
+        setNotFound(true);
+      } else {
+        setError(e instanceof Error ? e.message : String(e));
+      }
+    } finally {
+      setRevealing(false);
+    }
+  }, [id]);
+
+  async function onSubmit(): Promise<void> {
+    setSubmitConfirmOpen(false);
+    setPendingAction('submit');
+    setActionError(null);
+    try {
+      await recommendationsApi.submit(id);
+      await refresh();
+    } catch (e) {
+      if (e instanceof RecommendationApiError) {
+        if (e.status === 422) {
+          const errBody = e.body as { error?: string } | undefined;
+          if (errBody?.error === 'citation_corpus_drift') {
+            setActionError(
+              'A cited clause is no longer in the active corpus. Edit the recommendation and update the citation, then try again.',
+            );
+          } else if (errBody?.error === 'citation_marker_mismatch') {
+            setActionError(
+              'A [[cite:N]] marker does not match the citation rows. Edit the recommendation to align them.',
+            );
+          } else if (errBody?.error === 'not_draft_state') {
+            setActionError('This recommendation is no longer in draft state.');
+          } else {
+            setActionError(`Could not submit (${errBody?.error ?? 'rejected'}).`);
+          }
+        } else if (e.status === 401) {
+          setActionError('Sign-in expired. Reload the page and try again.');
+        } else {
+          setActionError(`Could not submit (HTTP ${e.status}).`);
+        }
+      } else {
+        setActionError(e instanceof Error ? e.message : String(e));
+      }
+    } finally {
+      setPendingAction(null);
+    }
+  }
+
+  if (notFound) {
+    return (
+      <div className="mx-auto max-w-3xl px-4 py-6 md:px-6 md:py-8">
+        <Link
+          to="/recommendations"
+          className="mb-3 inline-flex items-center text-xs text-primary hover:underline focus:outline-none focus:ring-2 focus:ring-ring"
+        >
+          <ChevronLeft className="h-3.5 w-3.5" strokeWidth={2} aria-hidden="true" />
+          Back to recommendations
+        </Link>
+        <div className="rounded-md border border-border bg-card p-6 text-sm text-muted-foreground">
+          That recommendation does not exist.
+        </div>
+      </div>
+    );
+  }
+  if (error && !detail) {
+    return (
+      <div className="mx-auto max-w-3xl px-4 py-6">
+        <div className="rounded-md border border-status-rejected/40 bg-status-rejected/10 p-4 text-sm text-status-rejected">
+          {error}
+        </div>
+      </div>
+    );
+  }
+  if (!detail) {
+    return (
+      <div className="mx-auto max-w-3xl px-4 py-6 text-sm text-muted-foreground">Loading…</div>
+    );
+  }
+
+  const deadline = detail.deadline ? new Date(detail.deadline) : null;
+  const dlState = recommendationDeadlineState(new Date(), deadline);
+
+  return (
+    <div className="mx-auto max-w-3xl px-4 py-4 md:px-6 md:py-6">
+      <Link
+        to="/recommendations"
+        className="mb-3 inline-flex items-center text-xs text-primary hover:underline focus:outline-none focus:ring-2 focus:ring-ring"
+      >
+        <ChevronLeft className="h-3.5 w-3.5" strokeWidth={2} aria-hidden="true" />
+        Back to recommendations
+      </Link>
+
+      <header className="mb-4">
+        <div className="flex flex-wrap items-center gap-2">
+          <span className="font-mono text-sm font-semibold text-foreground">
+            #{detail.recommendationNumber}
+          </span>
+          <JurisdictionBadge jurisdiction={detail.jurisdiction} />
+          <RecommendationStatusBadge status={detail.status} />
+          {detail.status === 'submitted' || detail.status === 'response_received' ? (
+            <DeadlineBadge state={dlState} deadline={deadline} jurisdiction={detail.jurisdiction} />
+          ) : null}
+        </div>
+        <h1 className="mt-1 text-2xl font-semibold tracking-tight text-foreground md:text-3xl">
+          Recommendation #{detail.recommendationNumber}
+        </h1>
+        <Timeline detail={detail} />
+      </header>
+
+      {/* Statutory anchor / 21-day clock visualization */}
+      <StatutoryAnchor detail={detail} deadline={deadline} dlState={dlState} />
+
+      {/* Action / state error surface */}
+      {actionError ? (
+        <div
+          role="alert"
+          aria-live="polite"
+          className="mb-4 rounded-md border border-status-rejected/40 bg-status-rejected/10 p-3 text-sm text-status-rejected"
+        >
+          {actionError}
+        </div>
+      ) : null}
+
+      {/* Reveal / decrypted body */}
+      {reveal ? (
+        <RevealedSection
+          reveal={reveal}
+          citationRows={detail.citations}
+          linkedActionItemId={detail.linkedActionItemId}
+        />
+      ) : (
+        <MaskedSection
+          needsStepUp={needsStepUp}
+          revealing={revealing}
+          error={error}
+          onReveal={() => {
+            void onReveal();
+          }}
+        />
+      )}
+
+      {/* Linked action item (always render when present) */}
+      {detail.linkedActionItemId ? (
+        <LinkedActionItem actionItemId={detail.linkedActionItemId} />
+      ) : null}
+
+      {/* Lifecycle controls */}
+      <LifecycleControls
+        detail={detail}
+        pendingAction={pendingAction}
+        onEdit={() => navigate(`/recommendations/${encodeURIComponent(detail.id)}/edit`)}
+        onSubmit={() => setSubmitConfirmOpen(true)}
+        onResponse={() => setResponseSheetOpen(true)}
+        onResolve={() => setResolveOpen(true)}
+        onWithdraw={() => setWithdrawOpen(true)}
+      />
+
+      {/* Responses summary (presence + counts only — body lives in reveal) */}
+      <ResponsesSummary detail={detail} reveal={reveal} />
+
+      <div className="mt-6 text-xs text-muted-foreground">
+        Recommendation drafting, submission, response capture, resolution, and withdrawal are all
+        anchored in the audit chain. Decrypted reveal requires step-up authentication with a
+        60-second freshness window.
+      </div>
+
+      <div className="mt-4">
+        <Button variant="ghost" size="sm" onClick={() => navigate('/recommendations')}>
+          Done
+        </Button>
+      </div>
+
+      {/* Confirm dialogs / sheets */}
+      <SubmitConfirmDialog
+        open={submitConfirmOpen}
+        detail={detail}
+        onClose={() => setSubmitConfirmOpen(false)}
+        onConfirm={() => {
+          void onSubmit();
+        }}
+      />
+      <RecommendationResponseSheet
+        open={responseSheetOpen}
+        recommendationId={detail.id}
+        onClose={() => setResponseSheetOpen(false)}
+        onCaptured={() => {
+          setResponseSheetOpen(false);
+          void refresh();
+        }}
+      />
+      <RecommendationWithdrawDialog
+        open={withdrawOpen}
+        recommendationId={detail.id}
+        hasLinkedActionItem={detail.linkedActionItemId !== null}
+        onClose={() => setWithdrawOpen(false)}
+        onWithdrawn={() => {
+          setWithdrawOpen(false);
+          void refresh();
+        }}
+      />
+      <RecommendationResolveDialog
+        open={resolveOpen}
+        recommendationId={detail.id}
+        linkedActionItemId={detail.linkedActionItemId}
+        onClose={() => setResolveOpen(false)}
+        onResolved={() => {
+          setResolveOpen(false);
+          void refresh();
+        }}
+      />
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Timeline — drafted_at → submitted_at → resolved/withdrawn_at
+// ---------------------------------------------------------------------------
+
+function Timeline({ detail }: { detail: RecommendationDetail }): JSX.Element {
+  return (
+    <div className="mt-1 flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
+      <span>drafted {new Date(detail.draftedAt).toLocaleString()}</span>
+      <span>·</span>
+      <span>
+        by <span className="font-mono tabular-nums">{detail.draftedByUserId.slice(0, 8)}</span>
+      </span>
+      {detail.submittedAt ? (
+        <>
+          <span>·</span>
+          <span>submitted {new Date(detail.submittedAt).toLocaleString()}</span>
+        </>
+      ) : null}
+      {detail.resolvedAt ? (
+        <>
+          <span>·</span>
+          <span>resolved {new Date(detail.resolvedAt).toLocaleString()}</span>
+        </>
+      ) : null}
+      {detail.withdrawnAt ? (
+        <>
+          <span>·</span>
+          <span>withdrawn {new Date(detail.withdrawnAt).toLocaleString()}</span>
+          {detail.withdrawnReason ? (
+            <>
+              <span>·</span>
+              <span>reason: {detail.withdrawnReason}</span>
+            </>
+          ) : null}
+        </>
+      ) : null}
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Statutory anchor — the 21-day clock visualization for ON, the
+// informational copy for CA-FED.
+// ---------------------------------------------------------------------------
+
+function StatutoryAnchor({
+  detail,
+  deadline,
+  dlState,
+}: {
+  detail: RecommendationDetail;
+  deadline: Date | null;
+  dlState: ReturnType<typeof recommendationDeadlineState>;
+}): JSX.Element | null {
+  // Only meaningful once the recommendation has been submitted.
+  if (detail.status !== 'submitted' && detail.status !== 'response_received') {
+    return null;
+  }
+  const overdue = dlState === 'overdue';
+  return (
+    <section
+      aria-labelledby="statutory-anchor-heading"
+      className={cn(
+        'mb-4 rounded-md border bg-card p-4',
+        overdue ? 'border-red-300' : 'border-border',
+      )}
+    >
+      <h2
+        id="statutory-anchor-heading"
+        className="mb-1 flex items-center gap-1.5 text-xs font-medium uppercase tracking-wide text-muted-foreground"
+      >
+        <CalendarClock className="h-3 w-3" strokeWidth={1.75} aria-hidden="true" />
+        Statutory clock
+      </h2>
+      {detail.jurisdiction === 'ON' ? (
+        <div className="text-sm text-foreground">
+          <span className="font-mono">OHSA s.9(21)</span> — written response required within 21
+          days.
+          {deadline ? (
+            <>
+              {' '}
+              Due by <strong>{deadline.toLocaleDateString()}</strong>{' '}
+              <span className="text-xs text-muted-foreground">({deadline.toLocaleString()})</span>.
+            </>
+          ) : null}
+          {overdue ? (
+            <span className="ml-2 inline-flex items-center gap-1 text-red-700">
+              <ShieldAlert className="h-3 w-3" strokeWidth={2} aria-hidden="true" />
+              Overdue.
+            </span>
+          ) : null}
+        </div>
+      ) : (
+        <div className="text-sm text-foreground">
+          <span className="font-mono">CLC s.135(6)</span> — written response required &ldquo;as soon
+          as possible.&rdquo; No fixed clock.
+        </div>
+      )}
+    </section>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Masked + Revealed body sections
+// ---------------------------------------------------------------------------
+
+function MaskedSection({
+  needsStepUp,
+  revealing,
+  error,
+  onReveal,
+}: {
+  needsStepUp: boolean;
+  revealing: boolean;
+  error: string | null;
+  onReveal: () => void;
+}): JSX.Element {
+  return (
+    <section
+      aria-labelledby="recommendation-masked-heading"
+      className="mb-4 rounded-md border border-border bg-card p-4"
+    >
+      <h2
+        id="recommendation-masked-heading"
+        className="mb-2 flex items-center gap-1 text-xs font-medium uppercase tracking-wide text-muted-foreground"
+      >
+        <Lock className="h-3 w-3" strokeWidth={1.75} aria-hidden="true" />
+        Title encrypted · Reveal to read
+      </h2>
+      <p className="text-sm text-muted-foreground">
+        The title, body, and management responses are encrypted at rest. Revealing them requires
+        step-up authentication (passkey or TOTP, 60-second freshness window). The decrypted text is
+        rendered with citation markers replaced by footnote links.
+      </p>
+      <div className="mt-3 flex items-center justify-between gap-2">
+        {needsStepUp ? (
+          <span className="text-xs text-status-pending">
+            Step-up authentication required. Complete the prompt, then tap Reveal again.
+          </span>
+        ) : (
+          <span className="text-xs text-muted-foreground">No decrypted text loaded yet.</span>
+        )}
+        <Button type="button" variant="default" size="sm" disabled={revealing} onClick={onReveal}>
+          <Eye className="h-3.5 w-3.5" strokeWidth={2} aria-hidden="true" />
+          {revealing ? 'Revealing…' : 'Reveal'}
+        </Button>
+      </div>
+      {error ? (
+        <div
+          role="alert"
+          aria-live="polite"
+          className="mt-2 rounded-md border border-status-rejected/40 bg-status-rejected/10 p-2 text-xs text-status-rejected"
+        >
+          {error}
+        </div>
+      ) : null}
+    </section>
+  );
+}
+
+function RevealedSection({
+  reveal,
+  citationRows,
+  linkedActionItemId,
+}: {
+  reveal: RecommendationReveal;
+  citationRows: ReadonlyArray<RecommendationCitation>;
+  linkedActionItemId: string | null;
+}): JSX.Element {
+  return (
+    <section
+      aria-labelledby="recommendation-revealed-heading"
+      className="mb-4 rounded-md border border-border bg-card p-4"
+    >
+      <h2
+        id="recommendation-revealed-heading"
+        className="mb-2 flex items-center gap-1 text-xs font-medium uppercase tracking-wide text-muted-foreground"
+      >
+        <Lock className="h-3 w-3" strokeWidth={1.75} aria-hidden="true" />
+        Decrypted
+      </h2>
+      <h3 className="text-base font-semibold text-foreground">{reveal.title}</h3>
+      <div className="mt-3 whitespace-pre-wrap text-sm leading-relaxed text-foreground">
+        <BodyWithFootnotes body={reveal.body} citations={citationRows} />
+      </div>
+      {citationRows.length > 0 ? <CitationsFootnoteList citations={citationRows} /> : null}
+      {linkedActionItemId ? (
+        <div className="mt-3 flex items-center gap-1.5 text-[11px] text-muted-foreground">
+          <Link2 className="h-3 w-3" strokeWidth={1.75} aria-hidden="true" />
+          Linked to action item{' '}
+          <span className="font-mono tabular-nums">{linkedActionItemId.slice(0, 8)}</span>
+        </div>
+      ) : null}
+    </section>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Body with footnotes — replace [[cite:N]] markers with clickable [N] links
+// that scroll to the citations footnote list below.
+// ---------------------------------------------------------------------------
+
+const BODY_MARKER_RE = /\[\[cite:(\d+)\]\]/g;
+
+function BodyWithFootnotes({
+  body,
+  citations,
+}: {
+  body: string;
+  citations: ReadonlyArray<RecommendationCitation>;
+}): JSX.Element {
+  const positions = new Set(citations.map((c) => c.position));
+  const parts: Array<JSX.Element | string> = [];
+  let cursor = 0;
+  let keyCounter = 0;
+  for (const match of body.matchAll(BODY_MARKER_RE)) {
+    if (match.index === undefined) continue;
+    if (match.index > cursor) {
+      parts.push(body.slice(cursor, match.index));
+    }
+    const n = Number(match[1]);
+    if (positions.has(n)) {
+      parts.push(
+        <a
+          key={`m-${keyCounter++}`}
+          href={`#citation-${n}`}
+          className="mx-0.5 inline-flex items-baseline rounded bg-primary/10 px-1 text-[11px] font-mono font-semibold text-primary no-underline hover:bg-primary/20 focus:outline-none focus:ring-2 focus:ring-ring"
+          aria-label={`Footnote ${n}`}
+          onClick={(e) => {
+            e.preventDefault();
+            const target = document.getElementById(`citation-${n}`);
+            if (target) target.scrollIntoView({ behavior: 'smooth', block: 'center' });
+          }}
+        >
+          [{n}]
+        </a>,
+      );
+    } else {
+      // Orphan marker — render the literal text so the rep sees the
+      // problem when re-reading the decrypted body.
+      parts.push(
+        <span
+          key={`o-${keyCounter++}`}
+          className="rounded bg-amber-50 px-0.5 font-mono text-[11px] text-amber-800"
+          title={`No citation row for marker [${n}]`}
+        >
+          [[cite:{n}]]
+        </span>,
+      );
+    }
+    cursor = match.index + match[0].length;
+  }
+  if (cursor < body.length) parts.push(body.slice(cursor));
+  return <>{parts.map((p, i) => (typeof p === 'string' ? <span key={i}>{p}</span> : p))}</>;
+}
+
+// ---------------------------------------------------------------------------
+// Citation footnote list — resolves each (statuteCode, clauseId,
+// versionDate) triple via the legal-corpus API client and renders the
+// entry's heading + body text. This is the read-time equivalent of the
+// CitationCard hover pattern (CLAUDE.md "Citation Hover" signature
+// interaction).
+// ---------------------------------------------------------------------------
+
+function CitationsFootnoteList({
+  citations,
+}: {
+  citations: ReadonlyArray<RecommendationCitation>;
+}): JSX.Element {
+  return (
+    <ol className="mt-4 list-none space-y-2 border-t border-border pt-3 text-xs">
+      {[...citations]
+        .sort((a, b) => a.position - b.position)
+        .map((c) => (
+          <li key={c.position} id={`citation-${c.position}`}>
+            <CitationFootnote citation={c} />
+          </li>
+        ))}
+    </ol>
+  );
+}
+
+function CitationFootnote({ citation }: { citation: RecommendationCitation }): JSX.Element {
+  const [clause, setClause] = useState<LegalClause | null>(null);
+  const [missing, setMissing] = useState(false);
+  useEffect(() => {
+    let cancelled = false;
+    legalApi
+      .getClause(citation.clauseId)
+      .then((c) => {
+        if (!cancelled) setClause(c);
+      })
+      .catch(() => {
+        if (!cancelled) setMissing(true);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [citation.clauseId]);
+  return (
+    <div className="flex gap-2">
+      <span className="font-mono font-semibold text-primary">[{citation.position}]</span>
+      <div className="flex-1">
+        <div className="font-medium text-foreground">
+          {citation.statuteCode}
+          {clause ? ` ${clause.citation}` : ''} ·{' '}
+          <span className="text-muted-foreground">{citation.versionDate}</span>
+        </div>
+        {missing ? (
+          <div className="text-status-rejected">
+            Clause no longer in the active corpus. The historical record remains queryable via the
+            (statute, clause id, version date) triple above.
+          </div>
+        ) : !clause ? (
+          <div className="text-muted-foreground">Loading clause…</div>
+        ) : (
+          <>
+            {clause.heading ? <div className="text-muted-foreground">{clause.heading}</div> : null}
+            {clause.bodyKind === 'full_text' && clause.body ? (
+              <p className="mt-1 line-clamp-4 whitespace-pre-wrap text-foreground">{clause.body}</p>
+            ) : clause.bodyKind === 'summary' && clause.bodySummary ? (
+              <p className="mt-1 line-clamp-4 whitespace-pre-wrap italic text-foreground">
+                {clause.bodySummary}
+              </p>
+            ) : null}
+            <div className="mt-1">
+              <a
+                href={clause.sourceUrl}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="text-primary hover:underline"
+              >
+                Source ↗
+              </a>
+            </div>
+          </>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Linked action item card
+// ---------------------------------------------------------------------------
+
+function LinkedActionItem({ actionItemId }: { actionItemId: string }): JSX.Element {
+  return (
+    <section
+      aria-labelledby="linked-action-item-heading"
+      className="mb-4 rounded-md border border-border bg-card p-4"
+    >
+      <h2
+        id="linked-action-item-heading"
+        className="mb-1 flex items-center gap-1.5 text-xs font-medium uppercase tracking-wide text-muted-foreground"
+      >
+        <Link2 className="h-3 w-3" strokeWidth={1.75} aria-hidden="true" />
+        Linked action item
+      </h2>
+      <p className="text-sm text-muted-foreground">
+        The bridge action item lives in the minutes&apos; <strong>recommendation</strong> section
+        and tracks management&apos;s response.
+      </p>
+      <div className="mt-2">
+        <Button asChild variant="outline" size="sm">
+          <Link to={`/action-items/${encodeURIComponent(actionItemId)}`}>
+            Open action item{' '}
+            <span className="font-mono tabular-nums">{actionItemId.slice(0, 8)}</span>
+          </Link>
+        </Button>
+      </div>
+    </section>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Lifecycle controls — render conditionally on status.
+// ---------------------------------------------------------------------------
+
+function LifecycleControls({
+  detail,
+  pendingAction,
+  onEdit,
+  onSubmit,
+  onResponse,
+  onResolve,
+  onWithdraw,
+}: {
+  detail: RecommendationDetail;
+  pendingAction: 'submit' | 'withdraw' | 'resolve' | 'response' | null;
+  onEdit: () => void;
+  onSubmit: () => void;
+  onResponse: () => void;
+  onResolve: () => void;
+  onWithdraw: () => void;
+}): JSX.Element | null {
+  if (detail.status === 'resolved' || detail.status === 'withdrawn') {
+    return (
+      <section
+        aria-labelledby="lifecycle-readonly-heading"
+        className="mb-4 rounded-md border border-border bg-secondary/30 p-4 text-xs text-muted-foreground"
+      >
+        <h2 id="lifecycle-readonly-heading" className="sr-only">
+          Lifecycle controls
+        </h2>
+        Read-only — this recommendation has been{' '}
+        {detail.status === 'resolved' ? 'resolved' : 'withdrawn'}.
+      </section>
+    );
+  }
+  const submitting = pendingAction === 'submit';
+  return (
+    <section
+      aria-labelledby="lifecycle-heading"
+      className="mb-4 flex flex-wrap items-center gap-2 rounded-md border border-border bg-card p-4"
+    >
+      <h2 id="lifecycle-heading" className="sr-only">
+        Lifecycle controls
+      </h2>
+      {detail.status === 'draft' ? (
+        <>
+          <Button type="button" variant="outline" size="sm" onClick={onEdit}>
+            <Edit3 className="h-3.5 w-3.5" strokeWidth={2} aria-hidden="true" />
+            Edit
+          </Button>
+          <Button type="button" size="sm" disabled={submitting} onClick={onSubmit}>
+            <Send className="h-3.5 w-3.5" strokeWidth={2} aria-hidden="true" />
+            {submitting ? 'Submitting…' : 'Submit'}
+          </Button>
+          <Button type="button" variant="outline" size="sm" onClick={onWithdraw}>
+            <XCircle className="h-3.5 w-3.5" strokeWidth={2} aria-hidden="true" />
+            Withdraw
+          </Button>
+        </>
+      ) : detail.status === 'submitted' ? (
+        <>
+          <Button type="button" size="sm" onClick={onResponse}>
+            <MessageSquarePlus className="h-3.5 w-3.5" strokeWidth={2} aria-hidden="true" />
+            Capture response
+          </Button>
+          <Button type="button" variant="outline" size="sm" onClick={onWithdraw}>
+            <XCircle className="h-3.5 w-3.5" strokeWidth={2} aria-hidden="true" />
+            Withdraw
+          </Button>
+        </>
+      ) : detail.status === 'response_received' ? (
+        <>
+          <Button type="button" size="sm" onClick={onResolve}>
+            <FileSignature className="h-3.5 w-3.5" strokeWidth={2} aria-hidden="true" />
+            Resolve
+          </Button>
+          <Button type="button" variant="outline" size="sm" onClick={onResponse}>
+            <MessageSquarePlus className="h-3.5 w-3.5" strokeWidth={2} aria-hidden="true" />
+            Capture additional response
+          </Button>
+          <Button type="button" variant="outline" size="sm" onClick={onWithdraw}>
+            <XCircle className="h-3.5 w-3.5" strokeWidth={2} aria-hidden="true" />
+            Withdraw
+          </Button>
+        </>
+      ) : null}
+    </section>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Responses summary — presence + counts; the decrypted bodies come from
+// the reveal endpoint and render below when available.
+// ---------------------------------------------------------------------------
+
+function ResponsesSummary({
+  detail,
+  reveal,
+}: {
+  detail: RecommendationDetail;
+  reveal: RecommendationReveal | null;
+}): JSX.Element | null {
+  if (detail.responses.length === 0) return null;
+  return (
+    <section
+      aria-labelledby="responses-heading"
+      className="mb-4 rounded-md border border-border bg-card p-4"
+    >
+      <h2
+        id="responses-heading"
+        className="mb-2 flex items-center gap-1.5 text-xs font-medium uppercase tracking-wide text-muted-foreground"
+      >
+        <ScrollText className="h-3 w-3" strokeWidth={1.75} aria-hidden="true" />
+        Responses ({detail.responses.length})
+      </h2>
+      <ul className="space-y-2">
+        {detail.responses.map((r) => {
+          const revealed = reveal?.responses.find((rr) => rr.id === r.id) ?? null;
+          return (
+            <li key={r.id} className="rounded-md border border-border bg-background p-3">
+              <div className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
+                <span className="font-mono font-semibold text-foreground">#{r.position}</span>
+                <span>·</span>
+                <span>{new Date(r.receivedAt).toLocaleString()}</span>
+                <span>·</span>
+                <span>
+                  captured by{' '}
+                  <span className="font-mono tabular-nums">{r.receivedByUserId.slice(0, 8)}</span>
+                </span>
+              </div>
+              {revealed ? (
+                <div className="mt-2">
+                  <div className="text-xs font-medium text-foreground">{revealed.authorRole}</div>
+                  <div className="mt-1 whitespace-pre-wrap text-sm leading-relaxed text-foreground">
+                    {revealed.body}
+                  </div>
+                </div>
+              ) : (
+                <div className="mt-2 flex items-center gap-1.5 text-[11px] text-muted-foreground">
+                  <Lock className="h-3 w-3" strokeWidth={1.75} aria-hidden="true" />
+                  Author role + body encrypted · use Reveal above to decrypt all responses at once.
+                </div>
+              )}
+            </li>
+          );
+        })}
+      </ul>
+    </section>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Submit confirm dialog — rights-protective copy that explains downstream
+// consequences without discouraging submission.
+// ---------------------------------------------------------------------------
+
+function SubmitConfirmDialog({
+  open,
+  detail,
+  onClose,
+  onConfirm,
+}: {
+  open: boolean;
+  detail: RecommendationDetail;
+  onClose: () => void;
+  onConfirm: () => void;
+}): JSX.Element | null {
+  if (!open) return null;
+  return (
+    <div
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="submit-confirm-title"
+      className="fixed inset-0 z-50 flex items-end justify-center bg-foreground/50 backdrop-blur-sm md:items-center"
+      onClick={onClose}
+    >
+      <div
+        className="w-full max-w-md rounded-t-2xl bg-card p-6 pb-8 shadow-lg md:rounded-2xl"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <h2
+          id="submit-confirm-title"
+          className="text-lg font-semibold tracking-tight text-foreground"
+        >
+          Submit recommendation #{detail.recommendationNumber}?
+        </h2>
+        <p className="mt-2 text-sm text-muted-foreground">
+          Submitting creates a tracked Action Item in the next meeting&apos;s{' '}
+          <strong>recommendation</strong> section.
+          {detail.jurisdiction === 'ON'
+            ? ' The 21-day s.9(21) clock starts now.'
+            : ' Under CLC s.135(6) the response is required “as soon as possible.”'}{' '}
+          The chain of custody captures the submission timestamp, citation snapshot, and linked
+          action item id.
+        </p>
+        <div className="mt-5 flex items-center justify-end gap-2">
+          <Button type="button" variant="outline" onClick={onClose}>
+            Cancel
+          </Button>
+          <Button type="button" onClick={onConfirm}>
+            <Send className="h-3.5 w-3.5" strokeWidth={2} aria-hidden="true" />
+            Submit
+          </Button>
+        </div>
+      </div>
+    </div>
+  );
+}
