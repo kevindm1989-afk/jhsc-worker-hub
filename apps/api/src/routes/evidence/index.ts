@@ -72,12 +72,17 @@ const B64 = z.string().regex(/^[A-Za-z0-9+/]*={0,2}$/, 'must be valid base64');
 //
 // 1.8 (T-I14 close-out): 'inspection_finding' opens in lockstep with
 // migration 0007's `evidence_files_linked_fk_guard` trigger ratchet —
-// both layers agree, neither drifts. 'recommendation' + 'incident' stay
-// rejected until 1.9 / later ship their owning tables + triggers.
+// both layers agree, neither drifts. 1.9 (T-R38 close-out):
+// 'recommendation' opens in lockstep with migration 0008's
+// evidence_files_linked_fk_guard 'recommendation' branch — the rec
+// can carry photos of failed safety measures + supporting documents
+// per ADR-0008 §3.13. 'incident' stays rejected until its owning
+// milestone.
 const acceptedLinkedTypes: ReadonlyArray<EvidenceLinkedType> = [
   'hazard',
   'action_item',
   'inspection_finding',
+  'recommendation',
 ];
 
 const uploadUrlBody = z
@@ -111,8 +116,7 @@ const finalizeBody = z
     { message: 'gpsLatitude and gpsLongitude are a pair', path: ['gpsLatitude'] },
   )
   .refine((b) => acceptedLinkedTypes.includes(b.linkedType), {
-    message:
-      'linkedType not yet supported -- inspection_finding / recommendation / incident land in their owning milestones',
+    message: 'linkedType not yet supported -- incident lands in its owning milestone',
     path: ['linkedType'],
   });
 
@@ -199,6 +203,14 @@ evidenceRoute.post('/', async (c) => {
       sql`SELECT 1 FROM inspection_findings WHERE id = ${body.linkedId} LIMIT 1`,
     )) as unknown as Array<unknown>;
     if (rows.length === 0) return c.json({ error: 'linked_entity_not_found' }, 422);
+  } else if (body.linkedType === 'recommendation') {
+    // T-R38 close-out: route-layer FK existence check for the new
+    // 'recommendation' linkedType. The trigger backstop already landed
+    // in migration 0008; this is the route's clean 422 path.
+    const rows = (await db.execute(
+      sql`SELECT 1 FROM recommendations WHERE id = ${body.linkedId} LIMIT 1`,
+    )) as unknown as Array<unknown>;
+    if (rows.length === 0) return c.json({ error: 'linked_recommendation_not_found' }, 422);
   }
 
   // sec-F5 close-out: the client tells us which workplaceKeyId it

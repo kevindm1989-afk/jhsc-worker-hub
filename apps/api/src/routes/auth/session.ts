@@ -19,6 +19,7 @@ import { refreshSession, revokeAllUserSessions, revokeSession } from '../../auth
 import { initCrypto, openString } from '../../auth/crypto-stub';
 import { getDb } from '../../db/client';
 import { getActiveWorkplacePublicKey } from '../../evidence/workplace-key';
+import { getActiveWorkplaceSigningPublicKey } from '../../evidence/workplace-signing-key';
 import { userProfiles } from '../../db/schema';
 import { eq } from 'drizzle-orm';
 
@@ -99,6 +100,13 @@ sessionRoute.get('/session', authMiddleware(), async (c) => {
   // public key is safe to ship -- it's the recipient half of a sealed
   // box, useless for decryption.
   const workplaceKey = await getActiveWorkplacePublicKey(db);
+  // Workplace signing public key (1.9, ADR-0008 §3.7): ships alongside
+  // workplaceKey so the browser can locally verify recommendation
+  // export bundle signatures (S4 ships the signed PDF; the client UI
+  // shows "Signature verified ✓ against workplace key {fingerprint}").
+  // Ed25519 public key is 32 bytes; the verifier runs
+  // sodium.crypto_sign_verify_detached(sig, pdfBytes, publicKey).
+  const workplaceSigningKey = await getActiveWorkplaceSigningPublicKey(db);
   return c.json({
     userId: auth.userId,
     displayName,
@@ -110,6 +118,13 @@ sessionRoute.get('/session', authMiddleware(), async (c) => {
       ? {
           id: workplaceKey.id,
           publicKeyB64: Buffer.from(workplaceKey.publicKey).toString('base64'),
+        }
+      : null,
+    workplaceSigningKey: workplaceSigningKey
+      ? {
+          id: workplaceSigningKey.id,
+          publicKeyB64: Buffer.from(workplaceSigningKey.publicKey).toString('base64'),
+          algorithm: workplaceSigningKey.algorithm,
         }
       : null,
   });

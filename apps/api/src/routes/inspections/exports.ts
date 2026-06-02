@@ -831,6 +831,28 @@ inspectionsExportsRoute.get('/:id/download', async (c) => {
     return c.json({ error: 'export_tamper_detected' }, 500);
   }
 
+  // 1.9 priv-F5 close-out (ADR-0008 §3.12 / T-R30): emit a per-download
+  // chain anchor AFTER step-up clears AND the Tigris fetch succeeds AND
+  // the SHA-256 verifies AND BEFORE the bytes go out. The ordering
+  // matters — a failed re-download (404 / 410 expired / SHA mismatch)
+  // does NOT anchor; only a successful, integrity-verified download
+  // produces a chain row. The 1.8 contract was fixed at six audit
+  // kinds; this is the seventh, opened by ADR-0008. Wrap the anchor
+  // emit in a tiny transaction so the append() runs under the
+  // serializing advisory-lock pattern.
+  await db.transaction(async (tx) => {
+    await append(tx, {
+      actorId: auth.userId,
+      payload: {
+        kind: 'inspection.export.downloaded',
+        exportId: r.id,
+        downloadedByUserId: auth.userId,
+      },
+      resourceType: 'export_records',
+      resourceId: r.id,
+    });
+  });
+
   // Same response posture as 1.7 evidence decrypt: force download,
   // strict CSP, no-store, no referrer.
   return new Response(bytes.slice().buffer, {

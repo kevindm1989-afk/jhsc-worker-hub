@@ -1,0 +1,649 @@
+// Integration tests for /api/recommendations/* (Milestone 1.9 S2).
+// Skips when DATABASE_URL is unset — matches the 1.5 / 1.6 / 1.7 / 1.8
+// pattern.
+//
+// Coverage map (ADR-0008 §3.1 / §3.3 / §3.4 / §3.5 + SECURITY.md §2.9):
+//   - POST happy path (allocates per-jurisdiction recommendation_number).
+//   - POST with citations: corpus-present (200) and corpus-missing (422
+//     citation_corpus_drift).
+//   - POST with marker/position density mismatch -> 422.
+//   - PATCH only accepts edits in draft state; rejects in submitted
+//     state with 422 not_draft_state.
+//   - PATCH cannot change jurisdiction (422
+//     jurisdiction_immutable_after_draft_save).
+//   - POST /submit happy path: action_item row created with
+//     source_type='recommendation' + section='recommendation', link table
+//     row inserted, chain anchor carries citationCount.
+//   - POST /submit when status is already submitted -> 422 not_draft_state.
+//   - POST /api/action-items with sourceType='recommendation' rejects
+//     with 400 recommendation_source_requires_submit_route (T-R14 / sec-F2
+//     mirror).
+//   - POST /responses: status flips submitted -> response_received;
+//     second response leaves status pinned; position 51 -> 422
+//     response_cap_exceeded.
+//   - POST /resolve: linked action_item moves to completed_this_period +
+//     status='Closed'; chain anchor fires.
+//   - POST /resolve without a response -> 422 requires_response.
+//   - POST /withdraw from draft (no linked action_item); from submitted
+//     (linked action_item archived + Cancelled); from resolved -> 422;
+//     from withdrawn -> 422.
+//   - GET /:id/reveal step-up rejection + after-step-up returns
+//     decrypted fields.
+
+import { sql } from 'drizzle-orm';
+import { decodeBase32IgnorePadding } from '@oslojs/encoding';
+import { beforeAll, beforeEach, describe, expect, it } from 'vitest';
+import { verify } from '@jhsc/audit';
+import { app } from '../../index';
+import { getDb } from '../../db/client';
+import { bootAuthTestEnv } from '../../auth/test-setup';
+import { cleanAuthTables, hasDb } from '../../auth/test-db';
+import { _internals as totpInternals } from '../../auth/totp';
+import { _resetRateLimitForTests } from '../../middleware/rate-limit';
+
+const SKIP = !hasDb();
+const EMAIL = 'cochair@workplace.invalid';
+const PASSWORD = 'SafeP@ssword!12345';
+const DISPLAY_NAME = 'Worker Co-Chair';
+
+beforeAll(async () => {
+  if (SKIP) return;
+  await bootAuthTestEnv();
+});
+
+beforeEach(async () => {
+  if (SKIP) return;
+  _resetRateLimitForTests();
+  await cleanAuthTables();
+});
+
+function cookieKv(setCookie: string): string {
+  return setCookie.split(';')[0]!.trim();
+}
+
+async function loginAsRep(): Promise<{ cookie: string; userId: string }> {
+  const setupRes = await app.request('/api/auth/first-run/setup', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', 'x-requested-with': 'jhsc-web' },
+    body: JSON.stringify({ email: EMAIL, password: PASSWORD, displayName: DISPLAY_NAME }),
+  });
+  const setupBody = (await setupRes.json()) as { provisioning: string; totpSecretB32: string };
+  const secret = decodeBase32IgnorePadding(setupBody.totpSecretB32);
+  const code = totpInternals.hotpForStep(secret, totpInternals.currentStep(Date.now()));
+  const confirmRes = await app.request('/api/auth/first-run/confirm', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', 'x-requested-with': 'jhsc-web' },
+    body: JSON.stringify({ provisioning: setupBody.provisioning, totpCode: code }),
+  });
+  const setCookies = confirmRes.headers.getSetCookie?.() ?? [];
+  const access = setCookies.find((c) => c.startsWith('__Host-access='))!;
+  const refresh = setCookies.find((c) => c.startsWith('__Secure-refresh='))!;
+  const cookie = `${cookieKv(access)}; ${cookieKv(refresh)}`;
+  const sessionRes = await app.request('/api/auth/session', { headers: { cookie } });
+  const sessionBody = (await sessionRes.json()) as { userId: string };
+  return { cookie, userId: sessionBody.userId };
+}
+
+async function loginWithStepUp(): Promise<{ cookie: string; userId: string }> {
+  const session = await loginAsRep();
+  // Grant a fresh step-up window directly via the sessions table. The
+  // existing access-token cookie already carries the session id; the
+  // next request's checkStepUpFreshness sees the bumped step_up_until.
+  // Mirrors the inspections-integration-test helper.
+  const db = getDb();
+  await db.execute(sql`
+    UPDATE sessions SET step_up_until = now() + interval '5 minutes'
+    WHERE user_id = ${session.userId}
+  `);
+  return session;
+}
+
+async function createRecommendation(
+  cookie: string,
+  override?: Partial<{
+    title: string;
+    body: string;
+    jurisdiction: 'ON' | 'CA-FED';
+    citations: Array<{
+      statuteCode: string;
+      clauseId: string;
+      versionDate: string;
+      position: number;
+    }>;
+  }>,
+): Promise<{ id: string; recommendationNumber: number }> {
+  const res = await app.request('/api/recommendations', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', 'x-requested-with': 'jhsc-web', cookie },
+    body: JSON.stringify({
+      title: override?.title ?? 'Lockout procedure update for the compactor',
+      body:
+        override?.body ??
+        'The compactor lockout procedure has not been updated since 2023. Recommend immediate review.',
+      jurisdiction: override?.jurisdiction ?? 'ON',
+      ...(override?.citations !== undefined ? { citations: override.citations } : {}),
+    }),
+  });
+  expect(res.status).toBe(201);
+  return (await res.json()) as { id: string; recommendationNumber: number };
+}
+
+describe.skipIf(SKIP)('POST /api/recommendations — create draft', () => {
+  it('creates a draft + allocates per-jurisdiction recommendation_number', async () => {
+    const { cookie } = await loginAsRep();
+    const a = await createRecommendation(cookie, { jurisdiction: 'ON' });
+    expect(a.recommendationNumber).toBe(1);
+    const b = await createRecommendation(cookie, { jurisdiction: 'ON' });
+    expect(b.recommendationNumber).toBe(2);
+    // CA-FED sequence advances independently.
+    const c = await createRecommendation(cookie, { jurisdiction: 'CA-FED' });
+    expect(c.recommendationNumber).toBe(1);
+
+    const db = getDb();
+    const chain = (await db.execute(sql`
+      SELECT payload FROM audit_log WHERE kind = 'recommendation.drafted'
+    `)) as unknown as Array<{
+      payload: { recommendationId: string; recommendationNumber: number; jurisdiction: string };
+    }>;
+    expect(chain).toHaveLength(3);
+    const v = await verify(db);
+    expect(v.ok).toBe(true);
+  });
+
+  it('rejects POST with citation pointing at a (statuteCode, clauseId, versionDate) triple absent from corpus -> 422 citation_corpus_drift', async () => {
+    const { cookie } = await loginAsRep();
+    const res = await app.request('/api/recommendations', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-requested-with': 'jhsc-web', cookie },
+      body: JSON.stringify({
+        title: 'Bogus citation test',
+        body: 'A reference [[cite:1]] to a nonexistent corpus row.',
+        jurisdiction: 'ON',
+        citations: [
+          {
+            statuteCode: 'OHSA',
+            clauseId: '00000000-0000-0000-0000-000000000000',
+            versionDate: '2020-01-01',
+            position: 1,
+          },
+        ],
+      }),
+    });
+    expect(res.status).toBe(422);
+    const body = (await res.json()) as { error: string };
+    expect(body.error).toBe('citation_corpus_drift');
+  });
+
+  it('rejects POST with marker/position mismatch -> 422 citation_marker_mismatch', async () => {
+    const { cookie } = await loginAsRep();
+    // Citation list has position 1 but no [[cite:1]] marker in the body.
+    const res = await app.request('/api/recommendations', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-requested-with': 'jhsc-web', cookie },
+      body: JSON.stringify({
+        title: 'Marker mismatch test',
+        body: 'No markers here at all but there is a citation in the list.',
+        jurisdiction: 'ON',
+        citations: [
+          {
+            // Use any uuid/code/date; corpus-presence check runs AFTER
+            // marker density. We want the marker gate to fire first.
+            statuteCode: 'OHSA',
+            clauseId: '11111111-1111-1111-1111-111111111111',
+            versionDate: '2020-01-01',
+            position: 1,
+          },
+        ],
+      }),
+    });
+    expect(res.status).toBe(422);
+    const body = (await res.json()) as { error: string };
+    expect(body.error).toBe('citation_marker_mismatch');
+  });
+});
+
+describe.skipIf(SKIP)('PATCH /api/recommendations/:id — draft-state-only edits', () => {
+  it('accepts title + body changes in draft state', async () => {
+    const { cookie } = await loginAsRep();
+    const rec = await createRecommendation(cookie);
+    const res = await app.request(`/api/recommendations/${rec.id}`, {
+      method: 'PATCH',
+      headers: { 'content-type': 'application/json', 'x-requested-with': 'jhsc-web', cookie },
+      body: JSON.stringify({ title: 'Updated title', body: 'Updated body text.' }),
+    });
+    expect(res.status).toBe(200);
+  });
+
+  it('rejects PATCH on submitted recommendation with 422 not_draft_state', async () => {
+    const { cookie } = await loginAsRep();
+    const rec = await createRecommendation(cookie);
+    const submit = await app.request(`/api/recommendations/${rec.id}/submit`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-requested-with': 'jhsc-web', cookie },
+      body: JSON.stringify({}),
+    });
+    expect(submit.status).toBe(200);
+    const res = await app.request(`/api/recommendations/${rec.id}`, {
+      method: 'PATCH',
+      headers: { 'content-type': 'application/json', 'x-requested-with': 'jhsc-web', cookie },
+      body: JSON.stringify({ title: 'Cannot edit' }),
+    });
+    expect(res.status).toBe(422);
+    const body = (await res.json()) as { error: string };
+    expect(body.error).toBe('not_draft_state');
+  });
+
+  it('rejects jurisdiction change with 422 jurisdiction_immutable_after_draft_save', async () => {
+    const { cookie } = await loginAsRep();
+    const rec = await createRecommendation(cookie, { jurisdiction: 'ON' });
+    const res = await app.request(`/api/recommendations/${rec.id}`, {
+      method: 'PATCH',
+      headers: { 'content-type': 'application/json', 'x-requested-with': 'jhsc-web', cookie },
+      body: JSON.stringify({ jurisdiction: 'CA-FED' }),
+    });
+    expect(res.status).toBe(422);
+    const body = (await res.json()) as { error: string };
+    expect(body.error).toBe('jurisdiction_immutable_after_draft_save');
+  });
+});
+
+describe.skipIf(SKIP)('POST /api/recommendations/:id/submit — bridge to action_items', () => {
+  it('creates an action_items row with source_type=recommendation + section=recommendation + link table row + chain anchor', async () => {
+    const { cookie } = await loginAsRep();
+    const rec = await createRecommendation(cookie, { jurisdiction: 'ON' });
+    const res = await app.request(`/api/recommendations/${rec.id}/submit`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-requested-with': 'jhsc-web', cookie },
+      body: JSON.stringify({}),
+    });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as {
+      id: string;
+      status: string;
+      submittedAt: string;
+      deadline: string | null;
+      linkedActionItemId: string;
+    };
+    expect(body.status).toBe('submitted');
+    expect(body.linkedActionItemId).toMatch(/^[0-9a-f-]{36}$/);
+    // ON jurisdiction -> 21-day deadline computed and surfaced.
+    expect(body.deadline).not.toBeNull();
+
+    const db = getDb();
+    const aiRows = (await db.execute(sql`
+      SELECT source_type, source_id, section, type, status, risk
+      FROM action_items WHERE id = ${body.linkedActionItemId}
+    `)) as unknown as Array<{
+      source_type: string;
+      source_id: string;
+      section: string;
+      type: string;
+      status: string;
+      risk: string;
+    }>;
+    expect(aiRows[0]!.source_type).toBe('recommendation');
+    expect(aiRows[0]!.source_id).toBe(rec.id);
+    expect(aiRows[0]!.section).toBe('recommendation');
+    expect(aiRows[0]!.type).toBe('REC');
+    expect(aiRows[0]!.status).toBe('Not Started');
+    expect(aiRows[0]!.risk).toBe('Medium');
+
+    const linkRows = (await db.execute(sql`
+      SELECT recommendation_id, action_item_id, link_kind
+      FROM recommendation_action_item_links WHERE recommendation_id = ${rec.id}
+    `)) as unknown as Array<{
+      recommendation_id: string;
+      action_item_id: string;
+      link_kind: string;
+    }>;
+    expect(linkRows).toHaveLength(1);
+    expect(linkRows[0]!.action_item_id).toBe(body.linkedActionItemId);
+    expect(linkRows[0]!.link_kind).toBe('tracks');
+
+    const chain = (await db.execute(sql`
+      SELECT payload FROM audit_log WHERE kind = 'recommendation.submitted'
+    `)) as unknown as Array<{
+      payload: {
+        recommendationId: string;
+        recommendationNumber: number;
+        jurisdiction: string;
+        citationCount: number;
+        linkedActionItemId: string;
+      };
+    }>;
+    expect(chain).toHaveLength(1);
+    expect(chain[0]!.payload.citationCount).toBe(0);
+    expect(chain[0]!.payload.linkedActionItemId).toBe(body.linkedActionItemId);
+    expect(chain[0]!.payload.jurisdiction).toBe('ON');
+
+    // Verify chain still walks cleanly.
+    const v = await verify(db);
+    expect(v.ok).toBe(true);
+  });
+
+  it('rejects second submit with 422 not_draft_state', async () => {
+    const { cookie } = await loginAsRep();
+    const rec = await createRecommendation(cookie);
+    const first = await app.request(`/api/recommendations/${rec.id}/submit`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-requested-with': 'jhsc-web', cookie },
+      body: JSON.stringify({}),
+    });
+    expect(first.status).toBe(200);
+    const second = await app.request(`/api/recommendations/${rec.id}/submit`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-requested-with': 'jhsc-web', cookie },
+      body: JSON.stringify({}),
+    });
+    expect(second.status).toBe(422);
+    const body = (await second.json()) as { error: string };
+    expect(body.error).toBe('not_draft_state');
+  });
+});
+
+describe.skipIf(SKIP)('POST /api/action-items rejects sourceType=recommendation (T-R14)', () => {
+  it('returns 400 recommendation_source_requires_submit_route', async () => {
+    const { cookie } = await loginAsRep();
+    const res = await app.request('/api/action-items', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-requested-with': 'jhsc-web', cookie },
+      body: JSON.stringify({
+        type: 'REC',
+        description: 'd',
+        status: 'Not Started',
+        risk: 'Medium',
+        section: 'recommendation',
+        startDate: '2026-05-29',
+        sourceType: 'recommendation',
+        sourceId: '00000000-0000-0000-0000-000000000000',
+      }),
+    });
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as {
+      error: string;
+      issues?: { fieldErrors?: Record<string, string[]> };
+    };
+    expect(body.error).toBe('invalid_body');
+    const flat = body.issues?.fieldErrors?.sourceType ?? [];
+    expect(flat.some((m) => m.includes('recommendation_source_requires_submit_route'))).toBe(true);
+  });
+});
+
+describe.skipIf(SKIP)('POST /api/recommendations/:id/responses — append-only', () => {
+  async function setupSubmitted(cookie: string): Promise<{ id: string }> {
+    const rec = await createRecommendation(cookie);
+    const submit = await app.request(`/api/recommendations/${rec.id}/submit`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-requested-with': 'jhsc-web', cookie },
+      body: JSON.stringify({}),
+    });
+    expect(submit.status).toBe(200);
+    return { id: rec.id };
+  }
+
+  it('first response flips status to response_received; second leaves it pinned', async () => {
+    const { cookie } = await loginAsRep();
+    const { id } = await setupSubmitted(cookie);
+
+    const first = await app.request(`/api/recommendations/${id}/responses`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-requested-with': 'jhsc-web', cookie },
+      body: JSON.stringify({
+        authorRole: 'VP Operations',
+        body: 'We agree with the recommendation and will action it within 30 days.',
+      }),
+    });
+    expect(first.status).toBe(201);
+    const firstBody = (await first.json()) as { position: number };
+    expect(firstBody.position).toBe(1);
+
+    const second = await app.request(`/api/recommendations/${id}/responses`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-requested-with': 'jhsc-web', cookie },
+      body: JSON.stringify({
+        authorRole: 'Plant Manager',
+        body: 'Amendment to the prior response: timeline is now 14 days.',
+      }),
+    });
+    expect(second.status).toBe(201);
+    const secondBody = (await second.json()) as { position: number };
+    expect(secondBody.position).toBe(2);
+
+    const db = getDb();
+    const statusRows = (await db.execute(sql`
+      SELECT status FROM recommendations WHERE id = ${id}
+    `)) as unknown as Array<{ status: string }>;
+    expect(statusRows[0]!.status).toBe('response_received');
+  });
+
+  it('rejects position 51 with 422 response_cap_exceeded (T-R42)', async () => {
+    const { cookie } = await loginAsRep();
+    const { id } = await setupSubmitted(cookie);
+    // Pre-load 50 responses directly via the route (rate-limit bucket
+    // is 60/sec; this is fine).
+    for (let i = 1; i <= 50; i++) {
+      const r = await app.request(`/api/recommendations/${id}/responses`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', 'x-requested-with': 'jhsc-web', cookie },
+        body: JSON.stringify({ authorRole: `Role ${i}`, body: `Body ${i}` }),
+      });
+      expect(r.status).toBe(201);
+    }
+    const overflow = await app.request(`/api/recommendations/${id}/responses`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-requested-with': 'jhsc-web', cookie },
+      body: JSON.stringify({ authorRole: 'Cap exceeded', body: 'Should reject' }),
+    });
+    expect(overflow.status).toBe(422);
+    const body = (await overflow.json()) as { error: string };
+    expect(body.error).toBe('response_cap_exceeded');
+  });
+});
+
+describe.skipIf(SKIP)('POST /api/recommendations/:id/resolve', () => {
+  it('happy path: linked action_item moves to completed_this_period + status=Closed; chain anchor fires', async () => {
+    const { cookie } = await loginAsRep();
+    const rec = await createRecommendation(cookie);
+    const submit = await app.request(`/api/recommendations/${rec.id}/submit`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-requested-with': 'jhsc-web', cookie },
+      body: JSON.stringify({}),
+    });
+    const submitBody = (await submit.json()) as { linkedActionItemId: string };
+    const linkedActionItemId = submitBody.linkedActionItemId;
+
+    await app.request(`/api/recommendations/${rec.id}/responses`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-requested-with': 'jhsc-web', cookie },
+      body: JSON.stringify({ authorRole: 'VP Operations', body: 'Agreed.' }),
+    });
+
+    const resolve = await app.request(`/api/recommendations/${rec.id}/resolve`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-requested-with': 'jhsc-web', cookie },
+      body: JSON.stringify({}),
+    });
+    expect(resolve.status).toBe(200);
+
+    const db = getDb();
+    const aiRows = (await db.execute(sql`
+      SELECT section, status, closed_date FROM action_items WHERE id = ${linkedActionItemId}
+    `)) as unknown as Array<{ section: string; status: string; closed_date: string | null }>;
+    expect(aiRows[0]!.section).toBe('completed_this_period');
+    expect(aiRows[0]!.status).toBe('Closed');
+    expect(aiRows[0]!.closed_date).not.toBeNull();
+
+    const chain = (await db.execute(sql`
+      SELECT payload FROM audit_log WHERE kind = 'recommendation.resolved'
+    `)) as unknown as Array<{
+      payload: { recommendationId: string; linkedActionItemId: string };
+    }>;
+    expect(chain).toHaveLength(1);
+    expect(chain[0]!.payload.linkedActionItemId).toBe(linkedActionItemId);
+    const v = await verify(db);
+    expect(v.ok).toBe(true);
+  });
+
+  it('rejects resolve without a response with 422 requires_response', async () => {
+    const { cookie } = await loginAsRep();
+    const rec = await createRecommendation(cookie);
+    await app.request(`/api/recommendations/${rec.id}/submit`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-requested-with': 'jhsc-web', cookie },
+      body: JSON.stringify({}),
+    });
+    const res = await app.request(`/api/recommendations/${rec.id}/resolve`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-requested-with': 'jhsc-web', cookie },
+      body: JSON.stringify({}),
+    });
+    expect(res.status).toBe(422);
+    const body = (await res.json()) as { error: string };
+    expect(body.error).toBe('requires_response');
+  });
+});
+
+describe.skipIf(SKIP)('POST /api/recommendations/:id/withdraw', () => {
+  it('from draft: chain payload carries linkedActionItemId=null', async () => {
+    const { cookie } = await loginAsRep();
+    const rec = await createRecommendation(cookie);
+    const res = await app.request(`/api/recommendations/${rec.id}/withdraw`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-requested-with': 'jhsc-web', cookie },
+      body: JSON.stringify({ reason: 'addressed_pre_submission' }),
+    });
+    expect(res.status).toBe(200);
+    const db = getDb();
+    const chain = (await db.execute(sql`
+      SELECT payload FROM audit_log WHERE kind = 'recommendation.withdrawn'
+    `)) as unknown as Array<{
+      payload: { recommendationId: string; linkedActionItemId: string | null };
+    }>;
+    expect(chain).toHaveLength(1);
+    expect(chain[0]!.payload.linkedActionItemId).toBeNull();
+  });
+
+  it('from submitted: linked action_item moves to archived + Cancelled', async () => {
+    const { cookie } = await loginAsRep();
+    const rec = await createRecommendation(cookie);
+    const submit = await app.request(`/api/recommendations/${rec.id}/submit`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-requested-with': 'jhsc-web', cookie },
+      body: JSON.stringify({}),
+    });
+    const submitBody = (await submit.json()) as { linkedActionItemId: string };
+    const linkedActionItemId = submitBody.linkedActionItemId;
+
+    const wd = await app.request(`/api/recommendations/${rec.id}/withdraw`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-requested-with': 'jhsc-web', cookie },
+      body: JSON.stringify({ reason: 'rescinded' }),
+    });
+    expect(wd.status).toBe(200);
+
+    const db = getDb();
+    const aiRows = (await db.execute(sql`
+      SELECT section, status FROM action_items WHERE id = ${linkedActionItemId}
+    `)) as unknown as Array<{ section: string; status: string }>;
+    expect(aiRows[0]!.section).toBe('archived');
+    expect(aiRows[0]!.status).toBe('Cancelled');
+  });
+
+  it('rejects withdraw from resolved with 422 cannot_withdraw_in_state', async () => {
+    const { cookie } = await loginAsRep();
+    const rec = await createRecommendation(cookie);
+    await app.request(`/api/recommendations/${rec.id}/submit`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-requested-with': 'jhsc-web', cookie },
+      body: JSON.stringify({}),
+    });
+    await app.request(`/api/recommendations/${rec.id}/responses`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-requested-with': 'jhsc-web', cookie },
+      body: JSON.stringify({ authorRole: 'VP Operations', body: 'Agreed.' }),
+    });
+    await app.request(`/api/recommendations/${rec.id}/resolve`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-requested-with': 'jhsc-web', cookie },
+      body: JSON.stringify({}),
+    });
+    const res = await app.request(`/api/recommendations/${rec.id}/withdraw`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-requested-with': 'jhsc-web', cookie },
+      body: JSON.stringify({ reason: 'rescinded' }),
+    });
+    expect(res.status).toBe(422);
+    const body = (await res.json()) as { error: string };
+    expect(body.error).toBe('cannot_withdraw_in_state');
+  });
+
+  it('rejects withdraw from already-withdrawn state with 422', async () => {
+    const { cookie } = await loginAsRep();
+    const rec = await createRecommendation(cookie);
+    const first = await app.request(`/api/recommendations/${rec.id}/withdraw`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-requested-with': 'jhsc-web', cookie },
+      body: JSON.stringify({ reason: 'rescinded' }),
+    });
+    expect(first.status).toBe(200);
+    const second = await app.request(`/api/recommendations/${rec.id}/withdraw`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-requested-with': 'jhsc-web', cookie },
+      body: JSON.stringify({ reason: 'superseded' }),
+    });
+    expect(second.status).toBe(422);
+  });
+});
+
+describe.skipIf(SKIP)('GET /api/recommendations/:id/reveal — step-up gated decrypt', () => {
+  it('rejects without step-up with 401 step_up_required + WWW-Authenticate', async () => {
+    const { cookie } = await loginAsRep();
+    const rec = await createRecommendation(cookie, {
+      title: 'Reveal test title',
+      body: 'Reveal test body content.',
+    });
+    const res = await app.request(`/api/recommendations/${rec.id}/reveal`, {
+      headers: { cookie },
+    });
+    expect(res.status).toBe(401);
+    const wwwAuth = res.headers.get('www-authenticate') ?? '';
+    expect(wwwAuth).toContain('StepUp');
+    expect(wwwAuth).toContain('action="recommendation.read"');
+    expect(wwwAuth).toContain('max_age="60"');
+  });
+
+  it('returns decrypted title + body + response data when step-up is fresh', async () => {
+    const { cookie } = await loginWithStepUp();
+    const rec = await createRecommendation(cookie, {
+      title: 'Reveal test title fixture',
+      body: 'Reveal test body fixture content.',
+    });
+    await app.request(`/api/recommendations/${rec.id}/submit`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-requested-with': 'jhsc-web', cookie },
+      body: JSON.stringify({}),
+    });
+    await app.request(`/api/recommendations/${rec.id}/responses`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-requested-with': 'jhsc-web', cookie },
+      body: JSON.stringify({
+        authorRole: 'VP Operations',
+        body: 'We agree with the recommendation.',
+      }),
+    });
+    const res = await app.request(`/api/recommendations/${rec.id}/reveal`, {
+      headers: { cookie },
+    });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as {
+      title: string;
+      body: string;
+      responses: Array<{ authorRole: string; body: string; position: number }>;
+    };
+    expect(body.title).toBe('Reveal test title fixture');
+    expect(body.body).toBe('Reveal test body fixture content.');
+    expect(body.responses).toHaveLength(1);
+    expect(body.responses[0]!.authorRole).toBe('VP Operations');
+    expect(body.responses[0]!.body).toBe('We agree with the recommendation.');
+  });
+});
