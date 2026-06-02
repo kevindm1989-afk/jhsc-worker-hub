@@ -25,6 +25,7 @@ import { NewRecommendationView } from './views/new-recommendation-view';
 import { RecommendationDetailView } from './views/recommendation-detail-view';
 import { RecommendationEditView } from './views/recommendation-edit-view';
 import { RecommendationsView } from './views/recommendations-view';
+import { RecommendationsExportsView } from './views/recommendations-exports-view';
 import { SecurityView } from './views/security-view';
 
 // App owns all app-level providers (theme, router, auth) so the whole
@@ -68,6 +69,7 @@ export function App(): JSX.Element {
                 <Route path="/inspection-templates/new" element={<NewTemplateView />} />
                 <Route path="/recommendations" element={<RecommendationsView />} />
                 <Route path="/recommendations/new" element={<NewRecommendationView />} />
+                <Route path="/recommendations/exports" element={<RecommendationsExportsView />} />
                 <Route path="/recommendations/:id" element={<RecommendationDetailView />} />
                 <Route path="/recommendations/:id/edit" element={<RecommendationEditView />} />
                 <Route path="/more" element={<MoreView />} />

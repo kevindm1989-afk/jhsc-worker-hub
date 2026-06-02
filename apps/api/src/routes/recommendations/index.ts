@@ -88,6 +88,7 @@ import { rateLimit } from '../../middleware/rate-limit';
 import { openRecommendationField, sealRecommendationField } from '../../recommendations/crypto';
 import { sealField as sealActionItemField } from '../../action-items/crypto';
 import { allocateSequenceNumber } from '../action-items';
+import { registerRecommendationExportHandlers } from './exports';
 
 export const recommendationsRoute = new Hono();
 
@@ -108,6 +109,16 @@ recommendationsRoute.use(
     onError: (c) => c.json({ error: 'payload_too_large' }, 413),
   }),
 );
+
+// S4 (ADR-0008 §3.8 / §3.9): mount the export + signed-bundle handlers
+// onto this group. They handle:
+//   POST /:id/exports          — render + sign + store + anchor
+//   GET  /exports/:id/download — re-fetch + TOCTOU verify + serve
+//   GET  /exports              — list (metadata only)
+// The handlers reuse the route group's authMiddleware + rateLimit +
+// bodyLimit (a tighter 64KB body cap is applied inline on POST since
+// the export body is empty).
+registerRecommendationExportHandlers(recommendationsRoute);
 
 // ---------------------------------------------------------------------------
 // Shared schemas

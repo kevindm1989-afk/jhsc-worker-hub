@@ -647,3 +647,225 @@ describe.skipIf(SKIP)('GET /api/recommendations/:id/reveal — step-up gated dec
     expect(body.responses[0]!.body).toBe('We agree with the recommendation.');
   });
 });
+
+// ---------------------------------------------------------------------------
+// S4 PDF export + Ed25519 signed ZIP bundle route tests.
+//
+// The create path requires step-up + Tigris. We grant step-up directly
+// via the sessions table (same shortcut as the inspections-exports
+// tests). Tigris isn't available in the unit-test harness; the
+// create happy path is therefore additionally SKIPPED when
+// TIGRIS_BUCKET is unset. The step-up rejection + list + state guard
+// tests run without Tigris.
+// ---------------------------------------------------------------------------
+
+const SKIP_TIGRIS = !process.env.TIGRIS_BUCKET;
+
+describe.skipIf(SKIP)('POST /api/recommendations/:id/exports (step-up gated)', () => {
+  it('rejects with 401 when step-up freshness is stale', async () => {
+    const { cookie } = await loginAsRep();
+    const rec = await createRecommendation(cookie);
+    await app.request(`/api/recommendations/${rec.id}/submit`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-requested-with': 'jhsc-web', cookie },
+      body: JSON.stringify({}),
+    });
+    const res = await app.request(`/api/recommendations/${rec.id}/exports`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-requested-with': 'jhsc-web', cookie },
+      body: JSON.stringify({}),
+    });
+    expect(res.status).toBe(401);
+    const wwwAuth = res.headers.get('www-authenticate') ?? '';
+    expect(wwwAuth).toContain('StepUp');
+    // T-R29 close-out: the action string carries the recommendation id
+    // so a grant for one rec cannot replay against another.
+    expect(wwwAuth).toContain(`action="recommendation.export.${rec.id}"`);
+    expect(wwwAuth).toContain('max_age="60"');
+  });
+
+  it('rejects with 422 cannot_export_draft when the recommendation is still in draft state', async () => {
+    const { cookie } = await loginWithStepUp();
+    const rec = await createRecommendation(cookie);
+    const res = await app.request(`/api/recommendations/${rec.id}/exports`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-requested-with': 'jhsc-web', cookie },
+      body: JSON.stringify({}),
+    });
+    expect(res.status).toBe(422);
+    const body = (await res.json()) as { error: string; status: string };
+    expect(body.error).toBe('cannot_export_draft');
+    expect(body.status).toBe('draft');
+  });
+});
+
+describe.skipIf(SKIP)('GET /api/recommendations/exports (list)', () => {
+  it('returns an empty list when no recommendation exports have run', async () => {
+    const { cookie } = await loginAsRep();
+    const res = await app.request('/api/recommendations/exports', {
+      headers: { cookie },
+    });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { items: unknown[] };
+    expect(Array.isArray(body.items)).toBe(true);
+    expect(body.items.length).toBe(0);
+  });
+
+  it('list endpoint requires auth (drops to 401 without a cookie)', async () => {
+    // Belt-and-suspenders: the list endpoint sits inside the
+    // authMiddleware'd route group. A missing cookie returns 401, not
+    // an empty list. The kind-filter happens server-side so a
+    // future regression that drops `WHERE kind = 'recommendation_single'`
+    // can't leak inspection-export metadata through this list path.
+    const res = await app.request('/api/recommendations/exports');
+    expect(res.status).toBe(401);
+  });
+});
+
+describe.skipIf(SKIP || SKIP_TIGRIS)(
+  'POST /api/recommendations/:id/exports — happy path with Tigris',
+  () => {
+    it('signs + stores + emits a chain anchor with all the recommendation.exported payload fields', async () => {
+      const { cookie } = await loginWithStepUp();
+      const rec = await createRecommendation(cookie);
+      await app.request(`/api/recommendations/${rec.id}/submit`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', 'x-requested-with': 'jhsc-web', cookie },
+        body: JSON.stringify({}),
+      });
+
+      const res = await app.request(`/api/recommendations/${rec.id}/exports`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', 'x-requested-with': 'jhsc-web', cookie },
+        body: JSON.stringify({}),
+      });
+      expect(res.status).toBe(200);
+      const body = (await res.json()) as {
+        exportId: string;
+        outputSha256: string;
+        signatureSha256: string;
+        signingKeyId: string;
+        citationsHash: string;
+        byteSize: number;
+        expiresAt: string;
+        chainIdx: number;
+      };
+      expect(body.exportId).toMatch(/^[0-9a-f-]{36}$/);
+      // PDF sha and signature sha are 64-char hex digests.
+      expect(body.outputSha256).toMatch(/^[0-9a-f]{64}$/);
+      expect(body.signatureSha256).toMatch(/^[0-9a-f]{64}$/);
+      expect(body.signingKeyId).toMatch(/^[0-9a-f-]{36}$/);
+      expect(body.citationsHash).toMatch(/^[0-9a-f]{64}$/);
+      expect(body.byteSize).toBeGreaterThan(0);
+
+      // Verify the chain anchor.
+      const db = getDb();
+      const chainRows = (await db.execute(sql`
+        SELECT payload FROM audit_log
+        WHERE kind = 'recommendation.exported' AND resource_id = ${body.exportId}
+      `)) as unknown as Array<{
+        payload: {
+          kind: string;
+          exportId: string;
+          recommendationId: string;
+          outputSha256: string;
+          signatureSha256: string;
+          signingKeyId: string;
+          citationsHash: string;
+          byteSize: number;
+        };
+      }>;
+      expect(chainRows).toHaveLength(1);
+      const payload = chainRows[0]!.payload;
+      expect(payload.recommendationId).toBe(rec.id);
+      expect(payload.outputSha256).toBe(body.outputSha256);
+      expect(payload.signatureSha256).toBe(body.signatureSha256);
+      expect(payload.signingKeyId).toBe(body.signingKeyId);
+      expect(payload.citationsHash).toBe(body.citationsHash);
+      expect(payload.byteSize).toBe(body.byteSize);
+
+      // Verify the export_records row with the correct kind.
+      const recordRows = (await db.execute(sql`
+        SELECT kind, encode(output_sha256, 'hex') AS output_sha,
+               encode(signature_sha256, 'hex') AS sig_sha,
+               signing_key_id
+        FROM export_records WHERE id = ${body.exportId}
+      `)) as unknown as Array<{
+        kind: string;
+        output_sha: string;
+        sig_sha: string;
+        signing_key_id: string;
+      }>;
+      expect(recordRows).toHaveLength(1);
+      expect(recordRows[0]!.kind).toBe('recommendation_single');
+      expect(recordRows[0]!.output_sha).toBe(body.outputSha256);
+      expect(recordRows[0]!.sig_sha).toBe(body.signatureSha256);
+      expect(recordRows[0]!.signing_key_id).toBe(body.signingKeyId);
+
+      // Chain verify still passes (no broken hash chain from the new
+      // recommendation.exported kind).
+      const v = await verify(db);
+      expect(v.ok).toBe(true);
+    });
+
+    it('list returns the new export row', async () => {
+      const { cookie } = await loginWithStepUp();
+      const rec = await createRecommendation(cookie);
+      await app.request(`/api/recommendations/${rec.id}/submit`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', 'x-requested-with': 'jhsc-web', cookie },
+        body: JSON.stringify({}),
+      });
+      const create = await app.request(`/api/recommendations/${rec.id}/exports`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', 'x-requested-with': 'jhsc-web', cookie },
+        body: JSON.stringify({}),
+      });
+      const createBody = (await create.json()) as { exportId: string };
+
+      const list = await app.request('/api/recommendations/exports', {
+        headers: { cookie },
+      });
+      expect(list.status).toBe(200);
+      const listBody = (await list.json()) as {
+        items: Array<{ id: string; recommendationId: string; signingKeyId: string }>;
+      };
+      const match = listBody.items.find((i) => i.id === createBody.exportId);
+      expect(match).toBeDefined();
+      expect(match!.recommendationId).toBe(rec.id);
+      expect(match!.signingKeyId).toMatch(/^[0-9a-f-]{36}$/);
+    });
+  },
+);
+
+describe.skipIf(SKIP)('GET /api/recommendations/exports/:id/download — step-up gates', () => {
+  it('rejects with 401 when step-up freshness is stale', async () => {
+    const { cookie } = await loginAsRep();
+    // Any uuid — the step-up gate runs BEFORE the export_records
+    // lookup so we don't need a real export row to exercise it.
+    const res = await app.request(
+      `/api/recommendations/exports/00000000-0000-0000-0000-000000000000/download`,
+      {
+        headers: { cookie, 'x-requested-with': 'jhsc-web' },
+      },
+    );
+    expect(res.status).toBe(401);
+    const wwwAuth = res.headers.get('www-authenticate') ?? '';
+    expect(wwwAuth).toContain('StepUp');
+    expect(wwwAuth).toContain('action="recommendation.export.download"');
+    expect(wwwAuth).toContain('max_age="60"');
+  });
+
+  it('rejects with 403 csrf_required when X-Requested-With is missing', async () => {
+    const { cookie } = await loginAsRep();
+    const res = await app.request(
+      `/api/recommendations/exports/00000000-0000-0000-0000-000000000000/download`,
+      {
+        headers: { cookie },
+      },
+    );
+    expect(res.status).toBe(403);
+    const body = (await res.json()) as { error: string };
+    expect(body.error).toBe('csrf_required');
+  });
+});

@@ -25,6 +25,7 @@ import { Link, useNavigate, useParams } from 'react-router-dom';
 import {
   CalendarClock,
   ChevronLeft,
+  Download,
   Edit3,
   Eye,
   FileSignature,
@@ -34,6 +35,7 @@ import {
   ScrollText,
   Send,
   ShieldAlert,
+  ShieldCheck,
   XCircle,
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
@@ -46,6 +48,7 @@ import {
   isStepUpRequired,
   RecommendationApiError,
   recommendationsApi,
+  type CreateRecommendationExportResponse,
   type RecommendationCitation,
   type RecommendationDetail,
   type RecommendationReveal,
@@ -266,6 +269,9 @@ function RecommendationDetailInner({ id }: { id: string }): JSX.Element {
       {detail.linkedActionItemId ? (
         <LinkedActionItem actionItemId={detail.linkedActionItemId} />
       ) : null}
+
+      {/* Signed-bundle export — shown for any state past draft. */}
+      {detail.status !== 'draft' ? <ExportPanel recommendationId={detail.id} /> : null}
 
       {/* Lifecycle controls */}
       <LifecycleControls
@@ -916,5 +922,201 @@ function SubmitConfirmDialog({
         </div>
       </div>
     </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// ExportPanel — signed-bundle export (ADR-0008 §3.8 / §3.9).
+//
+// Click "Export signed bundle" -> POST /api/recommendations/:id/exports.
+// On 401 the API wrapper dispatches stepUpEmitter(recommendation.export.<id>)
+// so the global modal opens; the rep retries after the modal closes.
+//
+// On success the panel surfaces a receipt (export id + sha-prefixes +
+// signing key id + citations hash + byte size + expiry) plus a
+// Download button that opens the ZIP blob in a new tab (5s revoke +
+// noopener,noreferrer; mirror of 1.7 evidence reveal sec-F10 +
+// 1.8 inspections download).
+//
+// The receipt copy is rights-protective: the panel explains WHAT is
+// in the bundle (signed PDF + manifest + signature) and HOW the
+// recipient verifies it. The actual chain anchor + signature scope
+// is documented inline so the rep can reason about the artifact.
+// ---------------------------------------------------------------------------
+
+function ExportPanel({ recommendationId }: { recommendationId: string }): JSX.Element {
+  const [busy, setBusy] = useState(false);
+  const [receipt, setReceipt] = useState<CreateRecommendationExportResponse | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  async function startExport(): Promise<void> {
+    setBusy(true);
+    setError(null);
+    try {
+      const r = await recommendationsApi.exports.create(recommendationId);
+      setReceipt(r);
+    } catch (e) {
+      if (e instanceof RecommendationApiError) {
+        if (e.status === 401) {
+          setError('Re-authenticate to export. The step-up dialog should be open.');
+        } else if (e.status === 422) {
+          const body = e.body as { error?: string } | undefined;
+          if (body?.error === 'cannot_export_draft') {
+            setError(
+              'Draft recommendations cannot be exported. Submit it first, then export the signed bundle.',
+            );
+          } else {
+            setError(`Could not export (${body?.error ?? 'rejected'}).`);
+          }
+        } else if (e.status === 429) {
+          setError('Export rate limit reached. Try again in an hour.');
+        } else if (e.status === 500) {
+          const body = e.body as { error?: string } | undefined;
+          if (body?.error === 'workplace_signing_key_missing') {
+            setError(
+              'The workplace signing key has not been seeded. Complete first-run setup, then retry.',
+            );
+          } else if (body?.error === 'citation_corpus_missing') {
+            setError(
+              'A cited corpus row could not be resolved. This usually means a re-seed occurred between submit and export; contact ops.',
+            );
+          } else {
+            setError(`Could not export (HTTP ${e.status}).`);
+          }
+        } else {
+          setError(`Could not export (HTTP ${e.status}).`);
+        }
+      } else {
+        setError(e instanceof Error ? e.message : String(e));
+      }
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function downloadExport(): Promise<void> {
+    if (!receipt) return;
+    setBusy(true);
+    setError(null);
+    try {
+      const blob = await recommendationsApi.exports.download(receipt.exportId);
+      const url = URL.createObjectURL(blob);
+      // sec-F10 mirror: noopener,noreferrer + revoke after 5s. The
+      // server's Content-Disposition: attachment is the primary
+      // mechanism; this is belt-and-suspenders.
+      window.open(url, '_blank', 'noopener,noreferrer');
+      window.setTimeout(() => URL.revokeObjectURL(url), 5_000);
+    } catch (e) {
+      if (e instanceof RecommendationApiError && e.status === 401) {
+        setError('Re-authenticate to download. The step-up dialog should be open.');
+      } else if (e instanceof RecommendationApiError && e.status === 410) {
+        setError('This export has expired (30-day TTL). Generate a new one.');
+      } else {
+        setError(e instanceof Error ? e.message : String(e));
+      }
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <section
+      aria-labelledby="export-panel-heading"
+      className="mb-4 rounded-md border border-border bg-card p-4"
+    >
+      <h2
+        id="export-panel-heading"
+        className="mb-1 flex items-center gap-1.5 text-xs font-medium uppercase tracking-wide text-muted-foreground"
+      >
+        <ShieldCheck className="h-3 w-3" strokeWidth={1.75} aria-hidden="true" />
+        Signed export bundle
+      </h2>
+      <p className="text-xs text-muted-foreground">
+        The bundle is signed with the workplace signing key. The chain anchor records the SHA-256 of
+        the PDF and the signature. Verification instructions live in the bundle&apos;s README.txt.
+      </p>
+      {receipt ? (
+        <div className="mt-3 rounded-md border border-border bg-background p-3 text-xs">
+          <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-muted-foreground">
+            <span>
+              Export{' '}
+              <span className="font-mono tabular-nums text-foreground">
+                {receipt.exportId.slice(0, 8)}
+              </span>
+            </span>
+            <span>·</span>
+            <span>
+              pdf sha{' '}
+              <span className="font-mono tabular-nums">{receipt.outputSha256.slice(0, 12)}</span>
+            </span>
+            <span>·</span>
+            <span>
+              sig sha{' '}
+              <span className="font-mono tabular-nums">{receipt.signatureSha256.slice(0, 12)}</span>
+            </span>
+            <span>·</span>
+            <span>
+              signing key{' '}
+              <span className="font-mono tabular-nums">{receipt.signingKeyId.slice(0, 8)}</span>
+            </span>
+            <span>·</span>
+            <span>
+              citations hash{' '}
+              <span className="font-mono tabular-nums">{receipt.citationsHash.slice(0, 12)}</span>
+            </span>
+            <span>·</span>
+            <span>{(receipt.byteSize / 1024).toFixed(1)} KB</span>
+            <span>·</span>
+            <span>expires {new Date(receipt.expiresAt).toLocaleDateString()}</span>
+          </div>
+          <div className="mt-3 flex flex-wrap items-center gap-2">
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              disabled={busy}
+              onClick={() => {
+                void downloadExport();
+              }}
+            >
+              <Download className="h-3.5 w-3.5" strokeWidth={2} aria-hidden="true" />
+              {busy ? 'Opening…' : 'Download bundle'}
+            </Button>
+            <Link
+              to="/recommendations/exports"
+              className="text-[11px] text-primary hover:underline focus:outline-none focus:ring-2 focus:ring-ring"
+            >
+              All exports →
+            </Link>
+          </div>
+        </div>
+      ) : (
+        <div className="mt-3 flex items-center justify-between gap-2">
+          <span className="text-[11px] text-muted-foreground">
+            Step-up authentication required (60-second freshness window).
+          </span>
+          <Button
+            type="button"
+            size="sm"
+            disabled={busy}
+            onClick={() => {
+              void startExport();
+            }}
+          >
+            <FileSignature className="h-3.5 w-3.5" strokeWidth={2} aria-hidden="true" />
+            {busy ? 'Exporting…' : 'Export signed bundle'}
+          </Button>
+        </div>
+      )}
+      {error ? (
+        <div
+          role="alert"
+          aria-live="polite"
+          className="mt-3 rounded-md border border-status-rejected/40 bg-status-rejected/10 p-2 text-xs text-status-rejected"
+        >
+          {error}
+        </div>
+      ) : null}
+    </section>
   );
 }

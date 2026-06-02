@@ -194,6 +194,77 @@ describe('RecommendationDetailView — reveal step-up dispatch', () => {
   });
 });
 
+describe('RecommendationDetailView — signed export panel (S4)', () => {
+  it('does NOT render the Export signed bundle button in draft state', async () => {
+    mockFetch((url) => {
+      if (url === `/api/recommendations/${REC_ID}`) return jsonResponse(REC_DRAFT);
+      return undefined;
+    });
+    renderAt();
+    await screen.findByText(/Recommendation #12/);
+    expect(screen.queryByRole('button', { name: /Export signed bundle/ })).toBeNull();
+  });
+
+  it('renders the Export signed bundle button when status=submitted', async () => {
+    mockFetch((url) => {
+      if (url === `/api/recommendations/${REC_ID}`) return jsonResponse(REC_SUBMITTED);
+      return undefined;
+    });
+    renderAt();
+    await screen.findByText(/Recommendation #12/);
+    expect(screen.getByRole('button', { name: /Export signed bundle/ })).toBeInTheDocument();
+  });
+
+  it('renders the Export signed bundle button when status=response_received', async () => {
+    mockFetch((url) => {
+      if (url === `/api/recommendations/${REC_ID}`) return jsonResponse(REC_RESPONSE_RECEIVED);
+      return undefined;
+    });
+    renderAt();
+    await screen.findByText(/Recommendation #12/);
+    expect(screen.getByRole('button', { name: /Export signed bundle/ })).toBeInTheDocument();
+  });
+
+  it('renders the Export signed bundle button when status=resolved', async () => {
+    mockFetch((url) => {
+      if (url === `/api/recommendations/${REC_ID}`) return jsonResponse(REC_RESOLVED);
+      return undefined;
+    });
+    renderAt();
+    await screen.findByText(/Recommendation #12/);
+    expect(screen.getByRole('button', { name: /Export signed bundle/ })).toBeInTheDocument();
+  });
+
+  it('dispatches stepUpEmitter when POST /exports returns 401 step_up_required', async () => {
+    mockFetch((url, init) => {
+      if (url === `/api/recommendations/${REC_ID}` && (init?.method ?? 'GET') === 'GET') {
+        return jsonResponse(REC_SUBMITTED);
+      }
+      if (url === `/api/recommendations/${REC_ID}/exports` && init?.method === 'POST') {
+        return jsonResponse(
+          { error: 'step_up_required', action: `recommendation.export.${REC_ID}` },
+          401,
+        );
+      }
+      return undefined;
+    });
+
+    const events: string[] = [];
+    const unsubscribe = stepUpEmitter.subscribe((action) => {
+      events.push(action);
+    });
+
+    renderAt();
+    await screen.findByText(/Recommendation #12/);
+    await userEvent.click(screen.getByRole('button', { name: /Export signed bundle/ }));
+
+    await waitFor(() => {
+      expect(events).toContain(`recommendation.export.${REC_ID}`);
+    });
+    unsubscribe();
+  });
+});
+
 describe('RecommendationDetailView — resolve dialog wiring', () => {
   it('opens the resolve dialog and POSTs /resolve on confirm', async () => {
     const requests = mockFetch((url, init) => {

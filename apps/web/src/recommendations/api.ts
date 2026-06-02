@@ -272,6 +272,34 @@ export interface WithdrawRecommendationResponse {
 }
 
 // ---------------------------------------------------------------------------
+// S4 DTOs — signed bundle export
+// ---------------------------------------------------------------------------
+
+export interface CreateRecommendationExportResponse {
+  readonly exportId: string;
+  readonly recommendationId: string;
+  readonly outputSha256: string;
+  readonly signatureSha256: string;
+  readonly signingKeyId: string;
+  readonly citationsHash: string;
+  readonly byteSize: number;
+  readonly expiresAt: string;
+  readonly chainIdx: number;
+}
+
+export interface RecommendationExportSummary {
+  readonly id: string;
+  readonly recommendationId: string;
+  readonly requestedByUserId: string;
+  readonly requestedAt: string;
+  readonly outputSha256: string;
+  readonly signatureSha256: string;
+  readonly signingKeyId: string;
+  readonly byteSize: number;
+  readonly expiresAt: string;
+}
+
+// ---------------------------------------------------------------------------
 // Public API surface
 // ---------------------------------------------------------------------------
 
@@ -340,4 +368,65 @@ export const recommendationsApi = {
       method: 'POST',
       json: body,
     }),
+
+  // Exports (S4) ---------------------------------------------------------
+  //
+  // create: POST /api/recommendations/:id/exports → render + sign + store
+  //   + chain anchor. Step-up required (60s freshness; action binds to
+  //   the recommendation id per T-R29). On 401 the API wrapper dispatches
+  //   stepUpEmitter('recommendation.export.<id>') so the global modal
+  //   opens; the caller retries after the modal closes.
+  //
+  // download: GET /api/recommendations/exports/:id/download → returns a
+  //   Blob of the signed ZIP. The server sets Content-Disposition:
+  //   attachment + Content-Type: application/zip; the caller opens the
+  //   blob in a new tab with the 5s revoke + noopener,noreferrer
+  //   pattern (mirror of 1.7 evidence reveal sec-F10 + 1.8 inspections
+  //   download).
+  //
+  // list: GET /api/recommendations/exports → recent recommendation
+  //   exports (metadata only).
+  exports: {
+    create: (recommendationId: string): Promise<CreateRecommendationExportResponse> =>
+      callOrThrow(`${BASE}/${encodeURIComponent(recommendationId)}/exports`, {
+        method: 'POST',
+        json: {},
+      }),
+    /** Returns the raw ZIP Blob; caller is responsible for the open/revoke dance. */
+    download: async (id: string): Promise<Blob> => {
+      const res = await fetch(`${BASE}/exports/${encodeURIComponent(id)}/download`, {
+        method: 'GET',
+        credentials: 'same-origin',
+        headers: { 'X-Requested-With': 'jhsc-web' },
+      });
+      if (res.status === 401) {
+        const text = await res.text().catch(() => '');
+        let parsed: unknown = text;
+        try {
+          parsed = JSON.parse(text);
+        } catch {
+          // leave as text
+        }
+        const errBody = parsed as { error?: string; action?: string } | undefined;
+        if (errBody?.error === 'step_up_required') {
+          const action = errBody.action ?? 'recommendation.export.download';
+          stepUpEmitter.dispatch(action);
+        }
+        throw new RecommendationApiError(401, parsed);
+      }
+      if (!res.ok) {
+        const text = await res.text().catch(() => '');
+        let parsed: unknown = text;
+        try {
+          parsed = JSON.parse(text);
+        } catch {
+          // leave as text
+        }
+        throw new RecommendationApiError(res.status, parsed);
+      }
+      return res.blob();
+    },
+    list: (): Promise<{ items: ReadonlyArray<RecommendationExportSummary> }> =>
+      callOrThrow(`${BASE}/exports`),
+  },
 };
