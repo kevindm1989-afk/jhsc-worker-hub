@@ -1077,6 +1077,126 @@ export const syncIdempotency = pgTable(
 );
 
 // ---------------------------------------------------------------------------
+// Excel imports (1.11, ADR-0010)
+// ---------------------------------------------------------------------------
+
+// Batch-level row per uploaded workbook. Status walks pending → preview →
+// committed / cancelled; committed can flip to reversed via the 30-day
+// reverse path (S2 lands the route; S1 lands the schema).
+//
+// Three envelope-encrypted column pairs carry PI: source_filename_ct
+// (T-X19 — filenames frequently carry the workplace name per #1);
+// inspection_review_snapshot_ct (T-X13 — supervisor + witness names);
+// pair-NULL CHECKs enforced in migration 0010.
+//
+// source_sha256 is PLAINTEXT — a 32-byte content hash is not PI, and
+// keeping it plaintext lets the chain anchor + the re-import idempotency
+// path (ADR §3.6) cheaply look up by hash.
+
+export const excelImports = pgTable(
+  'excel_imports',
+  {
+    id: uuid('id')
+      .primaryKey()
+      .default(sql`gen_random_uuid()`),
+    importedByUserId: uuid('imported_by_user_id')
+      .notNull()
+      .references(() => users.id, { onDelete: 'restrict', onUpdate: 'restrict' }),
+    // Envelope-encrypted source filename (T-X19).
+    sourceFilenameCt: bytea('source_filename_ct').notNull(),
+    sourceFilenameDekCt: bytea('source_filename_dek_ct').notNull(),
+    // SHA-256 of raw file bytes — integrity anchor only; plaintext OK.
+    sourceSha256: bytea('source_sha256').notNull(),
+    schemaVersion: text('schema_version').notNull(),
+    rowCount: integer('row_count').notNull(),
+    status: text('status').notNull().default('pending'),
+    // Step-up jti pinned on commit; NULL until committed. NOT an FK —
+    // step-up tokens are short-lived; this is for audit-log cross-ref.
+    stepUpJti: text('step_up_jti'),
+    // Envelope-encrypted JSONB snapshot of the Inspection Review sheet
+    // (read-only per ADR §3.4; not promoted to native inspection rows).
+    inspectionReviewSnapshotCt: bytea('inspection_review_snapshot_ct'),
+    inspectionReviewSnapshotDekCt: bytea('inspection_review_snapshot_dek_ct'),
+    auditIdx: bigint('audit_idx', { mode: 'number' })
+      .notNull()
+      .references(() => auditLog.idx, { onDelete: 'restrict', onUpdate: 'restrict' }),
+    createdAt: timestamp('created_at', { withTimezone: true })
+      .notNull()
+      .default(sql`now()`),
+    previewedAt: timestamp('previewed_at', { withTimezone: true }),
+    committedAt: timestamp('committed_at', { withTimezone: true }),
+    cancelledAt: timestamp('cancelled_at', { withTimezone: true }),
+  },
+  (t) => ({
+    auditIdxUnique: uniqueIndex('excel_imports_audit_idx_unique').on(t.auditIdx),
+    importedByIdx: index('excel_imports_imported_by_idx').on(t.importedByUserId),
+    statusIdx: index('excel_imports_status_idx').on(t.status),
+    createdAtIdx: index('excel_imports_created_at_idx').on(t.createdAt),
+    // Partial — the 30-day reverse-window scan walks committed rows only.
+    committedAtIdx: index('excel_imports_committed_at_idx')
+      .on(t.committedAt)
+      .where(sql`${t.status} = 'committed'`),
+  }),
+);
+
+// Per-row provenance join. One row per parsed action_item from the
+// workbook. UNIQUE (import_id, content_hash) collapses same-hash
+// duplicates within one import. before_state_json captures the
+// pre-import snapshot the 30-day reverse restores from (ADR §3.11).
+//
+// action_item_id is NULL during pending/preview; populated by the
+// commit transaction; ON DELETE SET NULL so a reverse that DELETEs
+// the action_item leaves this row as evidentiary record (T-X38).
+//
+// audit_idx is NULLABLE (skipped rows do not anchor); partial UNIQUE
+// in migration 0010 enforces "UNIQUE except NULL".
+
+export const excelImportItems = pgTable(
+  'excel_import_items',
+  {
+    id: uuid('id')
+      .primaryKey()
+      .default(sql`gen_random_uuid()`),
+    importId: uuid('import_id')
+      .notNull()
+      .references(() => excelImports.id, { onDelete: 'restrict', onUpdate: 'restrict' }),
+    sourceRowIndex: integer('source_row_index').notNull(),
+    section: text('section').notNull(),
+    // 32-byte SHA-256 — sha256(canonical(description)||'|'||canonical(start_date)).
+    contentHash: bytea('content_hash').notNull(),
+    actionItemId: uuid('action_item_id').references(() => actionItems.id, {
+      onDelete: 'set null',
+      onUpdate: 'restrict',
+    }),
+    status: text('status').notNull().default('conflict_pending'),
+    // Pre-import snapshot for reverse-path restoration. NULL when
+    // status='created' (no prior state).
+    beforeStateJson: jsonb('before_state_json'),
+    auditIdx: bigint('audit_idx', { mode: 'number' }).references(() => auditLog.idx, {
+      onDelete: 'restrict',
+      onUpdate: 'restrict',
+    }),
+    createdAt: timestamp('created_at', { withTimezone: true })
+      .notNull()
+      .default(sql`now()`),
+  },
+  (t) => ({
+    importContentHashUnique: uniqueIndex('excel_import_items_import_content_hash_unique').on(
+      t.importId,
+      t.contentHash,
+    ),
+    auditIdxUnique: uniqueIndex('excel_import_items_audit_idx_unique')
+      .on(t.auditIdx)
+      .where(sql`${t.auditIdx} IS NOT NULL`),
+    importStatusIdx: index('excel_import_items_import_status_idx').on(t.importId, t.status),
+    actionItemIdx: index('excel_import_items_action_item_idx')
+      .on(t.actionItemId)
+      .where(sql`${t.actionItemId} IS NOT NULL`),
+    contentHashIdx: index('excel_import_items_content_hash_idx').on(t.contentHash),
+  }),
+);
+
+// ---------------------------------------------------------------------------
 // Re-export for Drizzle adapters
 // ---------------------------------------------------------------------------
 
@@ -1113,6 +1233,8 @@ export const schema = {
   recommendationResponses,
   recommendationActionItemLinks,
   syncIdempotency,
+  excelImports,
+  excelImportItems,
   loginAttemptOutcome,
   authEventKind,
   webauthnPurpose,

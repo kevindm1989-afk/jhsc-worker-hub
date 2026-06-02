@@ -1,0 +1,33 @@
+{
+  "name": "@jhsc/excel-import",
+  "version": "0.0.0",
+  "private": true,
+  "description": "JHSC Worker Hub — browser-only Excel import parser, PII heuristic, content_hash canonicalization, reconciliation engine (ADR-0010). Pure functions; no IO; SheetJS in a Web Worker.",
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./src/index.ts",
+      "default": "./src/index.ts"
+    },
+    "./canonical": {
+      "types": "./src/canonical.ts",
+      "default": "./src/canonical.ts"
+    },
+    "./pii": {
+      "types": "./src/pii.ts",
+      "default": "./src/pii.ts"
+    }
+  },
+  "scripts": {
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@jhsc/shared-types": "workspace:*",
+    "xlsx": "0.18.5"
+  },
+  "devDependencies": {
+    "typescript": "^5.7.2",
+    "vitest": "^4.1.0"
+  }
+}

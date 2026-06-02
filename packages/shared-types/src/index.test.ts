@@ -3,6 +3,9 @@ import {
   computeNextBackoff,
   computeRecommendationDeadline,
   err,
+  excelImportItemStatus,
+  excelImportSchemaVersion,
+  excelImportStatus,
   inspectionConductState,
   inspectionExportKind,
   inspectionFindingResponsiblePartyKind,
@@ -400,6 +403,95 @@ describe('isClientId — RFC 4122 v4 runtime guard', () => {
     expect(isClientId('123e4567-e89b-42d3-a456-42661417400')).toBe(false); // too short
     expect(isClientId('123e4567-e89b-42d3-a456-4266141740000')).toBe(false); // too long
     expect(isClientId('123e4567e89b42d3a456426614174000')).toBe(false); // missing dashes
+  });
+});
+
+describe('excel-import enums (Milestone 1.11, ADR-0010)', () => {
+  it('excelImportStatus exports the four lifecycle states in order', () => {
+    expect([...excelImportStatus]).toEqual(['pending', 'preview', 'committed', 'cancelled']);
+  });
+
+  it('excelImportItemStatus exports the four classifications in order', () => {
+    expect([...excelImportItemStatus]).toEqual([
+      'created',
+      'updated',
+      'skipped',
+      'conflict_pending',
+    ]);
+  });
+
+  it('excelImportSchemaVersion exports the v1 Meeting Minutes schema only', () => {
+    expect([...excelImportSchemaVersion]).toEqual(['meeting_minutes_v1']);
+  });
+});
+
+describe('AuditPayload — 1.11 excel-import variants (type-level)', () => {
+  it('excel_import.uploaded carries importId + sourceSha256 + rowCount + schemaVersion', () => {
+    const p: AuditPayload = {
+      kind: 'excel_import.uploaded',
+      importId: 'imp-1',
+      sourceSha256: 'a'.repeat(64),
+      rowCount: 47,
+      schemaVersion: 'meeting_minutes_v1',
+    };
+    if (p.kind === 'excel_import.uploaded') {
+      expect(p.rowCount).toBe(47);
+      expect(p.schemaVersion).toBe('meeting_minutes_v1');
+    }
+  });
+
+  it('excel_import.committed carries the four count buckets — PI-clean (no action_item ids)', () => {
+    const p: AuditPayload = {
+      kind: 'excel_import.committed',
+      importId: 'imp-1',
+      createdCount: 12,
+      updatedCount: 3,
+      skippedCount: 30,
+      conflictResolvedCount: 2,
+    };
+    if (p.kind === 'excel_import.committed') {
+      expect(p.createdCount + p.updatedCount + p.skippedCount + p.conflictResolvedCount).toBe(47);
+    }
+  });
+
+  it('excel_import.reversed carries the server-side reversedAt timestamp', () => {
+    const p: AuditPayload = {
+      kind: 'excel_import.reversed',
+      importId: 'imp-1',
+      reversedAt: '2026-06-15T12:34:56.000Z',
+    };
+    expect(p.kind).toBe('excel_import.reversed');
+  });
+
+  it('narrows on the discriminant for all three excel-import kinds', () => {
+    const payloads: AuditPayload[] = [
+      {
+        kind: 'excel_import.uploaded',
+        importId: 'i1',
+        sourceSha256: '0'.repeat(64),
+        rowCount: 0,
+        schemaVersion: 'meeting_minutes_v1',
+      },
+      {
+        kind: 'excel_import.committed',
+        importId: 'i1',
+        createdCount: 0,
+        updatedCount: 0,
+        skippedCount: 0,
+        conflictResolvedCount: 0,
+      },
+      {
+        kind: 'excel_import.reversed',
+        importId: 'i1',
+        reversedAt: '2026-06-02T00:00:00.000Z',
+      },
+    ];
+    const kinds = payloads.map((p) => p.kind);
+    expect(kinds).toEqual([
+      'excel_import.uploaded',
+      'excel_import.committed',
+      'excel_import.reversed',
+    ]);
   });
 });
 
