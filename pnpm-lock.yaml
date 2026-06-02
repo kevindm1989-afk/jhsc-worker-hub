@@ -172,6 +172,9 @@ importers:
       '@fontsource-variable/source-serif-4':
         specifier: ^5.1.0
         version: 5.2.9
+      '@jhsc/excel-import':
+        specifier: workspace:*
+        version: link:../../packages/excel-import
       '@jhsc/shared-types':
         specifier: workspace:*
         version: link:../../packages/shared-types

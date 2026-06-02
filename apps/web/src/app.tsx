@@ -8,6 +8,9 @@ import { ActionItemDetailView } from './views/action-item-detail-view';
 import { CaptureView } from './views/capture-view';
 import { ActionItemNewView } from './views/action-item-new-view';
 import { ActionItemsView } from './views/action-items-view';
+import { ExcelImportDetailView } from './views/excel-import-detail-view';
+import { ExcelImportsView } from './views/excel-imports-view';
+import { NewExcelImportView } from './views/new-excel-import-view';
 import { HazardDetailView } from './views/hazard-detail-view';
 import { HazardNewView } from './views/hazard-new-view';
 import { HazardsView } from './views/hazards-view';
@@ -72,6 +75,9 @@ export function App(): JSX.Element {
                 <Route path="/recommendations/exports" element={<RecommendationsExportsView />} />
                 <Route path="/recommendations/:id" element={<RecommendationDetailView />} />
                 <Route path="/recommendations/:id/edit" element={<RecommendationEditView />} />
+                <Route path="/excel-imports" element={<ExcelImportsView />} />
+                <Route path="/excel-imports/new" element={<NewExcelImportView />} />
+                <Route path="/excel-imports/:id" element={<ExcelImportDetailView />} />
                 <Route path="/more" element={<MoreView />} />
                 <Route path="/legal" element={<LegalView />} />
                 <Route path="/account/security" element={<SecurityView />} />

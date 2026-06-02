@@ -4,6 +4,7 @@ import {
   Calculator,
   Calendar,
   ChevronRight,
+  FileSpreadsheet,
   FileText,
   Lock,
   Settings,
@@ -49,6 +50,14 @@ const ITEMS: readonly MoreItem[] = [
     icon: BookOpen,
     milestone: 'Milestone 1.4',
     href: '/legal',
+  },
+  {
+    id: 'excel-imports',
+    label: 'Import meeting minutes',
+    desc: 'Parse an existing .xlsx/.xlsm meeting minutes workbook',
+    icon: FileSpreadsheet,
+    milestone: 'Milestone 1.11',
+    href: '/excel-imports',
   },
   {
     id: 'calculators',
