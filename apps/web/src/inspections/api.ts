@@ -245,6 +245,26 @@ export interface InspectionDetail {
   readonly signatures: ReadonlyArray<InspectionSignatureSummary>;
 }
 
+/**
+ * Discriminated union for the responsibleParty field on a finding —
+ * matches the server's `responsiblePartySchema` (ADR-0008 §3.12).
+ *
+ * `user_ref`  — internal owner referenced by user id (no encryption,
+ *               no plaintext name on the row).
+ * `name_text` — external party whose name is envelope-encrypted on the
+ *               row; surfaced here as the decrypted plaintext.
+ *
+ * 1.9 S5 priv-F1 close-out: the web client previously typed this as a
+ * bare `string | null`, which silently dropped the `user_ref` variant
+ * (objects fell into the em-dash placeholder via `value.length`) AND
+ * rejected the create form's bare string at the server's Zod gate.
+ * The web side now mirrors the server's discriminated union shape end
+ * to end.
+ */
+export type ResponsibleParty =
+  | { readonly kind: 'user_ref'; readonly userId: string }
+  | { readonly kind: 'name_text'; readonly nameText: string };
+
 export interface FindingDetail {
   readonly id: string;
   readonly inspectionId: string;
@@ -256,7 +276,7 @@ export interface FindingDetail {
   readonly statusValue: string;
   readonly observation: string | null;
   readonly correctiveAction: string | null;
-  readonly responsibleParty: string | null;
+  readonly responsibleParty: ResponsibleParty | null;
   readonly promotedActionItemId: string | null;
   readonly createdAt: string;
   readonly updatedAt: string;
@@ -290,14 +310,20 @@ export interface CreateFindingBody {
   readonly statusValue: string;
   readonly observation?: string;
   readonly correctiveAction?: string;
-  readonly responsibleParty?: string;
+  // 1.9 S5 priv-F1: matches the server's discriminated union. The
+  // S5 create form ships only the `name_text` shape — a user picker
+  // for `user_ref` is a 1.12 follow-up (runbook §11).
+  readonly responsibleParty?: ResponsibleParty;
 }
 
 export interface PatchFindingBody {
   readonly statusValue?: string;
   readonly observation?: string | null;
   readonly correctiveAction?: string | null;
-  readonly responsibleParty?: string | null;
+  // null clears the field on the row (the server PATCH schema accepts
+  // null via z.union — see `apps/api/src/routes/inspections/index.ts`
+  // patchFindingBody).
+  readonly responsibleParty?: ResponsibleParty | null;
 }
 
 export interface PromoteFindingBody {

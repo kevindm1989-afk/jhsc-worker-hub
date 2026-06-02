@@ -42,7 +42,10 @@ import { Button } from '@/components/ui/button';
 import { cn } from '@/lib/utils';
 import { RecommendationResolveDialog } from '@/components/recommendation-resolve-dialog';
 import { RecommendationResponseSheet } from '@/components/recommendation-response-sheet';
-import { RecommendationWithdrawDialog } from '@/components/recommendation-withdraw-dialog';
+import {
+  REASON_LABELS as WITHDRAW_REASON_LABELS,
+  RecommendationWithdrawDialog,
+} from '@/components/recommendation-withdraw-dialog';
 import { legalApi, type LegalClause } from '@/legal/api';
 import {
   isStepUpRequired,
@@ -372,7 +375,21 @@ function Timeline({ detail }: { detail: RecommendationDetail }): JSX.Element {
           {detail.withdrawnReason ? (
             <>
               <span>·</span>
-              <span>reason: {detail.withdrawnReason}</span>
+              {/*
+                1.9 S5 priv-F4 close-out: translate the enum into the
+                friendly label that the withdraw dialog already uses.
+                The PI-clean enum (`addressed_pre_submission`) is what
+                the chain payload would surface — but the timeline is
+                rep-facing UI, so use the human label here. Fall back
+                to the raw enum value if a future enum addition lands
+                without a label entry (defensive).
+              */}
+              <span>
+                reason:{' '}
+                {WITHDRAW_REASON_LABELS[
+                  detail.withdrawnReason as keyof typeof WITHDRAW_REASON_LABELS
+                ]?.label ?? detail.withdrawnReason}
+              </span>
             </>
           ) : null}
         </>

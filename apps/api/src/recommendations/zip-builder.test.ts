@@ -120,6 +120,72 @@ describe('buildSignedZipBundle', () => {
   });
 });
 
+// 1.9 S5 sec-F11 close-out: the existing byte-equal-on-rerun test
+// could hide a clock-drift bug aligned across two calls in the same
+// process (both round to the same DOS-second). Strengthen the
+// determinism contract by parsing the local-file-header (LFH) and
+// asserting the embedded DOS timestamp fields equal the encoding of
+// 2000-01-01T00:00:00Z verbatim.
+describe('buildSignedZipBundle — LFH DOS timestamp pin (sec-F11)', () => {
+  // DOS time/date encoding (PKZip APPNOTE 4.4.6):
+  //   DOS time:  hours << 11 | minutes << 5 | (seconds / 2)
+  //   DOS date:  (year - 1980) << 9 | month << 5 | day
+  // For 2000-01-01T00:00:00Z that's:
+  //   time = 0, date = (2000-1980) << 9 | 1 << 5 | 1 = 20*512 + 32 + 1 = 10273
+  // yazl writes the LFH lastModFileTime at offset +10 (u16 LE) and
+  // lastModFileDate at offset +12 (u16 LE).
+  const LFH_SIG_BYTES = [0x50, 0x4b, 0x03, 0x04]; // 'PK\x03\x04'
+  const EXPECTED_DOS_TIME = 0; // 00:00:00
+  const EXPECTED_DOS_DATE = 20 * 512 + 1 * 32 + 1; // 2000-01-01
+
+  function findFirstLfh(buf: Uint8Array): number {
+    for (let i = 0; i + 4 < buf.length; i++) {
+      if (
+        buf[i] === LFH_SIG_BYTES[0] &&
+        buf[i + 1] === LFH_SIG_BYTES[1] &&
+        buf[i + 2] === LFH_SIG_BYTES[2] &&
+        buf[i + 3] === LFH_SIG_BYTES[3]
+      ) {
+        return i;
+      }
+    }
+    return -1;
+  }
+
+  function readU16LE(buf: Uint8Array, offset: number): number {
+    return buf[offset]! | (buf[offset + 1]! << 8);
+  }
+
+  it('embeds the pinned 2000-01-01T00:00:00Z DOS timestamp in every LFH', async () => {
+    const zip = await buildSignedZipBundle({
+      pdfBytes: PDF_BYTES,
+      signature: SIGNATURE,
+      manifest: fixtureManifest(),
+    });
+    // Walk every LFH (one per entry — README.txt + manifest.json +
+    // recommendation.pdf + signature.bin = 4 LFHs). Each must carry
+    // the pinned DOS time + date.
+    let scanCursor = 0;
+    let lfhCount = 0;
+    while (scanCursor < zip.length) {
+      const lfh = findFirstLfh(zip.subarray(scanCursor));
+      if (lfh === -1) break;
+      const absoluteLfh = scanCursor + lfh;
+      const dosTime = readU16LE(zip, absoluteLfh + 10);
+      const dosDate = readU16LE(zip, absoluteLfh + 12);
+      expect(dosTime).toBe(EXPECTED_DOS_TIME);
+      expect(dosDate).toBe(EXPECTED_DOS_DATE);
+      lfhCount += 1;
+      // Advance past this LFH signature so the next iteration finds
+      // the next one. +30 for the fixed LFH header + nameLen +
+      // extraLen + compressedSize jumps the body, but we only need to
+      // step past the 4-byte signature to find the next.
+      scanCursor = absoluteLfh + 4;
+    }
+    expect(lfhCount).toBe(4);
+  });
+});
+
 describe('computeManifestSansSigCanonical', () => {
   it('emits keys in the documented stable order', () => {
     const out = computeManifestSansSigCanonical(fixtureManifest());

@@ -370,6 +370,12 @@ evidenceRoute.get('/:id/decrypt', async (c) => {
   if (!idParsed.success) return c.json({ error: 'invalid_id' }, 400);
 
   const auth = c.get('auth');
+  // 60s step-up freshness floor (T-E13 / T-E14). The action string is
+  // echoed in the WWW-Authenticate challenge header for the client's
+  // step-up modal; the server enforces only the (actor, freshness-
+  // window) tuple, NOT a per-action binding. True per-action binding
+  // is a 1.12 hardening item (sec-F1 close-out from 1.9 S5 review,
+  // documented in docs/runbooks/recommendations.md §11).
   const challenge = checkStepUpFreshness(auth, {
     action: 'evidence.read',
     maxAgeSeconds: 60,

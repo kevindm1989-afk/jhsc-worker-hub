@@ -212,11 +212,18 @@ export async function buildSignedZipBundle(bundle: SignedExportBundle): Promise<
       // forceZip64Format=false: we never exceed 4GiB; staying in legacy
       // mode keeps the headers byte-stable across yazl versions.
       forceZip64Format: false,
-      // forceDosTimestamp=true makes the extended-timestamp field
-      // (which would otherwise carry now()) deterministic. Without
-      // this flag, yazl writes the local-file-header's UT extra field
-      // with the current time even when mtime is pinned.
-      forceDosTimestamp: true,
+      // S5 sec-F10 close-out: `forceDosTimestamp: true` was removed —
+      // the option doesn't exist in yazl 2.5.1 (it appears in
+      // `@types/yazl@3.3.1` but the runtime ignores it). yazl 2.5.1
+      // emits no extended-timestamp extra field, so the local-file-
+      // header carries only the pinned DOS date/time from `mtime`.
+      // The determinism contract holds in this version; a future
+      // yazl bump may add the extra field by default and require
+      // explicit suppression — verify via the byte-equal test in
+      // `zip-builder.test.ts` (which also parses the LFH DOS
+      // timestamp at known offsets per sec-F11) before bumping the
+      // dependency. The package.json pin is at `^2.5.1`; the lock
+      // is the de-facto pin.
     });
   }
 

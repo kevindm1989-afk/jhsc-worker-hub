@@ -13,10 +13,14 @@
 // rate-limit + body-limit middleware stack consistent (the parent
 // group already installs all three per S2 — see ./index.ts).
 //
-// Discipline (CLAUDE.md #16 + SECURITY.md §2.9 T-R22..T-R37):
+// Discipline (CLAUDE.md #16 + SECURITY.md §2.9 T-R22..T-R45):
 //   - Step-up gated; 60s freshness floor (T-R28). The action string
-//     binds to the recommendation id (T-R29) so a grant for one rec
-//     cannot be replayed to export another inside the window.
+//     identifies the recommendation id in the WWW-Authenticate header
+//     so the client's step-up modal surfaces WHICH recommendation the
+//     grant is for; the server enforces only the (actor, freshness-
+//     window) tuple, NOT a per-action binding. True per-action binding
+//     is a 1.12 hardening item documented in
+//     `docs/runbooks/recommendations.md` §11 (sec-F1 close-out).
 //   - Per-actor 5/hour rate-limit on POST (T-R28 sibling of 1.8 T-I31);
 //     in-memory token bucket. The pg-boss-backed cross-process variant
 //     remains a 1.12 follow-up (recommendation runbook).
@@ -24,18 +28,26 @@
 //     download path adds an explicit X-Requested-With check (belt-and-
 //     suspenders; matches the 1.7 sec-F2 / 1.8 download posture).
 //   - Decrypt every PI plaintext (title, body, per-response author_role
-//     + body) inside a single bounded request window and memzero what
-//     we can — the buffers we can wipe (Uint8Array DEK bytes); the JS
-//     strings persist until GC (documented tradeoff carried forward
-//     from 1.5 / 1.7 / 1.8).
+//     + body) inside a single bounded request window. JS strings are
+//     immutable; we cannot wipe decrypted title/body/response prose
+//     from the V8 heap. The plaintext lives until GC. The buffers we
+//     CAN wipe — the signing private key (sodium.memzero), the DEK
+//     Uint8Arrays (sodium.memzero inside openRecommendationField),
+//     and the rendered PDF + ZIP byte buffers (.fill(0) in the
+//     finally) — ARE wiped explicitly. The string-immutability gap is
+//     the documented tradeoff carried forward from 1.5 / 1.7 / 1.8
+//     (sec-F6 close-out — honest discipline; the dead
+//     allPlaintextBuffers array from S4 was removed).
 //   - The workplace signing private key is opened just before the sign
 //     call and `sodium.memzero`'d in a finally — same posture as the
 //     1.7 evidence decrypt private key (workplace_keys).
 //   - Mid-render decrypt or hash-mismatch failure aborts the WHOLE
 //     export — no partial ZIP lands in Tigris, no chain anchor fires.
-//     The 1.9 contract is fixed at the nine audit kinds S1 added; we
-//     do NOT emit a `recommendation.export_failed` event. The failure
-//     surface is the HTTP response.
+//     The 1.9 contract is fixed at eleven audit kinds (nine from S1 +
+//     two added in S5: recommendation.export.downloaded and
+//     recommendation.draft_patched). We do NOT emit a
+//     `recommendation.export_failed` event. The failure surface is the
+//     HTTP response.
 //   - The chain row's `outputSha256` is the canonical anchor over the
 //     PDF (NOT the ZIP — see Option B note on the download handler).
 //     The chain row's `signatureSha256` binds the signature.
@@ -43,14 +55,20 @@
 //     row + emits the chain anchor. If the transaction rolls back,
 //     a best-effort DeleteObject removes the orphan ZIP (sec-F6 mirror).
 //   - The download path re-verifies the stored bundle's pdfSha256 +
-//     output_sha256 alignment (TOCTOU detection) before returning. See
-//     the inline comment on Option B for the chain-anchor semantic.
-//   - Re-download chain anchor is INTENTIONALLY NOT emitted. The 1.8
-//     contract added `inspection.export.downloaded`; the recommendation
-//     symmetric anchor is documented in the runbook as a follow-up
-//     (the 30-day TTL + per-request step-up gate are the residual
-//     bound; expansion of the audit-kind contract is a future
-//     milestone's scope creep budget, not 1.9's).
+//     output_sha256 alignment AND signature.bin SHA-256 against
+//     export_records.signature_sha256 (S5 sec-F3 close-out — TOCTOU
+//     detection now covers consistent-ZIP-swap attacks where the
+//     attacker re-signs with a different key but keeps the manifest
+//     PDF hash valid). See the inline comment on Option B for the
+//     chain-anchor semantic. Full Ed25519 crypto verify on download
+//     is a 1.12 hardening item; the SHA-256 cross-check catches the
+//     consistent-swap vector the S5 reviewer flagged.
+//   - S5 sec-F2 close-out (T-R43): re-download emits a
+//     `recommendation.export.downloaded` chain anchor inside a
+//     db.transaction AFTER step-up clears, Tigris fetch + TOCTOU
+//     verify succeed. Failed paths (401, 404, 410, SHA mismatch,
+//     signature mismatch, wrong_kind) do NOT anchor. Mirror of the
+//     1.8 inspection.export.downloaded retrofit (priv-F5 close-out).
 
 import { createHash, randomUUID } from 'node:crypto';
 import { sql } from 'drizzle-orm';
@@ -409,10 +427,15 @@ export function registerRecommendationExportHandlers(group: Hono): void {
       return c.json({ error: 'csrf_required' }, 403);
     }
 
-    // T-R28 + T-R29: step-up freshness floor of 60s, with the action
-    // string binding to the specific recommendation id. A grant for
-    // `recommendation.export.<A>` is rejected by checkStepUpFreshness
-    // when the route is hit with id=B because the action strings differ.
+    // T-R28: step-up freshness floor of 60s. The action string carries
+    // the recommendation id so the client's step-up modal can surface
+    // WHICH recommendation is being authorized (UX affordance). The
+    // server enforces only the (actor, freshness-window) tuple —
+    // checkStepUpFreshness ignores the `action` parameter when matching
+    // grants. A grant obtained for any prior step-up action within the
+    // 60s window WILL be accepted here; true per-action binding is a
+    // 1.12 hardening item (sec-F1 close-out;
+    // docs/runbooks/recommendations.md §11).
     const action = `recommendation.export.${recommendationId}`;
     const challenge = checkStepUpFreshness(auth, {
       action,
@@ -454,8 +477,12 @@ export function registerRecommendationExportHandlers(group: Hono): void {
       return c.json({ error: 'cannot_export_draft', status }, 422);
     }
 
-    // Buffers we own and must memzero on every exit path.
-    const allPlaintextBuffers: Uint8Array[] = [];
+    // Buffers we own and must memzero on every exit path. JS strings
+    // (decrypted title / body / response prose) are intentionally
+    // omitted — they're immutable and cannot be wiped from the V8 heap
+    // (sec-F6 close-out — the dead `allPlaintextBuffers` array from S4
+    // was removed for honesty). The buffers we CAN wipe are listed
+    // here; each is zeroed in the finally / catch below.
     let renderedBytes: Uint8Array | null = null;
     let zipBytes: Uint8Array | null = null;
     let signaturePrivateKey: Uint8Array | null = null;
@@ -532,17 +559,12 @@ export function registerRecommendationExportHandlers(group: Hono): void {
       });
       const byteSize = zipBytes.length;
 
-      // Memzero the plaintext buffers we control. Note: JS strings
-      // (title, body, response prose) cannot be memzero'd; same
-      // documented tradeoff as 1.7 / 1.8. The bytes we can wipe are
-      // the rendered PDF (now embedded in zipBytes) — wipe it for
-      // symmetry with the inspection exports route.
-      for (const buf of allPlaintextBuffers) buf.fill(0);
-      allPlaintextBuffers.length = 0;
-      // Don't zero renderedBytes yet — the chain payload + Tigris PUT
-      // both refer to the bytes by their hash, but the inspections
-      // route's symmetry-zero call is harmless and we mirror it.
-      // (renderedBytes is wiped in the finally below.)
+      // (sec-F6 close-out: removed the dead allPlaintextBuffers loop
+      // that never had anything pushed to it. JS strings — title,
+      // body, response prose — cannot be memzero'd; the file-header
+      // discipline section documents the honest stance. The signing
+      // private key + DEK Uint8Arrays + the rendered PDF buffer ARE
+      // wiped explicitly via sodium.memzero / .fill(0) below.)
 
       // 8. PUT the ZIP to Tigris BEFORE the DB transaction. A PUT
       //    failure leaves the DB untouched (no chain anchor fires,
@@ -643,14 +665,9 @@ export function registerRecommendationExportHandlers(group: Hono): void {
         chainIdx: result.chainIdx,
       });
     } catch (err) {
-      // Memzero everything on every error path.
-      for (const buf of allPlaintextBuffers) {
-        try {
-          buf.fill(0);
-        } catch {
-          // intentional
-        }
-      }
+      // Memzero the buffers we control on every error path. (sec-F6
+      // close-out: removed the dead allPlaintextBuffers loop. JS
+      // strings stay in the heap until GC — documented tradeoff.)
       if (signaturePrivateKey) {
         try {
           sodium.memzero(signaturePrivateKey);
@@ -705,6 +722,12 @@ export function registerRecommendationExportHandlers(group: Hono): void {
     if (!idParsed.success) return c.json({ error: 'invalid_id' }, 400);
 
     const auth = c.get('auth');
+    // T-R28: 60s step-up freshness floor. The action string is echoed
+    // in the WWW-Authenticate challenge header for the client's UX;
+    // the server enforces only the (actor, freshness-window) tuple,
+    // NOT a per-action binding (sec-F1 close-out — true per-action
+    // binding is a 1.12 hardening item documented in
+    // docs/runbooks/recommendations.md §11).
     const challenge = checkStepUpFreshness(auth, {
       action: 'recommendation.export.download',
       maxAgeSeconds: 60,
@@ -718,9 +741,13 @@ export function registerRecommendationExportHandlers(group: Hono): void {
     }
 
     const db = getDb();
+    // S5 sec-F3 close-out: pull signature_sha256 alongside the other
+    // chain-anchored hashes so we can verify the ZIP's signature.bin
+    // against it after extraction.
     const rows = (await db.execute(sql`
       SELECT id, kind, storage_key,
              encode(output_sha256, 'hex') AS output_sha256_hex,
+             encode(signature_sha256, 'hex') AS signature_sha256_hex,
              byte_size,
              inspection_ids,
              expires_at::text AS expires_at
@@ -732,6 +759,7 @@ export function registerRecommendationExportHandlers(group: Hono): void {
       kind: string;
       storage_key: string;
       output_sha256_hex: string;
+      signature_sha256_hex: string;
       byte_size: number;
       inspection_ids: string[];
       expires_at: string;
@@ -776,7 +804,7 @@ export function registerRecommendationExportHandlers(group: Hono): void {
     // The bundle is small (low single-digit KB typical for the
     // manifest + PDF + signature + README), so the parse is cheap.
     try {
-      const { manifestJson, pdfBytes } = extractManifestAndPdf(zipBytes);
+      const { manifestJson, pdfBytes, signatureBytes } = extractManifestPdfAndSignature(zipBytes);
       const parsed = JSON.parse(manifestJson) as { pdfSha256?: unknown };
       const manifestPdfSha256 = typeof parsed.pdfSha256 === 'string' ? parsed.pdfSha256 : '';
       if (manifestPdfSha256 !== r.output_sha256_hex) {
@@ -798,6 +826,25 @@ export function registerRecommendationExportHandlers(group: Hono): void {
           500,
         );
       }
+      // S5 sec-F3 close-out (T-R45): also verify signature.bin's
+      // SHA-256 against the chain-anchored signature_sha256. The PDF
+      // hash cross-check above catches a swapped PDF; this catches a
+      // swapped signature (the "consistent ZIP swap" attack — attacker
+      // re-signs with a different private key and rewrites the
+      // manifest's pdfSha256 to point at their PDF). A full Ed25519
+      // crypto verify on every download is a 1.12 hardening item
+      // (verifyRecommendationBundle); the SHA-256 cross-check is the
+      // cheap-and-correct close-out per the S5 reviewer.
+      const observedSignatureSha = createHash('sha256').update(signatureBytes).digest('hex');
+      if (observedSignatureSha !== r.signature_sha256_hex) {
+        return c.json(
+          {
+            error: 'export_signature_tamper_detected',
+            reason: 'signature_sha_mismatch',
+          },
+          500,
+        );
+      }
     } catch (parseErr) {
       console.warn(
         `[recommendations.exports] failed to parse ZIP for TOCTOU verify: ${
@@ -813,19 +860,39 @@ export function registerRecommendationExportHandlers(group: Hono): void {
       );
     }
 
-    // (Re-download chain anchor intentionally NOT emitted — see file
-    // header. The 1.9 contract is fixed at the nine audit kinds S1
-    // landed; recommendation.export.downloaded is a documented
-    // runbook follow-up.)
+    // S5 sec-F2 close-out (T-R43): emit a per-download chain anchor
+    // AFTER step-up clears AND Tigris fetch succeeds AND the TOCTOU
+    // verify (PDF + signature) passes AND BEFORE bytes return. The
+    // ordering matters — a failed re-download (404 / 410 / SHA
+    // mismatch / signature mismatch / wrong_kind) does NOT anchor;
+    // only a successful, integrity-verified download produces a chain
+    // row. Mirror of the 1.8 inspection.export.downloaded retrofit.
+    // Wrap the append() in a tiny db.transaction so it runs under the
+    // chain's serializing advisory-lock pattern.
+    const recommendationIdForAnchor = r.inspection_ids[0] ?? r.id;
+    await db.transaction(async (tx) => {
+      await append(tx, {
+        actorId: auth.userId,
+        payload: {
+          kind: 'recommendation.export.downloaded',
+          exportId: r.id,
+          recommendationId: recommendationIdForAnchor,
+          downloadedByUserId: auth.userId,
+        },
+        resourceType: 'export_records',
+        resourceId: r.id,
+      });
+    });
 
     // 1.9 priv-F2 / 1.7 sec-F6 + priv-F10 mirror: attachment,
     // application/zip (T-R33), strict CSP sandbox, no-store / no
     // referrer.
-    const recommendationId = r.inspection_ids[0] ?? r.id;
     // Pull the recommendation_number for a friendlier filename, falling
-    // back to the exportId prefix if the lookup fails.
+    // back to the exportId prefix if the lookup fails. Reuses
+    // recommendationIdForAnchor computed above for the chain anchor.
     const recRows = (await db.execute(sql`
-      SELECT recommendation_number FROM recommendations WHERE id = ${recommendationId} LIMIT 1
+      SELECT recommendation_number FROM recommendations
+      WHERE id = ${recommendationIdForAnchor} LIMIT 1
     `)) as unknown as Array<{ recommendation_number: number }>;
     const recNumber = recRows[0]?.recommendation_number ?? 0;
     const filename = `jhsc-recommendation-${recNumber}-${r.id.slice(0, 8)}.zip`;
@@ -1009,10 +1076,38 @@ function extractManifestAndPdf(zipBytes: Uint8Array): {
   };
 }
 
+// S5 sec-F3 close-out: extended extractor that also returns the
+// signature.bin entry. The 64-byte Ed25519 detached signature lives at
+// a fixed entry name in the deterministic ZIP. We hash it and
+// cross-check against export_records.signature_sha256 in the download
+// handler.
+function extractManifestPdfAndSignature(zipBytes: Uint8Array): {
+  manifestJson: string;
+  pdfBytes: Uint8Array;
+  signatureBytes: Uint8Array;
+} {
+  const entries = parseCentralDirectory(zipBytes);
+  const manifestEntry = entries.find((e) => e.name === 'manifest.json');
+  const pdfEntry = entries.find((e) => e.name === 'recommendation.pdf');
+  const signatureEntry = entries.find((e) => e.name === 'signature.bin');
+  if (!manifestEntry) throw new Error('manifest.json not in bundle');
+  if (!pdfEntry) throw new Error('recommendation.pdf not in bundle');
+  if (!signatureEntry) throw new Error('signature.bin not in bundle');
+  const manifestBytes = readEntryBytes(zipBytes, manifestEntry);
+  const pdfBytes = readEntryBytes(zipBytes, pdfEntry);
+  const signatureBytes = readEntryBytes(zipBytes, signatureEntry);
+  return {
+    manifestJson: new TextDecoder('utf-8').decode(manifestBytes),
+    pdfBytes: new Uint8Array(pdfBytes),
+    signatureBytes: new Uint8Array(signatureBytes),
+  };
+}
+
 // Re-export for the unit test surface — the route doesn't use these
 // directly but the test asserts the parser handles our own bundles.
 export const _internalsForTests = {
   extractManifestAndPdf,
+  extractManifestPdfAndSignature,
   parseCentralDirectory,
   buildManifest,
   canonicalJsonStringify,

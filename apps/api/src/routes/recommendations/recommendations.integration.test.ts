@@ -869,3 +869,266 @@ describe.skipIf(SKIP)('GET /api/recommendations/exports/:id/download — step-up
     expect(body.error).toBe('csrf_required');
   });
 });
+
+// ---------------------------------------------------------------------------
+// 1.9 S5 sec-F4 close-out (T-R44): PATCH chain anchor
+// ---------------------------------------------------------------------------
+
+describe.skipIf(SKIP)(
+  'PATCH /api/recommendations/:id emits recommendation.draft_patched (S5 sec-F4)',
+  () => {
+    it('emits the anchor on body-only PATCH with bodyChanged=true + identical hashes', async () => {
+      const { cookie } = await loginAsRep();
+      const rec = await createRecommendation(cookie);
+      const res = await app.request(`/api/recommendations/${rec.id}`, {
+        method: 'PATCH',
+        headers: { 'content-type': 'application/json', 'x-requested-with': 'jhsc-web', cookie },
+        body: JSON.stringify({ body: 'Revised draft body without any markers.' }),
+      });
+      expect(res.status).toBe(200);
+
+      const db = getDb();
+      const rows = (await db.execute(sql`
+      SELECT payload FROM audit_log
+      WHERE kind = 'recommendation.draft_patched' AND resource_id = ${rec.id}
+    `)) as unknown as Array<{
+        payload: {
+          recommendationId: string;
+          recommendationNumber: number;
+          priorCitationsHash: string;
+          newCitationsHash: string;
+          bodyChanged: boolean;
+        };
+      }>;
+      expect(rows).toHaveLength(1);
+      expect(rows[0]!.payload.recommendationId).toBe(rec.id);
+      expect(rows[0]!.payload.bodyChanged).toBe(true);
+      // No citations changed; the two hashes are equal.
+      expect(rows[0]!.payload.priorCitationsHash).toBe(rows[0]!.payload.newCitationsHash);
+      // Hashes are 64-char hex strings.
+      expect(rows[0]!.payload.priorCitationsHash).toMatch(/^[0-9a-f]{64}$/);
+
+      const v = await verify(db);
+      expect(v.ok).toBe(true);
+    });
+
+    it('emits the anchor on citation-only PATCH (empty -> empty churn, bodyChanged=false)', async () => {
+      const { cookie } = await loginAsRep();
+      // Create a recommendation with no citations + no markers (the
+      // simplest case that exercises the gate without depending on a
+      // specific corpus fixture). PATCH with an explicit empty
+      // citations array — body unchanged, citations unchanged
+      // structurally, but the request DID include `citations`, so
+      // `hasMutation` is true and the anchor fires.
+      const rec = await createRecommendation(cookie);
+      const res = await app.request(`/api/recommendations/${rec.id}`, {
+        method: 'PATCH',
+        headers: { 'content-type': 'application/json', 'x-requested-with': 'jhsc-web', cookie },
+        body: JSON.stringify({ citations: [] }),
+      });
+      expect(res.status).toBe(200);
+
+      const db = getDb();
+      const rows = (await db.execute(sql`
+        SELECT payload FROM audit_log
+        WHERE kind = 'recommendation.draft_patched' AND resource_id = ${rec.id}
+      `)) as unknown as Array<{
+        payload: { bodyChanged: boolean; priorCitationsHash: string; newCitationsHash: string };
+      }>;
+      expect(rows).toHaveLength(1);
+      expect(rows[0]!.payload.bodyChanged).toBe(false);
+      // No prior citations + no new citations -> identical hashes
+      // (empty-array hash). The anchor still fires because the PATCH
+      // request DID include a citations field.
+      expect(rows[0]!.payload.priorCitationsHash).toBe(rows[0]!.payload.newCitationsHash);
+    });
+
+    it('does NOT emit the anchor on a no-op PATCH (empty body)', async () => {
+      const { cookie } = await loginAsRep();
+      const rec = await createRecommendation(cookie);
+      const res = await app.request(`/api/recommendations/${rec.id}`, {
+        method: 'PATCH',
+        headers: { 'content-type': 'application/json', 'x-requested-with': 'jhsc-web', cookie },
+        body: JSON.stringify({}),
+      });
+      expect(res.status).toBe(200);
+
+      const db = getDb();
+      const rows = (await db.execute(sql`
+      SELECT payload FROM audit_log
+      WHERE kind = 'recommendation.draft_patched' AND resource_id = ${rec.id}
+    `)) as unknown as Array<unknown>;
+      expect(rows).toHaveLength(0);
+    });
+
+    it('does NOT emit the anchor on a failed PATCH (jurisdiction change rejected)', async () => {
+      const { cookie } = await loginAsRep();
+      const rec = await createRecommendation(cookie, { jurisdiction: 'ON' });
+      const res = await app.request(`/api/recommendations/${rec.id}`, {
+        method: 'PATCH',
+        headers: { 'content-type': 'application/json', 'x-requested-with': 'jhsc-web', cookie },
+        body: JSON.stringify({ jurisdiction: 'CA-FED' }),
+      });
+      expect(res.status).toBe(422);
+      const db = getDb();
+      const rows = (await db.execute(sql`
+      SELECT payload FROM audit_log
+      WHERE kind = 'recommendation.draft_patched' AND resource_id = ${rec.id}
+    `)) as unknown as Array<unknown>;
+      expect(rows).toHaveLength(0);
+    });
+  },
+);
+
+// ---------------------------------------------------------------------------
+// 1.9 S5 sec-F8 close-out: body-only PATCH re-validates against existing
+// citations
+// ---------------------------------------------------------------------------
+
+describe.skipIf(SKIP)('PATCH body-only re-validates citation markers (S5 sec-F8)', () => {
+  it('rejects a body-only PATCH that adds a dangling marker with 422 citation_marker_mismatch', async () => {
+    const { cookie } = await loginAsRep();
+    // Create a recommendation with NO citations; new body adds a
+    // marker without a matching citation row.
+    const rec = await createRecommendation(cookie, { body: 'Original body with no markers.' });
+    const res = await app.request(`/api/recommendations/${rec.id}`, {
+      method: 'PATCH',
+      headers: { 'content-type': 'application/json', 'x-requested-with': 'jhsc-web', cookie },
+      body: JSON.stringify({ body: 'Edited body with a dangling [[cite:1]] marker.' }),
+    });
+    expect(res.status).toBe(422);
+    const body = (await res.json()) as { error: string };
+    expect(body.error).toBe('citation_marker_mismatch');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 1.9 S5 priv-F14 close-out: noHtmlBounded on create/patch/response
+// ---------------------------------------------------------------------------
+
+describe.skipIf(SKIP)('priv-F14 noHtmlBounded — HTML + BiDi rejects', () => {
+  it('rejects a body with <script> tags as 400 invalid_body', async () => {
+    const { cookie } = await loginAsRep();
+    const res = await app.request('/api/recommendations', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-requested-with': 'jhsc-web', cookie },
+      body: JSON.stringify({
+        title: 'HTML reject test',
+        body: 'A body with <script>alert(1)</script> embedded.',
+        jurisdiction: 'ON',
+      }),
+    });
+    expect(res.status).toBe(400);
+    const errBody = (await res.json()) as { error: string };
+    expect(errBody.error).toBe('invalid_body');
+  });
+
+  it('rejects a body with a BiDi override (U+202E) as 400 invalid_body', async () => {
+    const { cookie } = await loginAsRep();
+    const bidi = '‮';
+    const res = await app.request('/api/recommendations', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-requested-with': 'jhsc-web', cookie },
+      body: JSON.stringify({
+        title: 'BiDi reject test',
+        body: `Visible text${bidi}reversed evil.`,
+        jurisdiction: 'ON',
+      }),
+    });
+    expect(res.status).toBe(400);
+    const errBody = (await res.json()) as { error: string };
+    expect(errBody.error).toBe('invalid_body');
+  });
+
+  it('rejects a response body with a control character as 400 invalid_body', async () => {
+    const { cookie } = await loginAsRep();
+    const rec = await createRecommendation(cookie);
+    await app.request(`/api/recommendations/${rec.id}/submit`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-requested-with': 'jhsc-web', cookie },
+      body: JSON.stringify({}),
+    });
+    // U+0007 BEL is a C0 control character; the refinement rejects it.
+    const res = await app.request(`/api/recommendations/${rec.id}/responses`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-requested-with': 'jhsc-web', cookie },
+      body: JSON.stringify({
+        authorRole: 'VP Operations',
+        body: 'Acknowledged with hidden control char.',
+      }),
+    });
+    expect(res.status).toBe(400);
+    const errBody = (await res.json()) as { error: string };
+    expect(errBody.error).toBe('invalid_body');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 1.9 S5 sec-F2 close-out (T-R43): recommendation.export.downloaded
+// chain anchor
+// ---------------------------------------------------------------------------
+
+describe.skipIf(SKIP || SKIP_TIGRIS)(
+  'GET /api/recommendations/exports/:id/download emits recommendation.export.downloaded (S5 sec-F2)',
+  () => {
+    it('emits the anchor on a successful download AFTER the TOCTOU verify passes', async () => {
+      const { cookie } = await loginWithStepUp();
+      const rec = await createRecommendation(cookie);
+      await app.request(`/api/recommendations/${rec.id}/submit`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', 'x-requested-with': 'jhsc-web', cookie },
+        body: JSON.stringify({}),
+      });
+      const createRes = await app.request(`/api/recommendations/${rec.id}/exports`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', 'x-requested-with': 'jhsc-web', cookie },
+        body: JSON.stringify({}),
+      });
+      const createBody = (await createRes.json()) as { exportId: string };
+
+      const dlRes = await app.request(
+        `/api/recommendations/exports/${createBody.exportId}/download`,
+        {
+          headers: { cookie, 'x-requested-with': 'jhsc-web' },
+        },
+      );
+      expect(dlRes.status).toBe(200);
+
+      const db = getDb();
+      const rows = (await db.execute(sql`
+        SELECT payload FROM audit_log
+        WHERE kind = 'recommendation.export.downloaded' AND resource_id = ${createBody.exportId}
+      `)) as unknown as Array<{
+        payload: {
+          exportId: string;
+          recommendationId: string;
+          downloadedByUserId: string;
+        };
+      }>;
+      expect(rows).toHaveLength(1);
+      expect(rows[0]!.payload.exportId).toBe(createBody.exportId);
+      expect(rows[0]!.payload.recommendationId).toBe(rec.id);
+
+      const v = await verify(db);
+      expect(v.ok).toBe(true);
+    });
+
+    it('does NOT emit the anchor on a 401 step_up_required download', async () => {
+      // Use a non-stepped-up session — the gate rejects with 401 BEFORE
+      // the export_records lookup, so the anchor never fires.
+      const { cookie } = await loginAsRep();
+      const res = await app.request(
+        `/api/recommendations/exports/00000000-0000-0000-0000-000000000000/download`,
+        {
+          headers: { cookie, 'x-requested-with': 'jhsc-web' },
+        },
+      );
+      expect(res.status).toBe(401);
+      const db = getDb();
+      const rows = (await db.execute(sql`
+        SELECT id FROM audit_log WHERE kind = 'recommendation.export.downloaded'
+      `)) as unknown as Array<unknown>;
+      expect(rows).toHaveLength(0);
+    });
+  },
+);

@@ -94,11 +94,13 @@ export type AuditEventKind =
   | 'inspection.export.downloaded'
   | 'audit.inspection_template.seeded'
   | 'recommendation.drafted'
+  | 'recommendation.draft_patched'
   | 'recommendation.submitted'
   | 'recommendation.response_captured'
   | 'recommendation.resolved'
   | 'recommendation.withdrawn'
   | 'recommendation.exported'
+  | 'recommendation.export.downloaded'
   | 'audit.workplace_signing_key.seeded'
   | AuthEventKind;
 
@@ -563,6 +565,22 @@ export type AuditPayload =
       readonly jurisdiction: RecommendationJurisdiction;
     }
   | {
+      // S5 sec-F4 close-out (T-R44): chain anchor on every successful
+      // PATCH of a draft recommendation. priorCitationsHash +
+      // newCitationsHash capture citation churn between edits;
+      // bodyChanged is a boolean (NOT the body text — that stays
+      // encrypted on the row). Emitted inside the PATCH transaction;
+      // failed PATCHes do not anchor. The 1.9 contract opens this kind
+      // explicitly so draft-state mutations leave a tamper-evident
+      // trail without exposing PI in the payload.
+      readonly kind: 'recommendation.draft_patched';
+      readonly recommendationId: string;
+      readonly recommendationNumber: number;
+      readonly priorCitationsHash: string;
+      readonly newCitationsHash: string;
+      readonly bodyChanged: boolean;
+    }
+  | {
       readonly kind: 'recommendation.submitted';
       readonly recommendationId: string;
       readonly recommendationNumber: number;
@@ -604,6 +622,19 @@ export type AuditPayload =
       readonly signingKeyId: string;
       readonly citationsHash: string;
       readonly byteSize: number;
+    }
+  | {
+      // S5 sec-F2 close-out (T-R43): per-download chain anchor on the
+      // recommendation export ZIP. Mirrors the 1.8 retrofit of
+      // inspection.export.downloaded. Emitted AFTER step-up clears,
+      // Tigris fetch succeeds, and the TOCTOU verify (PDF SHA + the
+      // signature SHA cross-check from sec-F3) all pass. Failed paths
+      // (401, 404, 410, SHA mismatch, signature mismatch, wrong_kind)
+      // do NOT anchor. PI-clean: ids + downloader user id only.
+      readonly kind: 'recommendation.export.downloaded';
+      readonly exportId: string;
+      readonly recommendationId: string;
+      readonly downloadedByUserId: string;
     }
   | {
       // Seed-time anchor for the workplace signing keypair (ADR-0008

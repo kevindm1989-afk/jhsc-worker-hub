@@ -82,6 +82,7 @@ import { authMiddleware, checkStepUpFreshness } from '../../auth/step-up';
 import { rateLimit } from '../../middleware/rate-limit';
 import { openOptionalField, sealField, sealOptionalField } from '../../inspections/crypto';
 import { sealField as sealActionItemField } from '../../action-items/crypto';
+import { noHtmlBounded } from '../../lib/string-validators';
 import { allocateSequenceNumber } from '../action-items';
 import { inspectionsExportsRoute } from './exports';
 
@@ -142,16 +143,11 @@ const uuidParam = z.string().uuid();
 // even a future renderer that mishandles escaping cannot land XSS
 // content via the template surface (T-I11). Max sizes from ADR-0007 §3.5.
 const KEY_PATTERN = /^[a-z][a-z0-9_]{0,63}$/;
-// Helper: build a string schema with min/max + the no-HTML refinement
-// applied LAST (refine returns ZodEffects which loses .min/.max).
-function noHtmlBounded(opts: {
-  min?: number;
-  max: number;
-}): z.ZodEffects<z.ZodString, string, string> {
-  let s = z.string().max(opts.max);
-  if (opts.min !== undefined) s = s.min(opts.min);
-  return s.refine((v) => !/[<>]/.test(v), 'must not contain `<` or `>` (no HTML/markdown)');
-}
+// `noHtmlBounded` lives in `apps/api/src/lib/string-validators.ts` so
+// the recommendations route can share the same refinement (priv-F14
+// close-out from the 1.9 S5 review). The helper also strips C0/C1
+// control characters + BiDi overrides — defenses we always wanted on
+// the inspections route's free-text surfaces and now apply uniformly.
 
 const templateItemSchema = z
   .object({
@@ -1151,6 +1147,12 @@ inspectionsRoute.get('/findings/:id', async (c) => {
   if (!idParsed.success) return c.json({ error: 'invalid_id' }, 400);
 
   const auth = c.get('auth');
+  // 60s step-up freshness floor (T-I30). The action string is echoed
+  // in the WWW-Authenticate challenge header for the client's step-up
+  // modal; the server enforces only the (actor, freshness-window)
+  // tuple, NOT a per-action binding. True per-action binding is a
+  // 1.12 hardening item (sec-F1 close-out from 1.9 S5 review,
+  // documented in docs/runbooks/recommendations.md §11).
   const challenge = checkStepUpFreshness(auth, {
     action: 'inspection.finding.read',
     maxAgeSeconds: 60,

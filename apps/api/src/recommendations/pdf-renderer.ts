@@ -678,6 +678,23 @@ export async function renderRecommendationPdf(
   opts: RenderOptions = {},
 ): Promise<Uint8Array> {
   const fontPaths = resolveFontPaths(opts.fontDir);
+  // S5 sec-F13 close-out: pin CreationDate to provenance.exportedAt
+  // instead of `new Date()`. Two renders of the same recommendation
+  // with the same provenance.exportedAt now produce byte-equal PDFs.
+  // Trade-off: CreationDate is the export instant, not the render
+  // instant. A rep re-rendering for verification will get a different
+  // PDF only if the exportedAt input changes — which is the property
+  // the chain-anchored outputSha256 should bind. The byte-equal test
+  // in `pdf-renderer.test.ts` covers this. A `new Date(invalidString)`
+  // would produce a non-finite Date; defensively parse and fall back
+  // to a fixed Y2K epoch (matching the deterministic ZIP mtime) so a
+  // malformed exportedAt doesn't silently flip determinism. The
+  // route always passes a fresh ISO string from new Date().toISOString()
+  // so the fallback path is defense-in-depth, not the hot path.
+  const exportedAtDate = new Date(provenance.exportedAt);
+  const creationDate = Number.isFinite(exportedAtDate.getTime())
+    ? exportedAtDate
+    : new Date(Date.UTC(2000, 0, 1));
   const doc = new PDFDocument({
     autoFirstPage: false,
     bufferPages: true,
@@ -689,7 +706,7 @@ export async function renderRecommendationPdf(
       Title: 'JHSC Notice of Recommendation',
       Author: 'JHSC Worker Hub',
       Producer: 'JHSC Worker Hub PDF Renderer',
-      CreationDate: new Date(),
+      CreationDate: creationDate,
       // Subject / Keywords intentionally omitted.
     },
     pdfVersion: '1.4',

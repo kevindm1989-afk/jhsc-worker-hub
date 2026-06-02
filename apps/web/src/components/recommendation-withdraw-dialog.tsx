@@ -34,7 +34,12 @@ interface WithdrawDialogProps {
   readonly onWithdrawn: () => void;
 }
 
-const REASON_LABELS: Record<WithdrawReason, { label: string; help: string }> = {
+// Exported so the recommendation detail view's timeline can translate
+// the enum value into the friendly label without re-deriving it.
+// (1.9 S5 priv-F4 close-out — the timeline previously rendered the
+// raw enum string `addressed_pre_submission` instead of "Addressed
+// before submission".)
+export const REASON_LABELS: Record<WithdrawReason, { label: string; help: string }> = {
   rescinded: {
     label: 'Rescinded',
     help: 'The recommendation is being closed without further action.',

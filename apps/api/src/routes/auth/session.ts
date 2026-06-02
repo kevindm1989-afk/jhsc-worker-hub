@@ -11,6 +11,7 @@
 import type { SessionId } from '@jhsc/shared-types';
 import { Hono } from 'hono';
 import { getCookie } from 'hono/cookie';
+import sodium from 'libsodium-wrappers-sumo';
 import { authMiddleware, REFRESH_COOKIE } from '../../auth/step-up';
 import { clearAuthCookies, setAuthCookies } from '../../auth/cookies';
 import { emitAuthEvent } from '../../auth/events';
@@ -87,6 +88,9 @@ sessionRoute.post('/logout-all', authMiddleware(), async (c) => {
 
 sessionRoute.get('/session', authMiddleware(), async (c) => {
   await initCrypto();
+  // Ensure libsodium is ready before we call sodium.to_base64 below for
+  // the workplaceSigningKey.publicKeyB64 encoding (sec-F5 close-out).
+  await sodium.ready;
   const auth = c.get('auth');
   const db = getDb();
   const profiles = await db
@@ -123,7 +127,22 @@ sessionRoute.get('/session', authMiddleware(), async (c) => {
     workplaceSigningKey: workplaceSigningKey
       ? {
           id: workplaceSigningKey.id,
-          publicKeyB64: Buffer.from(workplaceSigningKey.publicKey).toString('base64'),
+          // S5 sec-F5 close-out: URL-safe no-padding base64 to match
+          // the manifest's encoding shipped by
+          // `apps/api/src/routes/recommendations/exports.ts`
+          // (`buildManifest` uses `sodium.to_base64(...,
+          // base64_variants.URLSAFE_NO_PADDING)`). Standardizing on
+          // one variant means a future client-side fingerprint
+          // comparison (`session.workplaceSigningKey.publicKeyB64 ===
+          // manifest.signingPublicKeyB64`) works without
+          // normalization. Cross-codec normalization is fragile —
+          // pick one and stick with it. The manifest is the canonical
+          // artifact a third-party verifier consumes, so we match
+          // that variant.
+          publicKeyB64: sodium.to_base64(
+            workplaceSigningKey.publicKey,
+            sodium.base64_variants.URLSAFE_NO_PADDING,
+          ),
           algorithm: workplaceSigningKey.algorithm,
         }
       : null,

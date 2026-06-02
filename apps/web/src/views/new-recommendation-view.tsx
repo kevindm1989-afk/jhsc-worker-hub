@@ -471,6 +471,20 @@ export function RecommendationForm(props: RecommendationFormProps): JSX.Element 
           placeholder="Describe the recommended action, the hazard or condition it addresses, and the statutory anchor."
           className="w-full resize-y rounded-md border border-input bg-background px-3 py-2 font-mono text-sm leading-relaxed text-foreground focus:outline-none focus:ring-2 focus:ring-ring"
         />
+        {/*
+          1.9 S5 priv-F8 close-out: role-first / minimize-collection
+          nudge. Mirrors the 1.8 priv-F2 close-out on the inspection
+          finding capture form. The body is envelope-encrypted at rest
+          (PIPEDA P4) but lands plaintext in the signed PDF the rep
+          hand-serves on the employer, so the bias-toward-roles prompt
+          matters most on this surface.
+        */}
+        <p className="mt-1 text-[11px] text-muted-foreground">
+          Encrypted at rest, but appears in the signed PDF you serve. Use roles (&ldquo;VP
+          Operations&rdquo;, &ldquo;the second-shift supervisor&rdquo;) rather than names unless the
+          person has explicitly consented to being identified. Witness identifiers belong on the
+          linked hazard / action item, not the Notice itself.
+        </p>
         <BodyMarkerPreview body={body} />
       </FormSection>
 

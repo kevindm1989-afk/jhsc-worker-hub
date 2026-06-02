@@ -165,6 +165,30 @@ describe('renderRecommendationPdf', () => {
     expect(bytes.length).toBeGreaterThan(0);
     expect(bytes[0]).toBe(0x25);
   });
+
+  // 1.9 S5 sec-F13 close-out: pinning CreationDate to
+  // provenance.exportedAt makes the renderer deterministic for
+  // identical inputs. Two renders with the same recommendation +
+  // identical provenance.exportedAt produce byte-equal PDFs.
+  it('produces byte-equal PDFs for identical inputs incl. provenance.exportedAt (sec-F13)', async () => {
+    const provenance = makeProvenance();
+    const a = await renderRecommendationPdf(makeRec(), provenance);
+    const b = await renderRecommendationPdf(makeRec(), provenance);
+    expect(a.length).toBe(b.length);
+    expect(Buffer.from(a).equals(Buffer.from(b))).toBe(true);
+  });
+
+  // Sanity check the inverse: changing provenance.exportedAt flips the
+  // bytes (CreationDate is the property that distinguishes them).
+  it('produces different PDFs when provenance.exportedAt changes (sec-F13)', async () => {
+    const a = await renderRecommendationPdf(makeRec(), makeProvenance());
+    const provenanceLater: ProvenanceFooter = {
+      ...makeProvenance(),
+      exportedAt: '2026-05-30T11:01:00Z',
+    };
+    const b = await renderRecommendationPdf(makeRec(), provenanceLater);
+    expect(Buffer.from(a).equals(Buffer.from(b))).toBe(false);
+  });
 });
 
 describe('computeCitationsHash', () => {

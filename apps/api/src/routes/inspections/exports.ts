@@ -516,6 +516,13 @@ inspectionsExportsRoute.post('/', async (c) => {
 
   // 1. Step-up gate FIRST. Cheap; rejects unauthorized callers before we
   //    touch the DB or open the workplace key.
+  //
+  // 60s step-up freshness floor (T-I30). The action string is echoed
+  // in the WWW-Authenticate challenge header for the client's step-up
+  // modal; the server enforces only the (actor, freshness-window)
+  // tuple, NOT a per-action binding. True per-action binding is a
+  // 1.12 hardening item (sec-F1 close-out from 1.9 S5 review,
+  // documented in docs/runbooks/recommendations.md §11).
   const challenge = checkStepUpFreshness(auth, {
     action: 'inspection.export',
     maxAgeSeconds: 60,
@@ -789,6 +796,11 @@ inspectionsExportsRoute.get('/:id/download', async (c) => {
   if (!idParsed.success) return c.json({ error: 'invalid_id' }, 400);
 
   const auth = c.get('auth');
+  // 60s step-up freshness floor (T-I31). The action string is echoed
+  // in the WWW-Authenticate challenge header for the client's UX; the
+  // server enforces only the (actor, freshness-window) tuple, NOT a
+  // per-action binding. True per-action binding is a 1.12 hardening
+  // item (sec-F1 close-out from 1.9 S5 review).
   const challenge = checkStepUpFreshness(auth, {
     action: 'inspection.export.download',
     maxAgeSeconds: 60,

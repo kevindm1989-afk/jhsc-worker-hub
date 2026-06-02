@@ -87,6 +87,8 @@ import { authMiddleware, checkStepUpFreshness } from '../../auth/step-up';
 import { rateLimit } from '../../middleware/rate-limit';
 import { openRecommendationField, sealRecommendationField } from '../../recommendations/crypto';
 import { sealField as sealActionItemField } from '../../action-items/crypto';
+import { computeCitationRowsHash } from '../../recommendations/citations';
+import { noHtmlBounded } from '../../lib/string-validators';
 import { allocateSequenceNumber } from '../action-items';
 import { registerRecommendationExportHandlers } from './exports';
 
@@ -139,10 +141,19 @@ const citationSchema = z
   })
   .strict();
 
+// S5 priv-F14 close-out: title + body Zod refinements use the shared
+// `noHtmlBounded` helper, which rejects HTML (`<`/`>`), C0/C1 control
+// characters, and BiDi overrides (U+202A-U+202E + U+2066-U+2069).
+// Reps drafting long-form prose can paste from Word/Outlook without
+// thinking about it; the refinement catches hostile BiDi sequences
+// that would re-order rendered text in the signed PDF (the rep sees
+// "approve this" while the employer reads "deny this"). The helper
+// lives in `apps/api/src/lib/string-validators.ts` and is shared
+// with the inspections route.
 const createBody = z
   .object({
-    title: z.string().min(1).max(200),
-    body: z.string().min(1).max(16000),
+    title: noHtmlBounded({ min: 1, max: 200 }),
+    body: noHtmlBounded({ min: 1, max: 16000 }),
     jurisdiction: z.enum(recommendationJurisdiction),
     citations: z.array(citationSchema).max(500).optional(),
   })
@@ -150,8 +161,8 @@ const createBody = z
 
 const patchBody = z
   .object({
-    title: z.string().min(1).max(200).optional(),
-    body: z.string().min(1).max(16000).optional(),
+    title: noHtmlBounded({ min: 1, max: 200 }).optional(),
+    body: noHtmlBounded({ min: 1, max: 16000 }).optional(),
     // jurisdiction is accepted in the schema so a hand-crafted body
     // reaches the route handler (which surfaces a clear 422), rather
     // than rejecting with a confusing generic 400. The handler asserts
@@ -173,8 +184,10 @@ const resolveBody = z.object({}).strict();
 
 const responseBody = z
   .object({
-    authorRole: z.string().min(1).max(120),
-    body: z.string().min(1).max(8000),
+    // S5 priv-F14 close-out: noHtmlBounded refinement on both fields
+    // — same rationale as the create / patch bodies above.
+    authorRole: noHtmlBounded({ min: 1, max: 120 }),
+    body: noHtmlBounded({ min: 1, max: 8000 }),
   })
   .strict();
 
@@ -649,6 +662,12 @@ recommendationsRoute.get('/:id/reveal', async (c) => {
   if (!idParsed.success) return c.json({ error: 'invalid_id' }, 400);
 
   const auth = c.get('auth');
+  // 60s step-up freshness floor. The action string is echoed in the
+  // WWW-Authenticate challenge header for the client's UX; the server
+  // enforces only the (actor, freshness-window) tuple, NOT a
+  // per-action binding. A fresh grant for any prior step-up action
+  // within the 60s window is accepted here. True per-action binding
+  // is a 1.12 hardening item (sec-F1 close-out, runbook §11).
   const challenge = checkStepUpFreshness(auth, {
     action: 'recommendation.read',
     maxAgeSeconds: 60,
@@ -738,15 +757,17 @@ recommendationsRoute.patch('/:id', async (c) => {
     return c.json({ error: 'invalid_body', issues: parsed.error.flatten() }, 400);
   }
   const body = parsed.data;
+  const auth = c.get('auth');
   const db = getDb();
 
   try {
     const result = await db.transaction(async (tx) => {
       const locked = (await tx.execute(sql`
-        SELECT id, status, jurisdiction, body_ct, body_dek_ct
+        SELECT id, recommendation_number, status, jurisdiction, body_ct, body_dek_ct
         FROM recommendations WHERE id = ${idParsed.data} FOR UPDATE
       `)) as unknown as Array<{
         id: string;
+        recommendation_number: number;
         status: string;
         jurisdiction: string;
         body_ct: Uint8Array;
@@ -778,9 +799,34 @@ recommendationsRoute.patch('/:id', async (c) => {
         });
       }
 
+      // S5 sec-F4 close-out (T-R44): compute priorCitationsHash from
+      // the EXISTING citation rows BEFORE any DELETE so the chain
+      // anchor records what was there. (Empty input is hashed
+      // deterministically; the anchor distinguishes empty-before /
+      // empty-after / churn between non-empty sets.)
+      const priorCitationRows = (await tx.execute(sql`
+        SELECT statute_code, clause_id, version_date::text AS version_date, position
+        FROM recommendation_citations
+        WHERE recommendation_id = ${idParsed.data}
+        ORDER BY position ASC
+      `)) as unknown as Array<{
+        statute_code: string;
+        clause_id: string;
+        version_date: string;
+        position: number;
+      }>;
+      const priorCitationsForHash = priorCitationRows.map((r) => ({
+        statuteCode: r.statute_code,
+        clauseId: r.clause_id,
+        versionDate: r.version_date,
+        position: r.position,
+      }));
+      const priorCitationsHash = computeCitationRowsHash(priorCitationsForHash);
+
       // Determine the body text the citation gate will validate against:
       // either the incoming patched body, or the existing decrypted body
-      // when only citations changed.
+      // when only citations changed. (Used for both the body-only
+      // sec-F8 re-validation path AND the body+citations path.)
       let bodyText: string | null = null;
       if (body.body !== undefined || body.citations !== undefined) {
         bodyText =
@@ -791,6 +837,21 @@ recommendationsRoute.patch('/:id', async (c) => {
 
       if (body.citations !== undefined && bodyText !== null) {
         const err = await validateCitations(tx, bodyText, body.citations);
+        if (err) {
+          throw new RecommendationWriteAborted({
+            status: 422,
+            body: { error: err.error, ...(err.details ?? {}) },
+          });
+        }
+      } else if (body.body !== undefined && body.citations === undefined) {
+        // S5 sec-F8 close-out: body-only PATCH must re-validate the
+        // new body against the EXISTING citation set. Otherwise a rep
+        // can edit the body to add dangling `[[cite:N]]` markers (or
+        // remove markers that leave citation rows unreferenced) and
+        // the failure surfaces only at submit time — a 422 here is
+        // friendlier than a 422 at submit when the rep has 2000 words
+        // queued up.
+        const err = await validateCitations(tx, bodyText!, priorCitationsForHash);
         if (err) {
           throw new RecommendationWriteAborted({
             status: 422,
@@ -837,9 +898,35 @@ recommendationsRoute.patch('/:id', async (c) => {
         }
       }
 
-      // No chain anchor on draft PATCH — mirrors the inspections PATCH
-      // posture; only submit / respond / resolve / withdraw anchor in
-      // the recommendation lifecycle.
+      // S5 sec-F4 close-out (T-R44): emit a recommendation.draft_patched
+      // chain anchor when the PATCH actually mutated something.
+      // priorCitationsHash + newCitationsHash capture citation churn;
+      // bodyChanged is a boolean tracking whether the request included
+      // a `body` field (we don't decrypt the existing body just to
+      // compare — pragmatic choice documented in the anchor's shared-
+      // types comment). A no-op PATCH (e.g. body sent but unchanged
+      // and citations sent but unchanged) still anchors because the
+      // route can't cheaply tell the difference; the chain row is
+      // structurally a no-PI receipt either way.
+      const hasMutation =
+        body.title !== undefined || body.body !== undefined || body.citations !== undefined;
+      if (hasMutation) {
+        const newCitations = body.citations ?? priorCitationsForHash;
+        const newCitationsHash = computeCitationRowsHash(newCitations);
+        await append(tx, {
+          actorId: auth.userId,
+          payload: {
+            kind: 'recommendation.draft_patched',
+            recommendationId: idParsed.data,
+            recommendationNumber: row.recommendation_number,
+            priorCitationsHash,
+            newCitationsHash,
+            bodyChanged: body.body !== undefined,
+          },
+          resourceType: 'recommendations',
+          resourceId: idParsed.data,
+        });
+      }
       return { id: idParsed.data };
     });
     return c.json(result);
