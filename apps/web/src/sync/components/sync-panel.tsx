@@ -27,6 +27,7 @@
 
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import {
+  Activity,
   AlertOctagon,
   AlertTriangle,
   CheckCircle2,
@@ -45,6 +46,14 @@ import { db } from '../db';
 import type { SyncConflictRow, SyncQueueRow } from '../db';
 import type { SyncEntityKind } from '@jhsc/shared-types';
 import { useSyncStatus, getWorker } from '../worker-singleton';
+import {
+  PENDING_PAYLOAD_WARN_BYTES,
+  computeSyncMetrics,
+  formatAgeSeconds,
+  formatBytes,
+  formatMedianAttempts,
+  type SyncMetrics,
+} from '../metrics';
 import { ConflictResolutionDialog } from './conflict-resolution-dialog';
 import { PwaInstallPrompt } from './pwa-install-prompt';
 
@@ -114,19 +123,23 @@ function formatRelative(toIso: string, nowMs: number): string {
   return `in ${Math.round(deltaHr / 24)}d`;
 }
 
-/** Read the four row groups from Dexie. Exported as a callable so the
- * panel + its tests can drive the same query path. */
+/** Read the four row groups from Dexie + compute the local metrics
+ * surface (S4 — CLAUDE.md #3 no-telemetry: numbers stay on device).
+ * Exported as a callable so the panel + its tests can drive the same
+ * query path. */
 async function loadPanelData(): Promise<{
   pending: ReadonlyArray<SyncQueueRow>;
   conflicts: ReadonlyArray<SyncConflictRow>;
   deadLetter: ReadonlyArray<SyncQueueRow>;
   lastSyncedAt: string | null;
+  metrics: SyncMetrics;
 }> {
-  const [pending, conflicts, deadLetter, baseStates] = await Promise.all([
+  const [pending, conflicts, deadLetter, baseStates, metrics] = await Promise.all([
     db.sync_queue.where('state').anyOf(['queued', 'in_flight']).toArray(),
     db.sync_conflicts.where('resolved').equals(0).toArray(),
     db.sync_queue.where('state').equals('failed_dead_letter').toArray(),
     db._base_state.toArray(),
+    computeSyncMetrics(),
   ]);
   // Most-recent base-state cachedAt = the proxy for last-synced. Skip
   // the heartbeat row (its key is `__heartbeat__:...`).
@@ -135,7 +148,7 @@ async function loadPanelData(): Promise<{
     if (b.key.startsWith('__heartbeat__')) continue;
     if (last === null || b.cachedAt > last) last = b.cachedAt;
   }
-  return { pending, conflicts, deadLetter, lastSyncedAt: last };
+  return { pending, conflicts, deadLetter, lastSyncedAt: last, metrics };
 }
 
 /** Map an entity kind to the table name so we can clear an optimistic
@@ -184,7 +197,28 @@ export function SyncPanel({ open, onOpenChange }: SyncPanelProps): JSX.Element |
       // Dexie unavailable — render the empty shell. Tests using
       // fake-indexeddb resolve normally; production failures here mean
       // the user is in a bad state but the panel itself stays renderable.
-      setData({ pending: [], conflicts: [], deadLetter: [], lastSyncedAt: null });
+      setData({
+        pending: [],
+        conflicts: [],
+        deadLetter: [],
+        lastSyncedAt: null,
+        metrics: {
+          opsByState: {
+            queued: 0,
+            in_flight: 0,
+            succeeded: 0,
+            conflicting: 0,
+            failed_dead_letter: 0,
+            paused: 0,
+          },
+          medianAttemptCount: 0,
+          oldestQueuedAgeSeconds: null,
+          unresolvedConflicts: 0,
+          deadLetterCount: 0,
+          pendingPayloadBytes: 0,
+          hasBlockedByParent: false,
+        },
+      });
     }
   }, []);
 
@@ -367,6 +401,8 @@ export function SyncPanel({ open, onOpenChange }: SyncPanelProps): JSX.Element |
               }}
             />
 
+            <HealthSection metrics={data?.metrics ?? null} />
+
             <PendingSection pending={data?.pending ?? null} now={nowMs} draining={draining} />
 
             <ConflictsSection
@@ -520,6 +556,123 @@ function statusHeadline(status: ReturnType<typeof useSyncStatus>): string {
           ? 'Sync paused — an operation hit the retry ceiling'
           : `Sync paused — ${status.reason}`;
   }
+}
+
+/**
+ * Local-only sync metrics surface (S4, ADR-0009 §3.11).
+ *
+ * Six numeric / boolean indicators at the top of the panel. None of
+ * these values leave the device — they're pure aggregates over the
+ * rep's own Dexie state. CLAUDE.md non-negotiable #3 forbids third-
+ * party data flows; this surface exists precisely so the rep can see
+ * what they need to see WITHOUT a telemetry pipe.
+ *
+ * Density-first: a 2x3 grid on phones, 3x2 on desktop. JetBrains Mono
+ * for every numeric value (CLAUDE.md typography rule for data). The
+ * pending-payload-bytes value warns when above 2 MB (PENDING_PAYLOAD_WARN_BYTES).
+ *
+ * Empty / null states: when `metrics === null` (initial load before
+ * the first reload) we render dashes — never a spinner, never a blank.
+ */
+function HealthSection({ metrics }: { metrics: SyncMetrics | null }): JSX.Element {
+  const pendingBytesWarn =
+    metrics !== null && metrics.pendingPayloadBytes > PENDING_PAYLOAD_WARN_BYTES;
+
+  return (
+    <section
+      aria-labelledby="sync-health-heading"
+      className="mb-4 rounded-md border border-border bg-background p-3"
+      data-testid="sync-health-section"
+    >
+      <h3
+        id="sync-health-heading"
+        className="mb-2 flex items-center gap-1.5 text-xs font-medium uppercase tracking-wide text-muted-foreground"
+      >
+        <Activity className="h-3.5 w-3.5" strokeWidth={1.75} aria-hidden="true" />
+        Health
+      </h3>
+      <div className="grid grid-cols-2 gap-x-3 gap-y-1.5 md:grid-cols-3">
+        <HealthRow
+          label="Median attempts"
+          value={metrics === null ? '—' : formatMedianAttempts(metrics.medianAttemptCount)}
+          testId="health-median-attempts"
+        />
+        <HealthRow
+          label="Oldest queued"
+          value={metrics === null ? '—' : formatAgeSeconds(metrics.oldestQueuedAgeSeconds)}
+          testId="health-oldest-queued"
+        />
+        <HealthRow
+          label="Pending payload"
+          value={metrics === null ? '—' : formatBytes(metrics.pendingPayloadBytes)}
+          testId="health-pending-payload"
+          warn={pendingBytesWarn}
+        />
+        <HealthRow
+          label="Conflicts"
+          value={metrics === null ? '—' : String(metrics.unresolvedConflicts)}
+          testId="health-conflicts"
+          warn={metrics !== null && metrics.unresolvedConflicts > 0}
+        />
+        <HealthRow
+          label="Dead letter"
+          value={metrics === null ? '—' : String(metrics.deadLetterCount)}
+          testId="health-dead-letter"
+          warn={metrics !== null && metrics.deadLetterCount > 0}
+        />
+        <HealthRow
+          label="FK-blocked"
+          value={metrics === null ? '—' : metrics.hasBlockedByParent ? 'yes' : 'no'}
+          testId="health-fk-blocked"
+          warn={metrics !== null && metrics.hasBlockedByParent}
+        />
+      </div>
+      {pendingBytesWarn ? (
+        <p
+          className="mt-2 rounded border border-status-pending/30 bg-status-pending/5 px-2 py-1 text-[11px] text-status-pending"
+          data-testid="health-payload-warning"
+        >
+          Pending payload is large. Consider syncing or discarding old dead-letter rows to free
+          IndexedDB.
+        </p>
+      ) : null}
+      {/* Footer: explicit no-telemetry reassurance. CLAUDE.md #3 is the
+          contract — surfaced here so the rep knows the numbers above
+          stay on their device. */}
+      <p
+        className="mt-2 text-[10px] uppercase tracking-wide text-muted-foreground/70"
+        data-testid="health-no-telemetry-note"
+      >
+        Local-only. These numbers stay on this device.
+      </p>
+    </section>
+  );
+}
+
+function HealthRow({
+  label,
+  value,
+  testId,
+  warn,
+}: {
+  label: string;
+  value: string;
+  testId: string;
+  warn?: boolean;
+}): JSX.Element {
+  return (
+    <div className="flex min-w-0 items-baseline justify-between gap-1.5">
+      <span className="text-[11px] text-muted-foreground">{label}</span>
+      <span
+        className={`truncate font-mono tabular-nums text-xs ${
+          warn ? 'text-status-pending' : 'text-foreground'
+        }`}
+        data-testid={testId}
+      >
+        {value}
+      </span>
+    </div>
+  );
 }
 
 function PendingSection({

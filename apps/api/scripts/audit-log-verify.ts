@@ -10,11 +10,13 @@
 //   DATABASE_URL=... bun run scripts/audit-log-verify.ts --quiet
 //   DATABASE_URL=... bun run scripts/audit-log-verify.ts --check-backfill
 //   DATABASE_URL=... bun run scripts/audit-log-verify.ts --check-evidence
+//   DATABASE_URL=... bun run scripts/audit-log-verify.ts --check-sync
 //
 // Exit codes
 //   0   chain verified (and any requested anchor checks pass)
 //   1   tamper detected (firstDivergence reported, or backfill mismatch,
-//       or evidence forward-defense check fails)
+//       or evidence forward-defense check fails, or sync_idempotency
+//       anomaly detected)
 //   2   operational error (could not reach DB, etc.)
 
 import { createHash } from 'node:crypto';
@@ -119,10 +121,150 @@ async function checkEvidenceForwardDefense(
   return { ok: true, checked: rows.length };
 }
 
+// ---------------------------------------------------------------------------
+// --check-sync forward defense (Milestone 1.10 S4, ADR-0009 §3.4)
+// ---------------------------------------------------------------------------
+//
+// `sync_idempotency` is the server-side idempotency cache backing the
+// queue worker's per-request `Idempotency-Key` header. Each row has a
+// 7-day TTL (`expires_at`); ADR-0009 §3.4 + the migration-0009 comment
+// reserve the cleanup-sweep job for the 1.12 pg-boss work. Until then,
+// the table grows monotonically.
+//
+// `--check-sync` is the forward-defense surface for the gap. It scans
+// for three anomaly classes:
+//
+//   1. `expired_unswept`           — rows past `expires_at` plus a 1-day
+//                                    grace. These should have been
+//                                    swept; if any exist after 1.12
+//                                    lands, the sweep job has regressed.
+//                                    Until 1.12 the script accumulates
+//                                    findings; the operator monitors the
+//                                    count to decide when to push the
+//                                    cleanup work forward.
+//   2. `orphan_actor`              — rows whose `actor_user_id` has no
+//                                    matching `users.id`. Referential
+//                                    integrity sentinel; a successful
+//                                    user delete should have CASCADEd
+//                                    these (FK is `ON DELETE RESTRICT`
+//                                    today — the cascade is a 1.12
+//                                    line item).
+//   3. `cached_5xx`                — rows whose `response_status_code`
+//                                    is 5xx. Per ADR-0009 §3.4 the
+//                                    middleware is supposed to skip
+//                                    caching 5xx responses (so the
+//                                    queue worker's retry actually
+//                                    contacts the handler again).
+//                                    A 5xx row here means the contract
+//                                    regressed.
+//
+// Each anomaly maps to a SECURITY.md §2.10 threat:
+//   - T-S9   queue tamper (idempotency cache should not leak across the
+//            TTL).
+//   - T-S10  replay surface (a stale 5xx cache hit would mask a server-
+//            side regression from the rep).
+//   - T-S39  sync chip false-Synced (the rep's chip relies on the
+//            server's idempotency state being consistent).
+//   - T-S41  dead-letter ignore (a cached 5xx that should have been a
+//            retry would silently fail the rep into dead-letter).
+
+interface SyncIdempotencyRow {
+  id: string;
+  actor_user_id: string;
+  action_kind: string;
+  response_status_code: number;
+  created_at: Date;
+  expires_at: Date;
+  user_exists: boolean;
+}
+
+interface SyncAnomaly {
+  /** The idempotency row UUID. */
+  readonly id: string;
+  /** A short reason code: 'expired_unswept' | 'orphan_actor' | 'cached_5xx'. */
+  readonly reason: 'expired_unswept' | 'orphan_actor' | 'cached_5xx';
+  /** Human-readable detail, e.g. age (for expired rows) or status code. */
+  readonly detail: string;
+  /** action_kind for context (POST /api/hazards, etc.). */
+  readonly actionKind: string;
+}
+
+/** The 1-day grace window past `expires_at` before we treat the row as
+ * "should have been swept." Matches the migration-0009 comment that the
+ * sweep job will run daily under pg-boss in 1.12. */
+const SWEEP_GRACE_INTERVAL_DAYS = 1;
+
+async function checkSyncIdempotency(
+  db: ReturnType<typeof getDb>,
+): Promise<
+  | { ok: true; rowsChecked: number }
+  | { ok: false; anomalies: ReadonlyArray<SyncAnomaly>; rowsChecked: number }
+> {
+  // Single read joining sync_idempotency LEFT JOIN users — we need the
+  // referential-integrity sentinel and the row contents in one round-
+  // trip. The `user_exists` boolean is true iff the FK target row is
+  // still in `users`.
+  const rows = (await db.execute(sql`
+    SELECT
+      si.id::text AS id,
+      si.actor_user_id::text AS actor_user_id,
+      si.action_kind,
+      si.response_status_code,
+      si.created_at,
+      si.expires_at,
+      (u.id IS NOT NULL) AS user_exists
+    FROM sync_idempotency si
+    LEFT JOIN users u ON u.id = si.actor_user_id
+    ORDER BY si.created_at ASC
+  `)) as unknown as SyncIdempotencyRow[];
+
+  const now = new Date();
+  const graceMs = SWEEP_GRACE_INTERVAL_DAYS * 24 * 60 * 60 * 1000;
+  const anomalies: SyncAnomaly[] = [];
+
+  for (const row of rows) {
+    // 1. expired_unswept — row is past expires_at + 1d grace.
+    const expiredMs = now.getTime() - row.expires_at.getTime();
+    if (expiredMs > graceMs) {
+      const ageHours = Math.round(expiredMs / (60 * 60 * 1000));
+      anomalies.push({
+        id: row.id,
+        reason: 'expired_unswept',
+        detail: `${ageHours}h past TTL (sweep job 1.12 not yet running)`,
+        actionKind: row.action_kind,
+      });
+    }
+    // 2. orphan_actor — actor_user_id no longer exists.
+    if (!row.user_exists) {
+      anomalies.push({
+        id: row.id,
+        reason: 'orphan_actor',
+        detail: `actor_user_id=${row.actor_user_id} has no users row`,
+        actionKind: row.action_kind,
+      });
+    }
+    // 3. cached_5xx — 5xx response was cached, contract violation.
+    if (row.response_status_code >= 500 && row.response_status_code < 600) {
+      anomalies.push({
+        id: row.id,
+        reason: 'cached_5xx',
+        detail: `response_status_code=${row.response_status_code} should not have been cached`,
+        actionKind: row.action_kind,
+      });
+    }
+  }
+
+  if (anomalies.length === 0) {
+    return { ok: true, rowsChecked: rows.length };
+  }
+  return { ok: false, anomalies, rowsChecked: rows.length };
+}
+
 async function main(): Promise<void> {
   const quiet = process.argv.includes('--quiet');
   const checkBackfill = process.argv.includes('--check-backfill');
   const checkEvidence = process.argv.includes('--check-evidence');
+  const checkSync = process.argv.includes('--check-sync');
   const db = getDb();
   const result = await verify(db);
   if (!result.ok) {
@@ -159,6 +301,38 @@ async function main(): Promise<void> {
     if (!quiet) {
       process.stdout.write(
         `audit-log-verify evidence forward defense: ${evidence.checked} chain row(s) checked, no placeholder UUIDs found.\n`,
+      );
+    }
+  }
+
+  if (checkSync) {
+    const syncCheck = await checkSyncIdempotency(db);
+    if (!syncCheck.ok) {
+      if (quiet) {
+        // One line per anomaly so a downstream log scraper can grep.
+        for (const a of syncCheck.anomalies) {
+          process.stdout.write(
+            `audit-log-verify SYNC_IDEMPOTENCY_ANOMALY id=${a.id} reason=${a.reason} action=${a.actionKind} detail=${a.detail.replaceAll(' ', '_')}\n`,
+          );
+        }
+      } else {
+        process.stderr.write(
+          `audit-log-verify FAIL (sync idempotency forward defense)\n  rows checked:  ${syncCheck.rowsChecked}\n  anomalies:     ${syncCheck.anomalies.length}\n`,
+        );
+        for (const a of syncCheck.anomalies) {
+          process.stderr.write(
+            `    - id=${a.id} reason=${a.reason} action='${a.actionKind}' (${a.detail})\n`,
+          );
+        }
+        process.stderr.write(
+          '\nReason codes:\n  expired_unswept — TTL grace exceeded; 1.12 pg-boss sweep job is overdue.\n  orphan_actor    — referential integrity broken; investigate the users delete that left it behind.\n  cached_5xx      — contract violation; the middleware should not cache 5xx responses (ADR-0009 §3.4).\n\nSee SECURITY.md §2.10 (T-S9, T-S10, T-S39, T-S41) and docs/runbooks/auth.md.\n',
+        );
+      }
+      process.exit(1);
+    }
+    if (!quiet) {
+      process.stdout.write(
+        `audit-log-verify sync forward defense: ${syncCheck.rowsChecked} sync_idempotency row(s) checked, no anomalies found.\n`,
       );
     }
   }
