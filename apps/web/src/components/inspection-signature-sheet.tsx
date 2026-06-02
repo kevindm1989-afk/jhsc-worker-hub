@@ -18,8 +18,8 @@
 // the workplace to alter, re-interpret, or omit findings; the audit
 // chain records the snapshot.
 
-import { useState } from 'react';
-import { CheckCircle2, Clock, Lock } from 'lucide-react';
+import { useEffect, useState } from 'react';
+import { CalendarClock, CheckCircle2, Clock, Lock } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { cn } from '@/lib/utils';
 import {
@@ -29,6 +29,7 @@ import {
 } from '@/inspections/api';
 import { SIGNATURE_ROLE_LABELS, requiredRolesForTemplate } from '@/inspections/components';
 import { stepUpEmitter } from '@/auth/api';
+import { db } from '@/sync/db';
 import type { InspectionConductState, InspectionSignatureRole } from '@jhsc/shared-types';
 
 interface InspectionSignatureSheetProps {
@@ -77,6 +78,17 @@ export function InspectionSignatureSheet(props: InspectionSignatureSheetProps): 
         snapshots — your signature does NOT authorize the workplace to alter or interpret your
         findings.
       </p>
+
+      {/* priv-F3 close-out (T-S54): offline-signature clock notice. Mirrors
+          the recommendation OfflineSubmitClockNotice but framed for the
+          signature flow (signatures are MORE evidentially weighty than
+          recommendation submits — a recommendation can be re-submitted; a
+          signature is a one-shot legal act tied to identity + role +
+          immutable template version pin). Renders ONLY when the rep has a
+          pending inspection_signature op for the current inspection in
+          sync_queue. Rights-protective tone (CLAUDE.md #7): no shame, no
+          anxiety-induce. */}
+      <OfflineSignatureTimestampNotice inspectionId={inspectionId} />
 
       {/* Existing signatures */}
       {signatures.length > 0 ? (
@@ -212,7 +224,7 @@ function SignAsRoleControl({
 
   return (
     <div className="rounded-md border border-primary/40 bg-primary/5 p-3">
-      <div className="mb-2 text-sm font-medium text-foreground">
+      <div className="mb-2 text-sm font-medium text-foreground" data-testid="sign-as-role-form">
         Sign as {SIGNATURE_ROLE_LABELS[role]}
       </div>
       <label htmlFor={`sig-note-${role}`} className={cn('block text-xs text-muted-foreground')}>
@@ -254,5 +266,84 @@ function SignAsRoleControl({
         </Button>
       </div>
     </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// OfflineSignatureTimestampNotice — priv-F3 close-out (T-S54).
+//
+// Mirrors the recommendation OfflineSubmitClockNotice (defined inline in
+// recommendation-detail-view.tsx) but framed for the inspection signature
+// flow. Renders ONLY when there's a pending inspection_signature op for
+// this inspection in the sync_queue. The rep needs to know at sign-time
+// that the chain anchor will record the SERVER's receive time, not the
+// moment they tapped Sign — without this affordance the rep is ambushed
+// in arbitration when the chain row shows a timestamp hours later than
+// their pen-touched-screen reality (SECURITY.md T-S21).
+//
+// Rights-protective tone (CLAUDE.md #7): legally accurate, not anxiety-
+// inducing. The pairing of CalendarClock + amber + textual label reads
+// at a glance without color alone (CLAUDE.md design rule).
+// ---------------------------------------------------------------------------
+
+function OfflineSignatureTimestampNotice({
+  inspectionId,
+}: {
+  inspectionId: string;
+}): JSX.Element | null {
+  const [pending, setPending] = useState(false);
+
+  useEffect(() => {
+    let cancelled = false;
+    async function check(): Promise<void> {
+      try {
+        // sync_queue rows for inspection_signature ops do NOT carry the
+        // inspection id as entityLocalId — entityLocalId is the
+        // signature's own UUID. We match by entityKind +
+        // endpoint-suffix which embeds the inspection id.
+        // (The signature endpoint is /api/inspections/:id/signatures.)
+        const rows = await db.sync_queue.toArray();
+        const hasPending = rows.some(
+          (r) =>
+            r.entityKind === 'inspection_signature' &&
+            (r.state === 'queued' || r.state === 'in_flight') &&
+            r.endpoint.includes(`/inspections/${inspectionId}/signatures`),
+        );
+        if (!cancelled) setPending(hasPending);
+      } catch {
+        if (!cancelled) setPending(false);
+      }
+    }
+    void check();
+    return () => {
+      cancelled = true;
+    };
+  }, [inspectionId]);
+
+  if (!pending) return null;
+
+  return (
+    <section
+      aria-labelledby="offline-signature-clock-heading"
+      data-testid="offline-signature-timestamp-notice"
+      className="mb-3 rounded-md border border-status-pending/40 bg-status-pending/5 p-3 text-sm"
+    >
+      <h3
+        id="offline-signature-clock-heading"
+        className="mb-1 flex items-center gap-1.5 text-xs font-medium uppercase tracking-wide text-status-pending"
+      >
+        <CalendarClock className="h-3.5 w-3.5" strokeWidth={2} aria-hidden="true" />
+        Signature queued — chain timestamp at server
+      </h3>
+      <p className="text-sm text-foreground">
+        This signature will be recorded on the server when you&apos;re back online.{' '}
+        <strong>
+          The chain of custody timestamp will be the SERVER&apos;s receive time, NOT the moment you
+          signed.
+        </strong>{' '}
+        For arbitration purposes, your device&apos;s clock-time is your record; the chain proves
+        server-receipt.
+      </p>
+    </section>
   );
 }

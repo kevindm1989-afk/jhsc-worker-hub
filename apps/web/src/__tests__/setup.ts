@@ -1,3 +1,12 @@
+// Provide a synthetic IndexedDB so Dexie can open in the jsdom env.
+// Required since Milestone 1.10 S3 — the AppShell now mounts the
+// PwaInstallPrompt + SyncStatusChip components, both of which touch
+// Dexie eagerly (the prompt calls `db.evidence_files.count()` on mount).
+// Tests that need a fresh DB still construct their own `new
+// JhscOfflineDb('...')` to isolate state; this default just keeps the
+// global `db` singleton openable.
+import 'fake-indexeddb/auto';
+
 import '@testing-library/jest-dom/vitest';
 import { cleanup } from '@testing-library/react';
 import { afterEach, beforeAll, vi } from 'vitest';

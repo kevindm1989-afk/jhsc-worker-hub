@@ -31,6 +31,26 @@ export type Brand<T, B> = T & { readonly [brand]: B };
 export type UserId = Brand<string, 'UserId'>;
 export type SessionId = Brand<string, 'SessionId'>;
 
+/**
+ * Client-generated UUID v4 used as the canonical id end-to-end (ADR-0009
+ * §3.3). The browser allocates `_local_id` at create time; every create
+ * POST carries `clientId` in the body and the server INSERTs the row
+ * with `id = clientId`. Keeps the URL stable from typing to chain anchor
+ * and removes the two-id rewrite phase that option (a) would impose.
+ */
+export type ClientId = Brand<string, 'ClientId'>;
+
+// RFC 4122 v4 UUID — `4` in the version slot, one of `89ab` in the
+// variant slot, lowercase hex elsewhere. The server's Zod validator uses
+// the looser `.uuid()` shape (accepts any v1–v8); this is the tighter
+// runtime check so a buggy or tampered client RNG can't slip a v1/v7
+// UUID through the offline-sync envelope (T-S12 in SECURITY.md §2.10).
+const CLIENT_ID_V4_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
+
+export function isClientId(s: string): s is ClientId {
+  return typeof s === 'string' && CLIENT_ID_V4_RE.test(s);
+}
+
 // ---------------------------------------------------------------------------
 // Auth-surface enums (mirror the pgEnums in apps/api/src/db/schema.ts)
 // ---------------------------------------------------------------------------
@@ -683,6 +703,129 @@ export type AuditPayload =
   | { readonly kind: 'recovery_codes.generated'; readonly count: number }
   | { readonly kind: 'recovery_codes.consumed'; readonly codeId: string }
   | { readonly kind: 'first_run.completed' };
+
+// ---------------------------------------------------------------------------
+// Offline sync (Milestone 1.10, ADR-0009)
+// ---------------------------------------------------------------------------
+
+/** Sync operation discriminator. Mirrors the wire-level mutation kind a
+ * queued operation represents. `transition` covers status / state /
+ * section moves that are not strictly create/update/delete (action item
+ * moves, hazard status transitions, inspection state transitions —
+ * §3.7 conflict-free vs conflict-anchored classification).
+ */
+export const syncOperationKind = ['create', 'update', 'delete', 'transition'] as const;
+export type SyncOperationKind = (typeof syncOperationKind)[number];
+
+/** Local lifecycle of a row in the client's sync_queue table. `queued`
+ * = waiting on next_attempt_at; `in_flight` = the worker is shipping it;
+ * `succeeded` = the server acked + the entity row is clean (queue row
+ * removed immediately after); `conflicting` = the server returned 409
+ * and the rep needs to resolve in the conflict view; `failed_dead_letter`
+ * = exhausted the backoff curve (8 attempts / ~48h cumulative per
+ * ADR-0009 §3.2) and parked for manual rep recovery.
+ */
+export const syncOperationState = [
+  'queued',
+  'in_flight',
+  'succeeded',
+  'conflicting',
+  'failed_dead_letter',
+] as const;
+export type SyncOperationState = (typeof syncOperationState)[number];
+
+/** Every entity kind that the offline UI can queue a mutation against
+ * (ADR-0009 §3.6 "Queueable" table). Names match the server-side route
+ * surface — `action_item_move` separately from `action_item` because
+ * the move is an append-only event with its own conflict semantics
+ * (§3.7), not an UPDATE on action_items.section.
+ *
+ * `evidence_finalize` is the third leg of the 1.7 evidence upload
+ * (§3.8): presign (cross-origin Tigris PUT happens between presign +
+ * finalize and is NOT a queueable kind because Tigris is a different
+ * origin — the queue worker handles the PUT in the foreground).
+ */
+export const syncEntityKind = [
+  'hazard',
+  'action_item',
+  'action_item_move',
+  'inspection',
+  'inspection_finding',
+  'inspection_signature',
+  'inspection_finding_promotion',
+  'recommendation',
+  'recommendation_response',
+  'recommendation_resolution',
+  'recommendation_withdrawal',
+  'evidence_finalize',
+] as const;
+export type SyncEntityKind = (typeof syncEntityKind)[number];
+
+/** Conflict resolution options the rep picks in the three-way merge UI
+ * (ADR-0009 §3.7). `keep_local` overwrites server with local;
+ * `keep_remote` discards local; `keep_both_chain_anchored` is the
+ * pathological recommendation.submitted duplicate path (§3.7) — both
+ * versions stay in the chain, the duplicate marked as a withdrawn
+ * duplicate; `manual_merge` is the field-level "keep mine / keep theirs
+ * / merge" resolution that ships to the server as a fresh PATCH.
+ */
+export const syncConflictResolution = [
+  'keep_local',
+  'keep_remote',
+  'keep_both_chain_anchored',
+  'manual_merge',
+] as const;
+export type SyncConflictResolution = (typeof syncConflictResolution)[number];
+
+/**
+ * Exponential backoff curve in seconds for a queued operation that
+ * keeps hitting 5xx / network failures (ADR-0009 §3.2 / SECURITY.md
+ * T-S10). Index by `attemptCount` (0-based). After eight attempts the
+ * operation is dead-lettered — `computeNextBackoff` returns `null`.
+ *
+ * Cumulative budget through index 7: 1 + 5 + 30 + 300 + 1800 + 7200 +
+ * 43200 + 86400 ≈ 138,936s ≈ 38.6h between FIRST attempt scheduling
+ * and the EIGHTH retry attempt. The "~48h" framing in the ADR/threat
+ * model rounds up to include the trailing 24h window before the next
+ * scheduled attempt would have fired.
+ */
+export const SYNC_BACKOFF_SCHEDULE = [
+  1, // 1s — first retry, network blip
+  5, // 5s
+  30, // 30s
+  300, // 5min
+  1800, // 30min
+  7200, // 2h
+  43200, // 12h
+  86400, // 24h — final retry before dead-letter
+] as const;
+
+/** Number of attempts before a queue row dead-letters. Matches the
+ * length of `SYNC_BACKOFF_SCHEDULE` so the constants stay coupled. */
+export const SYNC_DEAD_LETTER_AFTER_ATTEMPTS = SYNC_BACKOFF_SCHEDULE.length;
+
+/**
+ * Pure helper: return the next delay (seconds) for a queue row whose
+ * worker just failed for the `attemptCount`-th time (0-indexed). Returns
+ * `null` when the schedule is exhausted — the caller marks the row as
+ * `failed_dead_letter` and surfaces it in the sync-status view (§3.11).
+ *
+ * Throws on negative or non-integer input — defensive against a buggy
+ * caller passing `Number.NaN` from a string parse or a fractional
+ * `attemptCount` from a Dexie schema drift.
+ */
+export function computeNextBackoff(attemptCount: number): number | null {
+  if (!Number.isInteger(attemptCount)) {
+    throw new Error(`computeNextBackoff: attemptCount must be an integer, got ${attemptCount}`);
+  }
+  if (attemptCount < 0) {
+    throw new Error(`computeNextBackoff: attemptCount must be >= 0, got ${attemptCount}`);
+  }
+  if (attemptCount >= SYNC_BACKOFF_SCHEDULE.length) {
+    return null;
+  }
+  return SYNC_BACKOFF_SCHEDULE[attemptCount]!;
+}
 
 // ---------------------------------------------------------------------------
 // Typed auth errors — exhaustive (consumed by apps/api routes + apps/web copy)

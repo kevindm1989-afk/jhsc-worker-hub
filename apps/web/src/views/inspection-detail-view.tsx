@@ -52,6 +52,8 @@ import {
   type InspectionConductState,
   type InspectionStatusVocabKind,
 } from '@jhsc/shared-types';
+import { NetworkRequiredError } from '@/sync/typed-client';
+import { NetworkRequiredBanner } from '@/sync/components/network-required-banner';
 
 export function InspectionDetailView(): JSX.Element {
   const { id } = useParams<{ id: string }>();
@@ -397,6 +399,7 @@ function ExportPanel({ inspectionId }: { inspectionId: string }): JSX.Element {
   const [busy, setBusy] = useState(false);
   const [receipt, setReceipt] = useState<CreateExportResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [networkRequired, setNetworkRequired] = useState(false);
   // priv-F7 close-out: GPS opt-in per-export. Defaults to UNCHECKED so
   // the rep affirmatively decides whether to surface ~11m-resolution
   // coordinates in the disclosable PDF. The server also defaults to
@@ -406,6 +409,7 @@ function ExportPanel({ inspectionId }: { inspectionId: string }): JSX.Element {
   async function startExport(): Promise<void> {
     setBusy(true);
     setError(null);
+    setNetworkRequired(false);
     try {
       const r = await inspectionsApi.exports.create({
         kind: 'single',
@@ -414,12 +418,16 @@ function ExportPanel({ inspectionId }: { inspectionId: string }): JSX.Element {
       });
       setReceipt(r);
     } catch (e) {
-      if (e instanceof InspectionApiError) {
+      if (e instanceof NetworkRequiredError) {
+        setNetworkRequired(true);
+      } else if (e instanceof InspectionApiError) {
         if (e.status === 401) {
           // Step-up already dispatched by the API wrapper; tell the user.
           setError('Re-authenticate to export. The step-up dialog should be open.');
         } else if (e.status === 429) {
           setError('Export rate limit reached. Try again in an hour.');
+        } else if (e.status === 503) {
+          setNetworkRequired(true);
         } else {
           setError(`Could not export (HTTP ${e.status}).`);
         }
@@ -435,6 +443,7 @@ function ExportPanel({ inspectionId }: { inspectionId: string }): JSX.Element {
     if (!receipt) return;
     setBusy(true);
     setError(null);
+    setNetworkRequired(false);
     try {
       const blob = await inspectionsApi.exports.download(receipt.exportId);
       const url = URL.createObjectURL(blob);
@@ -444,8 +453,12 @@ function ExportPanel({ inspectionId }: { inspectionId: string }): JSX.Element {
       window.open(url, '_blank', 'noopener,noreferrer');
       window.setTimeout(() => URL.revokeObjectURL(url), 5_000);
     } catch (e) {
-      if (e instanceof InspectionApiError && e.status === 401) {
+      if (e instanceof NetworkRequiredError) {
+        setNetworkRequired(true);
+      } else if (e instanceof InspectionApiError && e.status === 401) {
         setError('Re-authenticate to download. The step-up dialog should be open.');
+      } else if (e instanceof InspectionApiError && e.status === 503) {
+        setNetworkRequired(true);
       } else {
         setError(e instanceof Error ? e.message : String(e));
       }
@@ -457,6 +470,11 @@ function ExportPanel({ inspectionId }: { inspectionId: string }): JSX.Element {
   if (receipt === null) {
     return (
       <div className="flex flex-col items-end gap-1">
+        {networkRequired ? (
+          <div className="w-full">
+            <NetworkRequiredBanner action="Export" onDismiss={() => setNetworkRequired(false)} />
+          </div>
+        ) : null}
         {/*
           priv-F7 close-out: per-export GPS opt-in. Default UNCHECKED.
           The PDF only carries photo-caption GPS when the rep
@@ -490,6 +508,11 @@ function ExportPanel({ inspectionId }: { inspectionId: string }): JSX.Element {
   }
   return (
     <div className="flex flex-col items-end gap-1 rounded-md border border-border bg-background p-2">
+      {networkRequired ? (
+        <div className="w-full">
+          <NetworkRequiredBanner action="Download" onDismiss={() => setNetworkRequired(false)} />
+        </div>
+      ) : null}
       <div className="flex items-center gap-2 text-[11px] text-muted-foreground">
         <span>
           Export <span className="font-mono tabular-nums">{receipt.exportId.slice(0, 8)}</span>

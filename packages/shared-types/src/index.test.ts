@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
+  computeNextBackoff,
   computeRecommendationDeadline,
   err,
   inspectionConductState,
@@ -11,12 +12,19 @@ import {
   inspectionSignatureRole,
   inspectionStatusVocabKind,
   inspectionTemplateCode,
+  isClientId,
   ok,
   recommendationDeadlineState,
   recommendationExportKind,
   recommendationJurisdiction,
   recommendationLinkKind,
   recommendationStatus,
+  SYNC_BACKOFF_SCHEDULE,
+  SYNC_DEAD_LETTER_AFTER_ATTEMPTS,
+  syncConflictResolution,
+  syncEntityKind,
+  syncOperationKind,
+  syncOperationState,
   workplaceSigningKeyAlgorithm,
 } from './index';
 import type { AuditPayload, AuthError, AuthEventKind, Result } from './index';
@@ -266,6 +274,132 @@ describe('AuditPayload — new 1.9 variants (type-level)', () => {
     };
     expect(r.kind).toBe('inspection_finding.read');
     expect(d.kind).toBe('inspection.export.downloaded');
+  });
+});
+
+describe('sync enums (Milestone 1.10, ADR-0009)', () => {
+  it('syncOperationKind exports the four wire-level mutation kinds in order', () => {
+    expect([...syncOperationKind]).toEqual(['create', 'update', 'delete', 'transition']);
+  });
+
+  it('syncOperationState exports the five queue-row lifecycle states in order', () => {
+    expect([...syncOperationState]).toEqual([
+      'queued',
+      'in_flight',
+      'succeeded',
+      'conflicting',
+      'failed_dead_letter',
+    ]);
+  });
+
+  it('syncEntityKind exports every queueable entity from ADR-0009 §3.6', () => {
+    expect([...syncEntityKind]).toEqual([
+      'hazard',
+      'action_item',
+      'action_item_move',
+      'inspection',
+      'inspection_finding',
+      'inspection_signature',
+      'inspection_finding_promotion',
+      'recommendation',
+      'recommendation_response',
+      'recommendation_resolution',
+      'recommendation_withdrawal',
+      'evidence_finalize',
+    ]);
+  });
+
+  it('syncConflictResolution exports the four three-way merge options', () => {
+    expect([...syncConflictResolution]).toEqual([
+      'keep_local',
+      'keep_remote',
+      'keep_both_chain_anchored',
+      'manual_merge',
+    ]);
+  });
+
+  it('SYNC_BACKOFF_SCHEDULE is the documented [1s, 5s, 30s, 5m, 30m, 2h, 12h, 24h] curve', () => {
+    expect([...SYNC_BACKOFF_SCHEDULE]).toEqual([1, 5, 30, 300, 1800, 7200, 43200, 86400]);
+  });
+
+  it('SYNC_DEAD_LETTER_AFTER_ATTEMPTS equals the schedule length', () => {
+    expect(SYNC_DEAD_LETTER_AFTER_ATTEMPTS).toBe(8);
+    expect(SYNC_DEAD_LETTER_AFTER_ATTEMPTS).toBe(SYNC_BACKOFF_SCHEDULE.length);
+  });
+});
+
+describe('computeNextBackoff — pure curve for the queue worker', () => {
+  it('maps attemptCount 0..7 to the schedule values', () => {
+    expect(computeNextBackoff(0)).toBe(1);
+    expect(computeNextBackoff(1)).toBe(5);
+    expect(computeNextBackoff(2)).toBe(30);
+    expect(computeNextBackoff(3)).toBe(300);
+    expect(computeNextBackoff(4)).toBe(1800);
+    expect(computeNextBackoff(5)).toBe(7200);
+    expect(computeNextBackoff(6)).toBe(43200);
+    expect(computeNextBackoff(7)).toBe(86400);
+  });
+
+  it('returns null at the dead-letter boundary (attemptCount == 8)', () => {
+    expect(computeNextBackoff(8)).toBeNull();
+  });
+
+  it('returns null past the dead-letter boundary', () => {
+    expect(computeNextBackoff(9)).toBeNull();
+    expect(computeNextBackoff(100)).toBeNull();
+  });
+
+  it('throws on negative input', () => {
+    expect(() => computeNextBackoff(-1)).toThrow(/attemptCount must be >= 0/);
+  });
+
+  it('throws on non-integer input', () => {
+    expect(() => computeNextBackoff(1.5)).toThrow(/attemptCount must be an integer/);
+    expect(() => computeNextBackoff(Number.NaN)).toThrow(/attemptCount must be an integer/);
+    expect(() => computeNextBackoff(Number.POSITIVE_INFINITY)).toThrow(
+      /attemptCount must be an integer/,
+    );
+  });
+});
+
+describe('isClientId — RFC 4122 v4 runtime guard', () => {
+  it('accepts canonical lowercase v4 UUIDs', () => {
+    expect(isClientId('123e4567-e89b-42d3-a456-426614174000')).toBe(true);
+    expect(isClientId('00000000-0000-4000-8000-000000000000')).toBe(true);
+    expect(isClientId('00000000-0000-4000-9000-000000000000')).toBe(true);
+    expect(isClientId('00000000-0000-4000-a000-000000000000')).toBe(true);
+    expect(isClientId('00000000-0000-4000-b000-000000000000')).toBe(true);
+  });
+
+  it('rejects v1 / v3 / v5 / v7 UUIDs (wrong version nibble)', () => {
+    // v1 — time-based; the version slot is 1, not 4.
+    expect(isClientId('00000000-0000-1000-8000-000000000000')).toBe(false);
+    // v3 — name-based MD5.
+    expect(isClientId('00000000-0000-3000-8000-000000000000')).toBe(false);
+    // v5 — name-based SHA-1.
+    expect(isClientId('00000000-0000-5000-8000-000000000000')).toBe(false);
+    // v7 — UUIDv7 (Unix-time-ordered); explicitly rejected per T-S12 so
+    // a deliberately-tampered client RNG can't slip a sortable id past
+    // the offline-sync envelope.
+    expect(isClientId('00000000-0000-7000-8000-000000000000')).toBe(false);
+  });
+
+  it('rejects v4 with a wrong variant nibble (must be one of 8/9/a/b)', () => {
+    expect(isClientId('00000000-0000-4000-0000-000000000000')).toBe(false);
+    expect(isClientId('00000000-0000-4000-c000-000000000000')).toBe(false);
+    expect(isClientId('00000000-0000-4000-f000-000000000000')).toBe(false);
+  });
+
+  it('rejects uppercase hex (canonical lowercase only)', () => {
+    expect(isClientId('123E4567-E89B-42D3-A456-426614174000')).toBe(false);
+  });
+
+  it('rejects non-UUID strings', () => {
+    expect(isClientId('')).toBe(false);
+    expect(isClientId('not-a-uuid')).toBe(false);
+    expect(isClientId('123e4567-e89b-42d3-a456-42661417400')).toBe(false); // too short
+    expect(isClientId('123e4567-e89b-42d3-a456-4266141740000')).toBe(false); // too long
+    expect(isClientId('123e4567e89b42d3a456426614174000')).toBe(false); // missing dashes
   });
 });
 

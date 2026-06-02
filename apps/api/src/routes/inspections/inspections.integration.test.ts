@@ -70,6 +70,58 @@ async function loginAsRep(): Promise<{ cookie: string; userId: string }> {
   return { cookie, userId: sessionBody.userId };
 }
 
+// 1.10 S2 (ADR-0009 §3.7): all PATCHes carry If-Match: "<version>". The
+// helpers below read the current version from the DB so PATCH chains
+// (scheduled → in_progress → awaiting_signatures → complete → archived)
+// drain across multiple bumps without churning the test bodies.
+async function getInspectionVersion(id: string): Promise<number> {
+  const db = getDb();
+  const rows = (await db.execute(
+    sql`SELECT version FROM inspections WHERE id = ${id}`,
+  )) as unknown as Array<{ version: number }>;
+  return rows[0]!.version;
+}
+
+async function getFindingVersion(id: string): Promise<number> {
+  const db = getDb();
+  const rows = (await db.execute(
+    sql`SELECT version FROM inspection_findings WHERE id = ${id}`,
+  )) as unknown as Array<{ version: number }>;
+  return rows[0]!.version;
+}
+
+async function patchInspectionState(cookie: string, id: string, state: string): Promise<Response> {
+  const version = await getInspectionVersion(id);
+  return app.request(`/api/inspections/${id}`, {
+    method: 'PATCH',
+    headers: {
+      'content-type': 'application/json',
+      'x-requested-with': 'jhsc-web',
+      'if-match': `"${version}"`,
+      cookie,
+    },
+    body: JSON.stringify({ state }),
+  });
+}
+
+async function patchFindingFields(
+  cookie: string,
+  id: string,
+  body: Record<string, unknown>,
+): Promise<Response> {
+  const version = await getFindingVersion(id);
+  return app.request(`/api/inspections/findings/${id}`, {
+    method: 'PATCH',
+    headers: {
+      'content-type': 'application/json',
+      'x-requested-with': 'jhsc-web',
+      'if-match': `"${version}"`,
+      cookie,
+    },
+    body: JSON.stringify(body),
+  });
+}
+
 async function createCustomTemplate(cookie: string): Promise<{ id: string }> {
   const res = await app.request('/api/inspection-templates', {
     method: 'POST',
@@ -235,11 +287,7 @@ describe.skipIf(SKIP)('POST /api/inspections/:id/findings', () => {
     });
     const insBody = (await ins.json()) as { id: string };
     // Advance to in_progress so findings can be patched later.
-    await app.request(`/api/inspections/${insBody.id}`, {
-      method: 'PATCH',
-      headers: { 'content-type': 'application/json', 'x-requested-with': 'jhsc-web', cookie },
-      body: JSON.stringify({ state: 'in_progress' }),
-    });
+    await patchInspectionState(cookie, insBody.id, 'in_progress');
     return { inspectionId: insBody.id };
   }
 
@@ -316,11 +364,7 @@ describe.skipIf(SKIP)('POST /api/inspections/findings/:id/promote (#15 fail-clos
       body: JSON.stringify({ templateVersionId: template.id, zoneId: 'zone_2' }),
     });
     const insBody = (await ins.json()) as { id: string };
-    await app.request(`/api/inspections/${insBody.id}`, {
-      method: 'PATCH',
-      headers: { 'content-type': 'application/json', 'x-requested-with': 'jhsc-web', cookie },
-      body: JSON.stringify({ state: 'in_progress' }),
-    });
+    await patchInspectionState(cookie, insBody.id, 'in_progress');
     const f = await app.request(`/api/inspections/${insBody.id}/findings`, {
       method: 'POST',
       headers: { 'content-type': 'application/json', 'x-requested-with': 'jhsc-web', cookie },
@@ -413,11 +457,7 @@ describe.skipIf(SKIP)('POST /api/inspections/:id/signatures', () => {
       body: JSON.stringify({ templateVersionId: template.id, zoneId: 'zone_4' }),
     });
     const insBody = (await ins.json()) as { id: string };
-    await app.request(`/api/inspections/${insBody.id}`, {
-      method: 'PATCH',
-      headers: { 'content-type': 'application/json', 'x-requested-with': 'jhsc-web', cookie },
-      body: JSON.stringify({ state: 'in_progress' }),
-    });
+    await patchInspectionState(cookie, insBody.id, 'in_progress');
     await app.request(`/api/inspections/${insBody.id}/findings`, {
       method: 'POST',
       headers: { 'content-type': 'application/json', 'x-requested-with': 'jhsc-web', cookie },
@@ -447,11 +487,7 @@ describe.skipIf(SKIP)('POST /api/inspections/:id/signatures', () => {
       body: JSON.stringify({ templateVersionId: template.id, zoneId: 'zone_5' }),
     });
     const insBody = (await ins.json()) as { id: string };
-    await app.request(`/api/inspections/${insBody.id}`, {
-      method: 'PATCH',
-      headers: { 'content-type': 'application/json', 'x-requested-with': 'jhsc-web', cookie },
-      body: JSON.stringify({ state: 'in_progress' }),
-    });
+    await patchInspectionState(cookie, insBody.id, 'in_progress');
     await app.request(`/api/inspections/${insBody.id}/findings`, {
       method: 'POST',
       headers: { 'content-type': 'application/json', 'x-requested-with': 'jhsc-web', cookie },
@@ -590,11 +626,7 @@ describe.skipIf(SKIP)('S5 sec-F1: export route asserts state + signatures', () =
     });
     const insBody = (await ins.json()) as { id: string };
     if (state === 'scheduled') return { inspectionId: insBody.id };
-    await app.request(`/api/inspections/${insBody.id}`, {
-      method: 'PATCH',
-      headers: { 'content-type': 'application/json', 'x-requested-with': 'jhsc-web', cookie },
-      body: JSON.stringify({ state: 'in_progress' }),
-    });
+    await patchInspectionState(cookie, insBody.id, 'in_progress');
     if (state === 'in_progress') return { inspectionId: insBody.id };
     // awaiting_signatures: at least one finding required to advance.
     await app.request(`/api/inspections/${insBody.id}/findings`, {
@@ -607,11 +639,7 @@ describe.skipIf(SKIP)('S5 sec-F1: export route asserts state + signatures', () =
         statusValue: 'A',
       }),
     });
-    await app.request(`/api/inspections/${insBody.id}`, {
-      method: 'PATCH',
-      headers: { 'content-type': 'application/json', 'x-requested-with': 'jhsc-web', cookie },
-      body: JSON.stringify({ state: 'awaiting_signatures' }),
-    });
+    await patchInspectionState(cookie, insBody.id, 'awaiting_signatures');
     return { inspectionId: insBody.id };
   }
 
@@ -698,11 +726,7 @@ describe.skipIf(SKIP)('S5 sec-F3: promote derives non-PI action_item.description
       body: JSON.stringify({ templateVersionId: template.id, zoneId: 'zone_2' }),
     });
     const insBody = (await ins.json()) as { id: string };
-    await app.request(`/api/inspections/${insBody.id}`, {
-      method: 'PATCH',
-      headers: { 'content-type': 'application/json', 'x-requested-with': 'jhsc-web', cookie },
-      body: JSON.stringify({ state: 'in_progress' }),
-    });
+    await patchInspectionState(cookie, insBody.id, 'in_progress');
     // Recognizable plaintext fixture for the observation.
     const FIXTURE_OBSERVATION = 'RECOGNIZABLE_OBSERVATION_FIXTURE_PII_CANARY_STRING_for_sec_F3';
     const FIXTURE_CORRECTIVE = 'RECOGNIZABLE_CORRECTIVE_FIXTURE_PII_CANARY';
@@ -756,11 +780,7 @@ describe.skipIf(SKIP)('S5 sec-F5: PATCH finding rejects substantive mutation aft
       body: JSON.stringify({ templateVersionId: template.id, zoneId: 'zone_4' }),
     });
     const insBody = (await ins.json()) as { id: string };
-    await app.request(`/api/inspections/${insBody.id}`, {
-      method: 'PATCH',
-      headers: { 'content-type': 'application/json', 'x-requested-with': 'jhsc-web', cookie },
-      body: JSON.stringify({ state: 'in_progress' }),
-    });
+    await patchInspectionState(cookie, insBody.id, 'in_progress');
     const f = await app.request(`/api/inspections/${insBody.id}/findings`, {
       method: 'POST',
       headers: { 'content-type': 'application/json', 'x-requested-with': 'jhsc-web', cookie },
@@ -784,11 +804,7 @@ describe.skipIf(SKIP)('S5 sec-F5: PATCH finding rejects substantive mutation aft
   it('rejects statusValue change with 422 finding_immutable_after_promote', async () => {
     const { cookie } = await loginAsRep();
     const { findingId } = await setupPromotedFinding(cookie);
-    const res = await app.request(`/api/inspections/findings/${findingId}`, {
-      method: 'PATCH',
-      headers: { 'content-type': 'application/json', 'x-requested-with': 'jhsc-web', cookie },
-      body: JSON.stringify({ statusValue: 'X' }),
-    });
+    const res = await patchFindingFields(cookie, findingId, { statusValue: 'X' });
     expect(res.status).toBe(422);
     const body = (await res.json()) as { error: string };
     expect(body.error).toBe('finding_immutable_after_promote');
@@ -797,11 +813,7 @@ describe.skipIf(SKIP)('S5 sec-F5: PATCH finding rejects substantive mutation aft
   it('rejects observation change with 422 finding_immutable_after_promote', async () => {
     const { cookie } = await loginAsRep();
     const { findingId } = await setupPromotedFinding(cookie);
-    const res = await app.request(`/api/inspections/findings/${findingId}`, {
-      method: 'PATCH',
-      headers: { 'content-type': 'application/json', 'x-requested-with': 'jhsc-web', cookie },
-      body: JSON.stringify({ observation: 'edit-attempt' }),
-    });
+    const res = await patchFindingFields(cookie, findingId, { observation: 'edit-attempt' });
     expect(res.status).toBe(422);
     const body = (await res.json()) as { error: string };
     expect(body.error).toBe('finding_immutable_after_promote');
@@ -810,10 +822,8 @@ describe.skipIf(SKIP)('S5 sec-F5: PATCH finding rejects substantive mutation aft
   it('allows responsibleParty change after promote (the bounded edit surface)', async () => {
     const { cookie } = await loginAsRep();
     const { findingId } = await setupPromotedFinding(cookie);
-    const res = await app.request(`/api/inspections/findings/${findingId}`, {
-      method: 'PATCH',
-      headers: { 'content-type': 'application/json', 'x-requested-with': 'jhsc-web', cookie },
-      body: JSON.stringify({ responsibleParty: 'Maintenance Lead' }),
+    const res = await patchFindingFields(cookie, findingId, {
+      responsibleParty: { kind: 'name_text', nameText: 'Maintenance Lead' },
     });
     expect(res.status).toBe(200);
   });
@@ -829,11 +839,7 @@ describe.skipIf(SKIP)('S5 sec-F7: POST findings rejects awaiting_signatures stat
       body: JSON.stringify({ templateVersionId: template.id, zoneId: 'zone_8' }),
     });
     const insBody = (await ins.json()) as { id: string };
-    await app.request(`/api/inspections/${insBody.id}`, {
-      method: 'PATCH',
-      headers: { 'content-type': 'application/json', 'x-requested-with': 'jhsc-web', cookie },
-      body: JSON.stringify({ state: 'in_progress' }),
-    });
+    await patchInspectionState(cookie, insBody.id, 'in_progress');
     // Add a finding so the in_progress -> awaiting_signatures
     // transition can fire (PATCH requires >=1 finding).
     await app.request(`/api/inspections/${insBody.id}/findings`, {
@@ -846,11 +852,7 @@ describe.skipIf(SKIP)('S5 sec-F7: POST findings rejects awaiting_signatures stat
         statusValue: 'A',
       }),
     });
-    await app.request(`/api/inspections/${insBody.id}`, {
-      method: 'PATCH',
-      headers: { 'content-type': 'application/json', 'x-requested-with': 'jhsc-web', cookie },
-      body: JSON.stringify({ state: 'awaiting_signatures' }),
-    });
+    await patchInspectionState(cookie, insBody.id, 'awaiting_signatures');
     // Now POST a second finding — should reject.
     const res = await app.request(`/api/inspections/${insBody.id}/findings`, {
       method: 'POST',
@@ -879,11 +881,7 @@ describe.skipIf(SKIP)('GET /api/inspections/findings/:id (step-up gated)', () =>
       body: JSON.stringify({ templateVersionId: template.id, zoneId: 'zone_6' }),
     });
     const insBody = (await ins.json()) as { id: string };
-    await app.request(`/api/inspections/${insBody.id}`, {
-      method: 'PATCH',
-      headers: { 'content-type': 'application/json', 'x-requested-with': 'jhsc-web', cookie },
-      body: JSON.stringify({ state: 'in_progress' }),
-    });
+    await patchInspectionState(cookie, insBody.id, 'in_progress');
     const f = await app.request(`/api/inspections/${insBody.id}/findings`, {
       method: 'POST',
       headers: { 'content-type': 'application/json', 'x-requested-with': 'jhsc-web', cookie },
@@ -938,11 +936,7 @@ describe.skipIf(SKIP)('1.9 retrofit: inspection_finding.read chain anchor', () =
       body: JSON.stringify({ templateVersionId: template.id, zoneId: 'zone_8' }),
     });
     const insBody = (await ins.json()) as { id: string };
-    await app.request(`/api/inspections/${insBody.id}`, {
-      method: 'PATCH',
-      headers: { 'content-type': 'application/json', 'x-requested-with': 'jhsc-web', cookie },
-      body: JSON.stringify({ state: 'in_progress' }),
-    });
+    await patchInspectionState(cookie, insBody.id, 'in_progress');
     const f = await app.request(`/api/inspections/${insBody.id}/findings`, {
       method: 'POST',
       headers: { 'content-type': 'application/json', 'x-requested-with': 'jhsc-web', cookie },
@@ -987,11 +981,7 @@ describe.skipIf(SKIP)('1.9 retrofit: inspection_finding.read chain anchor', () =
       body: JSON.stringify({ templateVersionId: template.id, zoneId: 'zone_9' }),
     });
     const insBody = (await ins.json()) as { id: string };
-    await app.request(`/api/inspections/${insBody.id}`, {
-      method: 'PATCH',
-      headers: { 'content-type': 'application/json', 'x-requested-with': 'jhsc-web', cookie },
-      body: JSON.stringify({ state: 'in_progress' }),
-    });
+    await patchInspectionState(cookie, insBody.id, 'in_progress');
     const f = await app.request(`/api/inspections/${insBody.id}/findings`, {
       method: 'POST',
       headers: { 'content-type': 'application/json', 'x-requested-with': 'jhsc-web', cookie },
@@ -1077,11 +1067,7 @@ describe.skipIf(SKIP)('1.9 retrofit: responsibleParty dual-shape on findings', (
       body: JSON.stringify({ templateVersionId: template.id, zoneId: 'zone_10' }),
     });
     const insBody = (await ins.json()) as { id: string };
-    await app.request(`/api/inspections/${insBody.id}`, {
-      method: 'PATCH',
-      headers: { 'content-type': 'application/json', 'x-requested-with': 'jhsc-web', cookie },
-      body: JSON.stringify({ state: 'in_progress' }),
-    });
+    await patchInspectionState(cookie, insBody.id, 'in_progress');
     return { inspectionId: insBody.id };
   }
 
@@ -1176,5 +1162,283 @@ describe.skipIf(SKIP)('1.9 retrofit: responsibleParty dual-shape on findings', (
       responsibleParty: { kind: string; userId?: string; nameText?: string } | null;
     };
     expect(revealBody.responsibleParty).toEqual({ kind: 'name_text', nameText: externalName });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 1.10 (ADR-0009 §3.3): clientId ratchet on the four inspection create
+// surfaces — POST /api/inspections, POST /:id/findings, POST /:id/
+// signatures, POST /findings/:id/promote (the new action_item the
+// promote creates carries the body's clientId as its id), and POST
+// /api/inspection-templates. Each gets a small describe block.
+// ---------------------------------------------------------------------------
+
+describe.skipIf(SKIP)('POST /api/inspections — clientId idempotency (1.10 S1)', () => {
+  const CLIENT_ID = '33333333-3333-4333-8333-333333333333';
+
+  it('first POST with clientId returns the row using clientId as the id', async () => {
+    const { cookie } = await loginAsRep();
+    const template = await createCustomTemplate(cookie);
+    const res = await app.request('/api/inspections', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-requested-with': 'jhsc-web', cookie },
+      body: JSON.stringify({
+        clientId: CLIENT_ID,
+        templateVersionId: template.id,
+        zoneId: 'zone_1',
+      }),
+    });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { id: string };
+    expect(body.id).toBe(CLIENT_ID);
+  });
+
+  it('second POST with same clientId + same payload returns 200 with existing id', async () => {
+    const { cookie } = await loginAsRep();
+    const template = await createCustomTemplate(cookie);
+    const payload = JSON.stringify({
+      clientId: CLIENT_ID,
+      templateVersionId: template.id,
+      zoneId: 'zone_1',
+    });
+    await app.request('/api/inspections', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-requested-with': 'jhsc-web', cookie },
+      body: payload,
+    });
+    const res = await app.request('/api/inspections', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-requested-with': 'jhsc-web', cookie },
+      body: payload,
+    });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { id: string };
+    expect(body.id).toBe(CLIENT_ID);
+  });
+
+  it('absent clientId falls back to gen_random_uuid()', async () => {
+    const { cookie } = await loginAsRep();
+    const template = await createCustomTemplate(cookie);
+    const res = await app.request('/api/inspections', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-requested-with': 'jhsc-web', cookie },
+      body: JSON.stringify({ templateVersionId: template.id, zoneId: 'zone_1' }),
+    });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { id: string };
+    expect(body.id).toMatch(/^[0-9a-f-]{36}$/);
+    expect(body.id).not.toBe(CLIENT_ID);
+  });
+});
+
+describe.skipIf(SKIP)('POST /api/inspections/:id/findings — clientId idempotency (1.10 S1)', () => {
+  const FINDING_CLIENT_ID = '44444444-4444-4444-8444-444444444444';
+
+  async function createInspectionFor(cookie: string): Promise<{ id: string }> {
+    const template = await createCustomTemplate(cookie);
+    const res = await app.request('/api/inspections', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-requested-with': 'jhsc-web', cookie },
+      body: JSON.stringify({ templateVersionId: template.id, zoneId: 'zone_1' }),
+    });
+    return (await res.json()) as { id: string };
+  }
+
+  it('first POST with clientId returns the finding using clientId as the id', async () => {
+    const { cookie } = await loginAsRep();
+    const insp = await createInspectionFor(cookie);
+    const res = await app.request(`/api/inspections/${insp.id}/findings`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-requested-with': 'jhsc-web', cookie },
+      body: JSON.stringify({
+        clientId: FINDING_CLIENT_ID,
+        sectionKey: 'general',
+        itemKey: 'housekeeping',
+        statusVocab: 'ABC_X',
+        statusValue: 'A',
+      }),
+    });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { id: string };
+    expect(body.id).toBe(FINDING_CLIENT_ID);
+  });
+
+  it('replay with same clientId + same payload returns 200 with the existing finding', async () => {
+    const { cookie } = await loginAsRep();
+    const insp = await createInspectionFor(cookie);
+    const payload = JSON.stringify({
+      clientId: FINDING_CLIENT_ID,
+      sectionKey: 'general',
+      itemKey: 'housekeeping',
+      statusVocab: 'ABC_X',
+      statusValue: 'A',
+    });
+    await app.request(`/api/inspections/${insp.id}/findings`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-requested-with': 'jhsc-web', cookie },
+      body: payload,
+    });
+    const res = await app.request(`/api/inspections/${insp.id}/findings`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-requested-with': 'jhsc-web', cookie },
+      body: payload,
+    });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { id: string };
+    expect(body.id).toBe(FINDING_CLIENT_ID);
+  });
+});
+
+describe.skipIf(SKIP)('POST /api/inspection-templates — clientId idempotency (1.10 S1)', () => {
+  const TEMPLATE_CLIENT_ID = '55555555-5555-4555-8555-555555555555';
+
+  it('first POST with clientId returns the template using clientId as the id', async () => {
+    const { cookie } = await loginAsRep();
+    const res = await app.request('/api/inspection-templates', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-requested-with': 'jhsc-web', cookie },
+      body: JSON.stringify({
+        clientId: TEMPLATE_CLIENT_ID,
+        templateCode: 'custom',
+        displayName: 'Idempotent Custom',
+        statusVocab: 'ABC_X',
+        cadence: 'monthly',
+        sections: [{ key: 'g', label: 'G', items: [{ key: 'i', label: 'I' }] }],
+      }),
+    });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { id: string };
+    expect(body.id).toBe(TEMPLATE_CLIENT_ID);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 1.10 S2 (ADR-0009 §3.7): If-Match etag ratchet on the inspection-state
+// and finding PATCH handlers.
+// ---------------------------------------------------------------------------
+
+describe.skipIf(SKIP)('PATCH /api/inspections/:id — If-Match etag', () => {
+  it('returns 428 when If-Match is absent', async () => {
+    const { cookie } = await loginAsRep();
+    const template = await createCustomTemplate(cookie);
+    const ins = await app.request('/api/inspections', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-requested-with': 'jhsc-web', cookie },
+      body: JSON.stringify({ templateVersionId: template.id, zoneId: 'zone_1' }),
+    });
+    const insBody = (await ins.json()) as { id: string };
+    const res = await app.request(`/api/inspections/${insBody.id}`, {
+      method: 'PATCH',
+      headers: { 'content-type': 'application/json', 'x-requested-with': 'jhsc-web', cookie },
+      body: JSON.stringify({ state: 'in_progress' }),
+    });
+    expect(res.status).toBe(428);
+    expect(((await res.json()) as { error: string }).error).toBe('precondition_required');
+  });
+
+  it('returns 409 version_conflict when If-Match is stale', async () => {
+    const { cookie } = await loginAsRep();
+    const template = await createCustomTemplate(cookie);
+    const ins = await app.request('/api/inspections', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-requested-with': 'jhsc-web', cookie },
+      body: JSON.stringify({ templateVersionId: template.id, zoneId: 'zone_1' }),
+    });
+    const insBody = (await ins.json()) as { id: string };
+    // First PATCH bumps version 1 -> 2.
+    const first = await patchInspectionState(cookie, insBody.id, 'in_progress');
+    expect(first.status).toBe(200);
+    // Stale If-Match: 1 → 409.
+    const stale = await app.request(`/api/inspections/${insBody.id}`, {
+      method: 'PATCH',
+      headers: {
+        'content-type': 'application/json',
+        'x-requested-with': 'jhsc-web',
+        'if-match': '"1"',
+        cookie,
+      },
+      body: JSON.stringify({ state: 'awaiting_signatures' }),
+    });
+    expect(stale.status).toBe(409);
+    const body = (await stale.json()) as {
+      error: string;
+      currentVersion: number;
+      serverState: { state: string };
+    };
+    expect(body.error).toBe('version_conflict');
+    expect(body.currentVersion).toBe(2);
+    expect(body.serverState.state).toBe('in_progress');
+  });
+
+  it('200 on matching If-Match bumps version', async () => {
+    const { cookie } = await loginAsRep();
+    const template = await createCustomTemplate(cookie);
+    const ins = await app.request('/api/inspections', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-requested-with': 'jhsc-web', cookie },
+      body: JSON.stringify({ templateVersionId: template.id, zoneId: 'zone_1' }),
+    });
+    const insBody = (await ins.json()) as { id: string };
+    const res = await patchInspectionState(cookie, insBody.id, 'in_progress');
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { version: number };
+    expect(body.version).toBe(2);
+  });
+});
+
+describe.skipIf(SKIP)('PATCH /api/inspections/findings/:id — If-Match etag', () => {
+  async function setupFinding(cookie: string): Promise<{ findingId: string }> {
+    const template = await createCustomTemplate(cookie);
+    const ins = await app.request('/api/inspections', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-requested-with': 'jhsc-web', cookie },
+      body: JSON.stringify({ templateVersionId: template.id, zoneId: 'zone_2' }),
+    });
+    const insBody = (await ins.json()) as { id: string };
+    await patchInspectionState(cookie, insBody.id, 'in_progress');
+    const f = await app.request(`/api/inspections/${insBody.id}/findings`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-requested-with': 'jhsc-web', cookie },
+      body: JSON.stringify({
+        sectionKey: 'general',
+        itemKey: 'housekeeping',
+        statusVocab: 'ABC_X',
+        statusValue: 'A',
+      }),
+    });
+    const fBody = (await f.json()) as { id: string };
+    return { findingId: fBody.id };
+  }
+
+  it('returns 428 when If-Match is absent', async () => {
+    const { cookie } = await loginAsRep();
+    const { findingId } = await setupFinding(cookie);
+    const res = await app.request(`/api/inspections/findings/${findingId}`, {
+      method: 'PATCH',
+      headers: { 'content-type': 'application/json', 'x-requested-with': 'jhsc-web', cookie },
+      body: JSON.stringify({ observation: 'new observation' }),
+    });
+    expect(res.status).toBe(428);
+  });
+
+  it('returns 409 version_conflict when If-Match is stale', async () => {
+    const { cookie } = await loginAsRep();
+    const { findingId } = await setupFinding(cookie);
+    const first = await patchFindingFields(cookie, findingId, { observation: 'first edit' });
+    expect(first.status).toBe(200);
+    const stale = await app.request(`/api/inspections/findings/${findingId}`, {
+      method: 'PATCH',
+      headers: {
+        'content-type': 'application/json',
+        'x-requested-with': 'jhsc-web',
+        'if-match': '"1"',
+        cookie,
+      },
+      body: JSON.stringify({ observation: 'second edit' }),
+    });
+    expect(stale.status).toBe(409);
+    const body = (await stale.json()) as { error: string; currentVersion: number };
+    expect(body.error).toBe('version_conflict');
+    expect(body.currentVersion).toBe(2);
   });
 });

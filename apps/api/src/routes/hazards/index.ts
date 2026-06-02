@@ -36,11 +36,34 @@ import {
   sealField,
   sealOptionalField,
 } from '../../hazards/crypto';
+import { idempotencyKey } from '../../middleware/idempotency';
+import { readIfMatchOr428, versionConflictBody } from '../../middleware/if-match';
 import { rateLimit } from '../../middleware/rate-limit';
 
 export const hazardsRoute = new Hono();
 
 hazardsRoute.use('*', authMiddleware());
+// 1.10 (ADR-0009 §3.4): idempotencyKey runs AFTER auth (needs auth.userId
+// for the four-way UNIQUE) but BEFORE rate-limit so a cache hit replay
+// doesn't burn a token. Opt-in per request via Idempotency-Key header.
+hazardsRoute.use('*', idempotencyKey());
+
+// sec-F5 close-out (S5 fix bundle, T-S58): rate-limit runs BEFORE
+// body-limit, mirroring the documented order in action-items (line 62-67),
+// evidence, inspections, and recommendations. The prior order (body-limit
+// first) let an authenticated rep spam >64KB POSTs against hazards routes
+// — each 413 returned without decrementing the rate-limit bucket because
+// bodyLimit's onError short-circuits without calling next(). The corrected
+// order ensures a spammed oversize POST still burns a token (defense-in-
+// depth against malicious-insider / compromised-credential surge).
+//
+// sec-review F1 (1.5): per-IP token-bucket rate limit. The POST + PATCH
+// paths run server-side libsodium ops (envelope seal/open); the GET list
+// path runs N envelope opens (one per row in the safeSummary projection).
+// Authenticated users still get throttled because the failure mode we
+// care about is an authenticated rep -- compromised credential or
+// malicious insider -- not anonymous probing.
+hazardsRoute.use('*', rateLimit({ name: 'hazards', capacity: 60, refillPerSecond: 10 }));
 
 // sec-review F1 (1.5): bound the request size before c.req.json() buffers
 // a malicious 100MB blob in memory. The largest legitimate body is the
@@ -52,20 +75,18 @@ const HAZARDS_BODY_LIMIT = bodyLimit({
 });
 hazardsRoute.use('*', HAZARDS_BODY_LIMIT);
 
-// sec-review F1 (1.5): per-IP token-bucket rate limit. The POST + PATCH
-// paths run server-side libsodium ops (envelope seal/open); the GET list
-// path runs N envelope opens (one per row in the safeSummary projection).
-// Authenticated users still get throttled because the failure mode we
-// care about is an authenticated rep -- compromised credential or
-// malicious insider -- not anonymous probing.
-hazardsRoute.use('*', rateLimit({ name: 'hazards', capacity: 60, refillPerSecond: 10 }));
-
 // ---------------------------------------------------------------------------
 // Schemas
 // ---------------------------------------------------------------------------
 
 const createBody = z
   .object({
+    // 1.10 (ADR-0009 §3.3): optional client-generated UUID v4. When
+    // present the row INSERTs with id=clientId so the rep's offline
+    // URL is canonical from the moment they typed; when absent the
+    // server's gen_random_uuid() default applies (backwards compat
+    // with online-only clients).
+    clientId: z.string().uuid().optional(),
     title: z.string().min(1).max(120),
     description: z.string().min(1).max(8000),
     severity: z.enum(hazardSeverity),
@@ -103,6 +124,51 @@ hazardsRoute.post('/', async (c) => {
   }
   const body = parsed.data;
   const db = getDb();
+
+  // 1.10 (ADR-0009 §3.3): ratchet-level idempotency. If clientId is
+  // present + already exists, check whether the existing row was
+  // reported by the same actor. Same-actor + clientId reuse → 200 with
+  // the existing row (the queue retry case before the middleware can
+  // cache, or a clientId race within the same actor's two devices).
+  // Cross-actor reuse → 409 client_id_conflict (T-S13 — the multi-rep
+  // forward seam still treats the actor as the bound; a forged clientId
+  // from a different rep cannot alias another rep's row).
+  if (body.clientId) {
+    const existing = (await db.execute(sql`
+      SELECT id, hazard_code, status, reported_at::text AS reported_at, reported_by, version
+      FROM hazards WHERE id = ${body.clientId} LIMIT 1
+    `)) as unknown as Array<{
+      id: string;
+      hazard_code: string;
+      status: string;
+      reported_at: string;
+      reported_by: string;
+      version: number;
+    }>;
+    if (existing.length > 0) {
+      const row = existing[0]!;
+      if (row.reported_by !== auth.userId) {
+        return c.json({ error: 'client_id_conflict' }, 409);
+      }
+      return c.json(
+        {
+          id: row.id,
+          hazardCode: row.hazard_code,
+          status: row.status,
+          reportedAt: row.reported_at,
+          // sec-F7 close-out (T-S55): version field on the clientId-
+          // reuse 200 path so the typed-client wrapper's
+          // `extractVersion(body)` populates `_server_version`
+          // correctly. Without it, the row's _server_version=0 and
+          // the next PATCH ships `If-Match: "0"` — which the post-
+          // S5 if-match parser rejects with 428 (LOW close-out).
+          version: row.version,
+        },
+        200,
+      );
+    }
+  }
+
   const descSealed = sealField(body.description);
   const reporterSealed = sealOptionalField(body.reporterIdentity);
   const locationSealed = sealOptionalField(body.locationDetail);
@@ -114,33 +180,64 @@ hazardsRoute.post('/', async (c) => {
       n: string | number;
     }>;
     const hazardCode = `H-${String(code[0]!.n).padStart(3, '0')}`;
-    const rows = (await tx.execute(sql`
-      INSERT INTO hazards (
-        hazard_code, title, description_ct, description_dek_ct,
-        reporter_identity_ct, reporter_identity_dek_ct,
-        reported_by, severity, status,
-        location_zone, location_detail_ct, location_detail_dek_ct,
-        jurisdiction
-      )
-      VALUES (
-        ${hazardCode}, ${body.title},
-        ${Buffer.from(descSealed.ct) as unknown as Uint8Array},
-        ${Buffer.from(descSealed.dekCt) as unknown as Uint8Array},
-        ${reporterSealed ? (Buffer.from(reporterSealed.ct) as unknown as Uint8Array) : null},
-        ${reporterSealed ? (Buffer.from(reporterSealed.dekCt) as unknown as Uint8Array) : null},
-        ${auth.userId}, ${body.severity}, 'open',
-        ${body.locationZone ?? null},
-        ${locationSealed ? (Buffer.from(locationSealed.ct) as unknown as Uint8Array) : null},
-        ${locationSealed ? (Buffer.from(locationSealed.dekCt) as unknown as Uint8Array) : null},
-        ${body.jurisdiction}
-      )
-      RETURNING id, hazard_code, status, reported_at::text AS reported_at
-    `)) as unknown as Array<{
-      id: string;
-      hazard_code: string;
-      status: string;
-      reported_at: string;
-    }>;
+    // Use clientId as the row id when provided (1.10 §3.3); fall back
+    // to gen_random_uuid() default otherwise. The DEFAULT clause on
+    // `id` only fires when we omit the column from the INSERT list.
+    const rows = body.clientId
+      ? ((await tx.execute(sql`
+          INSERT INTO hazards (
+            id, hazard_code, title, description_ct, description_dek_ct,
+            reporter_identity_ct, reporter_identity_dek_ct,
+            reported_by, severity, status,
+            location_zone, location_detail_ct, location_detail_dek_ct,
+            jurisdiction
+          )
+          VALUES (
+            ${body.clientId}, ${hazardCode}, ${body.title},
+            ${Buffer.from(descSealed.ct) as unknown as Uint8Array},
+            ${Buffer.from(descSealed.dekCt) as unknown as Uint8Array},
+            ${reporterSealed ? (Buffer.from(reporterSealed.ct) as unknown as Uint8Array) : null},
+            ${reporterSealed ? (Buffer.from(reporterSealed.dekCt) as unknown as Uint8Array) : null},
+            ${auth.userId}, ${body.severity}, 'open',
+            ${body.locationZone ?? null},
+            ${locationSealed ? (Buffer.from(locationSealed.ct) as unknown as Uint8Array) : null},
+            ${locationSealed ? (Buffer.from(locationSealed.dekCt) as unknown as Uint8Array) : null},
+            ${body.jurisdiction}
+          )
+          RETURNING id, hazard_code, status, reported_at::text AS reported_at
+        `)) as unknown as Array<{
+          id: string;
+          hazard_code: string;
+          status: string;
+          reported_at: string;
+        }>)
+      : ((await tx.execute(sql`
+          INSERT INTO hazards (
+            hazard_code, title, description_ct, description_dek_ct,
+            reporter_identity_ct, reporter_identity_dek_ct,
+            reported_by, severity, status,
+            location_zone, location_detail_ct, location_detail_dek_ct,
+            jurisdiction
+          )
+          VALUES (
+            ${hazardCode}, ${body.title},
+            ${Buffer.from(descSealed.ct) as unknown as Uint8Array},
+            ${Buffer.from(descSealed.dekCt) as unknown as Uint8Array},
+            ${reporterSealed ? (Buffer.from(reporterSealed.ct) as unknown as Uint8Array) : null},
+            ${reporterSealed ? (Buffer.from(reporterSealed.dekCt) as unknown as Uint8Array) : null},
+            ${auth.userId}, ${body.severity}, 'open',
+            ${body.locationZone ?? null},
+            ${locationSealed ? (Buffer.from(locationSealed.ct) as unknown as Uint8Array) : null},
+            ${locationSealed ? (Buffer.from(locationSealed.dekCt) as unknown as Uint8Array) : null},
+            ${body.jurisdiction}
+          )
+          RETURNING id, hazard_code, status, reported_at::text AS reported_at
+        `)) as unknown as Array<{
+          id: string;
+          hazard_code: string;
+          status: string;
+          reported_at: string;
+        }>);
     const row = rows[0]!;
 
     const chainRow = await append(tx, {
@@ -169,6 +266,12 @@ hazardsRoute.post('/', async (c) => {
     hazardCode: inserted.hazard_code,
     status: inserted.status,
     reportedAt: inserted.reported_at,
+    // sec-F7 close-out (T-S55): freshly-INSERTed row has version=1
+    // (migration 0009 DEFAULT). Returning it here lets the typed-
+    // client's optimistic row land with _server_version=1 so the
+    // next PATCH's If-Match matches without a spurious 409 on the
+    // first edit of a newly-created row.
+    version: 1,
   });
 });
 
@@ -259,7 +362,7 @@ hazardsRoute.get('/:id', async (c) => {
   const db = getDb();
   const rows = (await db.execute(sql`
     SELECT id, hazard_code, title, severity, status, location_zone, jurisdiction,
-           reported_at::text AS reported_at,
+           reported_at::text AS reported_at, version,
            description_ct, description_dek_ct,
            location_detail_ct, location_detail_dek_ct
     FROM hazards WHERE id = ${parsed.data} LIMIT 1
@@ -272,6 +375,7 @@ hazardsRoute.get('/:id', async (c) => {
     location_zone: string | null;
     jurisdiction: string;
     reported_at: string;
+    version: number;
     description_ct: Uint8Array;
     description_dek_ct: Uint8Array;
     location_detail_ct: Uint8Array | null;
@@ -312,6 +416,10 @@ hazardsRoute.get('/:id', async (c) => {
     }),
     jurisdiction: r.jurisdiction as HazardJurisdiction,
     reportedAt: r.reported_at,
+    // 1.10 S2 (ADR-0009 §3.7): version surfaces the row's optimistic-
+    // concurrency etag. The client's queue worker captures this at type-
+    // time + ships it in `If-Match: "<integer>"` on PATCH.
+    version: r.version,
     allowedTransitions: ALLOWED_TRANSITIONS[r.status as HazardStatus],
     history: history.map((h) => ({
       id: h.id,
@@ -379,6 +487,12 @@ hazardsRoute.get(
 hazardsRoute.patch('/:id/status', async (c) => {
   const idParsed = uuidParam.safeParse(c.req.param('id'));
   if (!idParsed.success) return c.json({ error: 'invalid_id' }, 400);
+  // 1.10 S2 (ADR-0009 §3.7): If-Match etag is required. The queue worker
+  // captures the row's version at type-time and ships it on drain; a
+  // mismatch returns 409 with the canonical serverState so the conflict
+  // UI can render the three-way merge.
+  const ifMatch = readIfMatchOr428(c);
+  if (typeof ifMatch !== 'number') return ifMatch.precondition_required;
   const bodyParsed = statusBody.safeParse(await c.req.json().catch(() => null));
   if (!bodyParsed.success) {
     return c.json({ error: 'invalid_body', issues: bodyParsed.error.flatten() }, 400);
@@ -387,9 +501,22 @@ hazardsRoute.patch('/:id/status', async (c) => {
   const db = getDb();
 
   const peek = (await db.execute(sql`
-    SELECT id, status, hazard_code FROM hazards WHERE id = ${idParsed.data} LIMIT 1
-  `)) as unknown as Array<{ id: string; status: string; hazard_code: string }>;
+    SELECT id, status, hazard_code, version FROM hazards WHERE id = ${idParsed.data} LIMIT 1
+  `)) as unknown as Array<{ id: string; status: string; hazard_code: string; version: number }>;
   if (peek.length === 0) return c.json({ error: 'not_found' }, 404);
+  // Fail fast on stale etag BEFORE the step-up gate — the rep doesn't
+  // need to burn step-up freshness on an op that will 409 anyway.
+  if (peek[0]!.version !== ifMatch) {
+    return c.json(
+      versionConflictBody(peek[0]!.version, {
+        id: peek[0]!.id,
+        hazardCode: peek[0]!.hazard_code,
+        status: peek[0]!.status,
+        version: peek[0]!.version,
+      }),
+      409,
+    );
+  }
   const candidateFrom = peek[0]!.status as HazardStatus;
   const to = bodyParsed.data.toStatus;
 
@@ -428,15 +555,32 @@ hazardsRoute.patch('/:id/status', async (c) => {
   // Now do the actual write under a transaction + row lock. Re-check
   // the from-state inside the lock so a concurrent PATCH that landed
   // first can't be overwritten with our stale candidate.
+  let newVersion = 0;
   try {
     await db.transaction(async (tx) => {
       const locked = (await tx.execute(sql`
-        SELECT id, status, hazard_code FROM hazards WHERE id = ${idParsed.data} FOR UPDATE
-      `)) as unknown as Array<{ id: string; status: string; hazard_code: string }>;
+        SELECT id, status, hazard_code, version FROM hazards WHERE id = ${idParsed.data} FOR UPDATE
+      `)) as unknown as Array<{ id: string; status: string; hazard_code: string; version: number }>;
       if (locked.length === 0) {
         throw new HazardWriteAborted({ status: 404, body: { error: 'not_found' } });
       }
       const current = locked[0]!;
+      // 1.10 S2 (ADR-0009 §3.7): re-check the version inside the FOR
+      // UPDATE lock. Same shape as the existing from-state TOCTOU defence
+      // (sec-F2 1.5) — a concurrent PATCH could have landed between the
+      // pre-tx peek and the lock acquisition. 409 returns the new
+      // canonical state so the conflict UI re-renders with fresh data.
+      if (current.version !== ifMatch) {
+        throw new HazardWriteAborted({
+          status: 409,
+          body: versionConflictBody(current.version, {
+            id: current.id,
+            hazardCode: current.hazard_code,
+            status: current.status,
+            version: current.version,
+          }) as unknown as Record<string, unknown>,
+        });
+      }
       const from = current.status as HazardStatus;
       if (from !== candidateFrom) {
         // Race: another PATCH committed first. Re-validate against the
@@ -454,6 +598,7 @@ hazardsRoute.patch('/:id/status', async (c) => {
           });
         }
       }
+      newVersion = current.version + 1;
 
       const chainRow = await append(tx, {
         actorId: auth.userId,
@@ -486,17 +631,23 @@ hazardsRoute.patch('/:id/status', async (c) => {
             : to === 'archived'
               ? 'archived_at'
               : null;
+      // 1.10 S2 (ADR-0009 §3.7): set version = OLD.version + 1 explicitly
+      // so the migration-0009 bump trigger sees a matching NEW.version
+      // and noops (trigger comment: "without double-bumping"). Same shape
+      // for the timestamp+version path and the bare-status+version path.
       if (timestampColumn) {
         await tx.execute(
-          sql`UPDATE hazards SET status = ${to}, ${sql.raw(timestampColumn)} = now() WHERE id = ${current.id}`,
+          sql`UPDATE hazards SET status = ${to}, ${sql.raw(timestampColumn)} = now(), version = ${newVersion} WHERE id = ${current.id}`,
         );
       } else {
-        await tx.execute(sql`UPDATE hazards SET status = ${to} WHERE id = ${current.id}`);
+        await tx.execute(
+          sql`UPDATE hazards SET status = ${to}, version = ${newVersion} WHERE id = ${current.id}`,
+        );
       }
     });
   } catch (err) {
     if (err instanceof HazardWriteAborted) {
-      return c.json(err.payload.body, err.payload.status as 404 | 422);
+      return c.json(err.payload.body, err.payload.status as 404 | 409 | 422);
     }
     throw err;
   }
@@ -505,6 +656,7 @@ hazardsRoute.patch('/:id/status', async (c) => {
     id: peek[0]!.id,
     hazardCode: peek[0]!.hazard_code,
     status: to,
+    version: newVersion,
     allowedTransitions: ALLOWED_TRANSITIONS[to],
   });
 });

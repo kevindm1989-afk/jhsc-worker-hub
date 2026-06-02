@@ -13,6 +13,7 @@ export function hasDb(): boolean {
 }
 
 const TABLES_TO_TRUNCATE = [
+  'sync_idempotency',
   'recommendation_action_item_links',
   'recommendation_responses',
   'recommendation_citations',

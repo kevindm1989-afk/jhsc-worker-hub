@@ -2,6 +2,7 @@ import { type ReactNode } from 'react';
 import { BottomTabBar } from './bottom-tab-bar';
 import { DesktopSidebar } from './desktop-sidebar';
 import { TopBar } from './top-bar';
+import { PwaInstallPrompt } from '@/sync/components/pwa-install-prompt';
 
 // App shell — top-level chrome. CSS-only responsive switch via Tailwind:
 // the sidebar is hidden below md, the bottom tab bar is hidden at md+.
@@ -36,6 +37,13 @@ export function AppShell({ children }: { children: ReactNode }): JSX.Element {
       </div>
 
       <BottomTabBar />
+
+      {/* PWA install affordance (S3) — self-mounts as a small banner when
+       * the rep has shown engagement signals. T-S37: never auto-fires
+       * the native install; renders a tap target that calls the
+       * cached beforeinstallprompt event on Android, or surfaces the
+       * iOS Share-sheet instructions modal. */}
+      <PwaInstallPrompt mode="auto" />
     </div>
   );
 }

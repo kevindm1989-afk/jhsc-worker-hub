@@ -318,6 +318,31 @@ When exit code 1 lands:
 
 > **TODO:** weekly off-host snapshot schedule + restore drill — track as ROADMAP 1.12 hardening line item.
 
+### 7a. Forward-defense flags (`--check-evidence`, `--check-sync`)
+
+`audit-log-verify` accepts opt-in scans that go beyond the hash-chain integrity verification. These run alongside the chain walk and exit non-zero on any anomaly — wire them into the same nightly cron once each milestone lands.
+
+| Flag               | Milestone | Scans for                                                                                                                                                                                                                                                                                                                                   | Exit code on failure |
+| ------------------ | --------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------- |
+| `--check-backfill` | 1.3       | The idx=1 backfill anchor row's `rowsSha256` still matches a fresh canonical-JSON re-hash of `auth_events`.                                                                                                                                                                                                                                 | 1                    |
+| `--check-evidence` | 1.7       | sec-F1 placeholder UUID — every `evidence.uploaded` / `evidence.read` chain row carries a real pre-allocated UUID, not `00000000-0000-0000-0000-000000000000`.                                                                                                                                                                              | 1                    |
+| `--check-sync`     | 1.10      | `sync_idempotency` regression sentinels: (a) rows past `expires_at + 1d` (the 7-day TTL plus a 1-day grace — sweep job is a 1.12 line item), (b) rows whose `actor_user_id` no longer exists in `users` (referential integrity), (c) rows whose `response_status_code` is 5xx (per ADR-0009 §3.4 these should not have been cached at all). | 1                    |
+
+```sh
+# Run all three forward-defense flags together. Each is independent;
+# any failure exits 1.
+bun run /app/apps/api/scripts/audit-log-verify.ts \
+  --check-backfill --check-evidence --check-sync
+```
+
+**On `--check-sync` exit code 1:**
+
+- `expired_unswept` — TTL grace exceeded. The 1.12 pg-boss sweep job is the proper fix. Until it lands, the operator may run a one-shot `DELETE FROM sync_idempotency WHERE expires_at < now() - INTERVAL '1 day'` after confirming the rep has nothing in flight. The deletion is safe: rows past the TTL are no longer consulted by the middleware (the idempotency window for any operation that survived a queue retry is bounded by the 48h dead-letter ceiling, well inside the 7-day TTL).
+- `orphan_actor` — referential integrity broken. The `sync_idempotency.actor_user_id` FK is `ON DELETE RESTRICT` in 1.10, so this should not happen via the API. Investigate the offending row: it's a manual SQL delete artifact, or a CASCADE was applied during a maintenance window. Surface in `.context/decisions.md` if the cause isn't immediately obvious.
+- `cached_5xx` — contract regression. The middleware (`apps/api/src/middleware/idempotency.ts`) is supposed to skip caching 5xx responses so the queue worker's retry actually contacts the handler. Treat as a bug; reproduce against the offending action_kind and patch the middleware.
+
+The flag maps to SECURITY.md §2.10 T-S9 (queue tamper), T-S10 (replay), T-S39 (sync chip false-Synced), T-S41 (dead-letter ignore) — the local-only metrics surface in the rep's sync panel is the rep-facing version; this flag is the operator-facing version.
+
 ## 6. When 1.3 lands: backfill the auth chain
 
 ADR-0001 specifies that 1.3's chained logger will:

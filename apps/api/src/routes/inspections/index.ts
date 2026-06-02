@@ -79,6 +79,8 @@ import {
 } from '@jhsc/shared-types';
 import { getDb } from '../../db/client';
 import { authMiddleware, checkStepUpFreshness } from '../../auth/step-up';
+import { idempotencyKey } from '../../middleware/idempotency';
+import { readIfMatchOr428, versionConflictBody } from '../../middleware/if-match';
 import { rateLimit } from '../../middleware/rate-limit';
 import { openOptionalField, sealField, sealOptionalField } from '../../inspections/crypto';
 import { sealField as sealActionItemField } from '../../action-items/crypto';
@@ -98,6 +100,8 @@ export const inspectionsRoute = new Hono();
 inspectionsRoute.route('/exports', inspectionsExportsRoute);
 
 inspectionsRoute.use('*', authMiddleware());
+// 1.10 (ADR-0009 §3.4): idempotencyKey AFTER auth, BEFORE rate-limit.
+inspectionsRoute.use('*', idempotencyKey());
 // Same ordering rationale as evidence + action-items: rateLimit BEFORE
 // bodyLimit so spammed oversize POSTs still drain the bucket.
 inspectionsRoute.use('*', rateLimit({ name: 'inspections', capacity: 60, refillPerSecond: 10 }));
@@ -169,6 +173,8 @@ const templateSectionSchema = z
 
 const createTemplateBody = z
   .object({
+    // 1.10 (ADR-0009 §3.3): optional client-generated UUID v4.
+    clientId: z.string().uuid().optional(),
     // Custom-only at the route layer (ADR-0007 §3.4 + the seeded codes
     // are append-only via the seeder). Schema accepts the full enum so
     // a future workflow can ratchet here; the route rejects non-custom.
@@ -183,6 +189,8 @@ const createTemplateBody = z
 
 const createInspectionBody = z
   .object({
+    // 1.10 (ADR-0009 §3.3): optional client-generated UUID v4.
+    clientId: z.string().uuid().optional(),
     templateVersionId: z.string().uuid(),
     zoneId: zoneIdSchema,
     scheduledFor: z.string().datetime().optional(),
@@ -227,6 +235,8 @@ const responsiblePartySchema = z
 
 const createFindingBody = z
   .object({
+    // 1.10 (ADR-0009 §3.3): optional client-generated UUID v4.
+    clientId: z.string().uuid().optional(),
     sectionKey: z.string().regex(KEY_PATTERN),
     itemKey: z.string().regex(KEY_PATTERN),
     statusVocab: z.enum(inspectionStatusVocabKind),
@@ -266,12 +276,19 @@ const patchFindingBody = z
 
 const promoteFindingBody = z
   .object({
+    // 1.10 (ADR-0009 §3.3): optional client-generated UUID v4. Used as
+    // the canonical action_items.id created by this promotion. The
+    // finding's id is the URL param; clientId here is the NEW action
+    // item the promote creates.
+    clientId: z.string().uuid().optional(),
     risk: z.enum(actionItemRisk),
   })
   .strict();
 
 const signBody = z
   .object({
+    // 1.10 (ADR-0009 §3.3): optional client-generated UUID v4.
+    clientId: z.string().uuid().optional(),
     role: z.enum(inspectionSignatureRole),
     note: noHtmlBounded({ max: 2000 }).optional(),
   })
@@ -332,6 +349,8 @@ function findItem(
 
 export const inspectionTemplatesRoute = new Hono();
 inspectionTemplatesRoute.use('*', authMiddleware());
+// 1.10 (ADR-0009 §3.4): idempotencyKey AFTER auth, BEFORE rate-limit.
+inspectionTemplatesRoute.use('*', idempotencyKey());
 inspectionTemplatesRoute.use(
   '*',
   rateLimit({ name: 'inspection-templates', capacity: 60, refillPerSecond: 10 }),
@@ -433,6 +452,38 @@ inspectionTemplatesRoute.post('/', async (c) => {
   const auth = c.get('auth');
   const db = getDb();
 
+  // 1.10 (ADR-0009 §3.3): ratchet-level idempotency. created_by_user_id
+  // is the actor scope. NB inspection_templates is append-only — a
+  // clientId reuse + same actor returns the existing version row at
+  // 200; cross-actor returns 409.
+  if (body.clientId) {
+    const existing = (await db.execute(sql`
+      SELECT id, template_code, version_number, created_by_user_id
+      FROM inspection_templates
+      WHERE id = ${body.clientId}
+      LIMIT 1
+    `)) as unknown as Array<{
+      id: string;
+      template_code: string;
+      version_number: number;
+      created_by_user_id: string | null;
+    }>;
+    if (existing.length > 0) {
+      const row = existing[0]!;
+      if (row.created_by_user_id !== auth.userId) {
+        return c.json({ error: 'client_id_conflict' }, 409);
+      }
+      return c.json(
+        {
+          id: row.id,
+          templateCode: row.template_code as InspectionTemplateCode,
+          versionNumber: row.version_number,
+        },
+        200,
+      );
+    }
+  }
+
   const created = await db.transaction(async (tx) => {
     // Allocate the next version_number for `custom`. The partial UNIQUE
     // INDEX `inspection_templates_active_version` on (template_code)
@@ -457,19 +508,34 @@ inspectionTemplatesRoute.post('/', async (c) => {
       );
     }
     const sectionsJson = JSON.stringify(body.sections);
-    const rows = (await tx.execute(sql`
-      INSERT INTO inspection_templates (
-        template_code, version_number, status_vocab, display_name,
-        cadence, sections, requires_three_signatures, created_by_user_id
-      )
-      VALUES (
-        ${body.templateCode}, ${nextVersion}, ${body.statusVocab},
-        ${body.displayName}, ${body.cadence},
-        ${sectionsJson}::jsonb,
-        ${body.requiresThreeSignatures}, ${auth.userId}
-      )
-      RETURNING id
-    `)) as unknown as Array<{ id: string }>;
+    // 1.10 §3.3: use clientId when present as the canonical row id.
+    const rows = body.clientId
+      ? ((await tx.execute(sql`
+          INSERT INTO inspection_templates (
+            id, template_code, version_number, status_vocab, display_name,
+            cadence, sections, requires_three_signatures, created_by_user_id
+          )
+          VALUES (
+            ${body.clientId}, ${body.templateCode}, ${nextVersion}, ${body.statusVocab},
+            ${body.displayName}, ${body.cadence},
+            ${sectionsJson}::jsonb,
+            ${body.requiresThreeSignatures}, ${auth.userId}
+          )
+          RETURNING id
+        `)) as unknown as Array<{ id: string }>)
+      : ((await tx.execute(sql`
+          INSERT INTO inspection_templates (
+            template_code, version_number, status_vocab, display_name,
+            cadence, sections, requires_three_signatures, created_by_user_id
+          )
+          VALUES (
+            ${body.templateCode}, ${nextVersion}, ${body.statusVocab},
+            ${body.displayName}, ${body.cadence},
+            ${sectionsJson}::jsonb,
+            ${body.requiresThreeSignatures}, ${auth.userId}
+          )
+          RETURNING id
+        `)) as unknown as Array<{ id: string }>);
     return { id: rows[0]!.id, versionNumber: nextVersion };
   });
   return c.json({
@@ -492,6 +558,52 @@ inspectionsRoute.post('/', async (c) => {
   const auth = c.get('auth');
   const db = getDb();
 
+  // 1.10 (ADR-0009 §3.3): ratchet-level idempotency. The
+  // conducted_by_user_id column anchors the actor — a rep replaying
+  // their own clientId returns the existing row at 200; cross-actor
+  // returns 409.
+  if (body.clientId) {
+    const existing = (await db.execute(sql`
+      SELECT i.id, i.state, i.scheduled_for::text AS scheduled_for,
+             i.conducted_by_user_id, t.template_code, i.template_version_id, i.zone_id
+      FROM inspections i
+      JOIN inspection_templates t ON t.id = i.template_version_id
+      WHERE i.id = ${body.clientId}
+      LIMIT 1
+    `)) as unknown as Array<{
+      id: string;
+      state: string;
+      scheduled_for: string | null;
+      conducted_by_user_id: string;
+      template_code: string;
+      template_version_id: string;
+      zone_id: string;
+    }>;
+    if (existing.length > 0) {
+      const row = existing[0]!;
+      if (row.conducted_by_user_id !== auth.userId) {
+        return c.json({ error: 'client_id_conflict' }, 409);
+      }
+      // sec-F7 close-out (T-S55): fetch version for the clientId-
+      // reuse path so the typed-client's _server_version is correct.
+      const versionRow = (await db.execute(sql`
+        SELECT version FROM inspections WHERE id = ${row.id} LIMIT 1
+      `)) as unknown as Array<{ version: number }>;
+      return c.json(
+        {
+          id: row.id,
+          templateCode: row.template_code as InspectionTemplateCode,
+          templateVersionId: row.template_version_id,
+          zoneId: row.zone_id,
+          state: row.state as InspectionConductState,
+          scheduledFor: row.scheduled_for,
+          version: versionRow[0]?.version ?? 1,
+        },
+        200,
+      );
+    }
+  }
+
   // Verify the template version exists AND is not retired. Once
   // retired, NEW inspections can't bind to it; existing inspections
   // that already pinned it remain valid (ADR-0007 §3.1).
@@ -510,8 +622,8 @@ inspectionsRoute.post('/', async (c) => {
       // sec/priv-F1-style anchor-first ordering: chain row first so the
       // inspections.audit_idx FK has a real target. Mirror hazards
       // create path; inspection.created is emitted with stable
-      // identifiers only (no PI).
-      const inspectionId = crypto.randomUUID();
+      // identifiers only (no PI). 1.10 §3.3: use clientId when present.
+      const inspectionId = body.clientId ?? crypto.randomUUID();
       const chainRow = await append(tx, {
         actorId: auth.userId,
         payload: {
@@ -545,6 +657,9 @@ inspectionsRoute.post('/', async (c) => {
       zoneId: body.zoneId,
       state: 'scheduled' as InspectionConductState,
       scheduledFor: body.scheduledFor ?? null,
+      // sec-F7 close-out (T-S55): version=1 for the freshly INSERTed
+      // inspection row.
+      version: 1,
     });
   } catch (err) {
     if (err instanceof InspectionWriteAborted) {
@@ -634,7 +749,7 @@ inspectionsRoute.get('/:id', async (c) => {
   const rows = (await db.execute(sql`
     SELECT i.id, i.template_version_id, t.template_code, t.display_name,
            t.status_vocab, t.cadence, t.requires_three_signatures, t.sections,
-           i.zone_id, i.state, i.conducted_by_user_id,
+           i.zone_id, i.state, i.conducted_by_user_id, i.version,
            i.scheduled_for::text AS scheduled_for,
            i.started_at::text AS started_at,
            i.completed_at::text AS completed_at,
@@ -655,6 +770,7 @@ inspectionsRoute.get('/:id', async (c) => {
     zone_id: string;
     state: string;
     conducted_by_user_id: string;
+    version: number;
     scheduled_for: string | null;
     started_at: string | null;
     completed_at: string | null;
@@ -723,6 +839,8 @@ inspectionsRoute.get('/:id', async (c) => {
     startedAt: r.started_at,
     completedAt: r.completed_at,
     createdAt: r.created_at,
+    // 1.10 S2 (ADR-0009 §3.7): optimistic-concurrency etag.
+    version: r.version,
     findings: findingRows.map((f) => ({
       id: f.id,
       sectionKey: f.section_key,
@@ -777,20 +895,36 @@ const STATE_TRANSITIONS: ReadonlyArray<AllowedTransition> = [
 inspectionsRoute.patch('/:id', async (c) => {
   const idParsed = uuidParam.safeParse(c.req.param('id'));
   if (!idParsed.success) return c.json({ error: 'invalid_id' }, 400);
+  // 1.10 S2 (ADR-0009 §3.7): If-Match etag required.
+  const ifMatch = readIfMatchOr428(c);
+  if (typeof ifMatch !== 'number') return ifMatch.precondition_required;
   const parsed = patchInspectionBody.safeParse(await c.req.json().catch(() => null));
   if (!parsed.success) {
     return c.json({ error: 'invalid_body', issues: parsed.error.flatten() }, 400);
   }
   const targetState = parsed.data.state;
   const db = getDb();
+  let newVersion = 0;
   try {
     const result = await db.transaction(async (tx) => {
       const locked = (await tx.execute(sql`
-        SELECT id, state FROM inspections WHERE id = ${idParsed.data} FOR UPDATE
-      `)) as unknown as Array<{ id: string; state: string }>;
+        SELECT id, state, version FROM inspections WHERE id = ${idParsed.data} FOR UPDATE
+      `)) as unknown as Array<{ id: string; state: string; version: number }>;
       if (locked.length === 0) {
         throw new InspectionWriteAborted({ status: 404, body: { error: 'not_found' } });
       }
+      // 1.10 S2 (ADR-0009 §3.7): version check inside the lock.
+      if (locked[0]!.version !== ifMatch) {
+        throw new InspectionWriteAborted({
+          status: 409,
+          body: versionConflictBody(locked[0]!.version, {
+            id: locked[0]!.id,
+            state: locked[0]!.state,
+            version: locked[0]!.version,
+          }) as unknown as Record<string, unknown>,
+        });
+      }
+      newVersion = locked[0]!.version + 1;
       const from = locked[0]!.state as InspectionConductState;
       const rule = STATE_TRANSITIONS.find((t) => t.from === from && t.to === targetState);
       if (!rule) {
@@ -814,21 +948,23 @@ inspectionsRoute.patch('/:id', async (c) => {
           });
         }
       }
+      // 1.10 S2 (ADR-0009 §3.7): set version explicitly so the bump
+      // trigger noops; the route owns the version arithmetic.
       if (rule.setStartedAt) {
         await tx.execute(
-          sql`UPDATE inspections SET state = ${targetState}, started_at = now() WHERE id = ${idParsed.data}`,
+          sql`UPDATE inspections SET state = ${targetState}, started_at = now(), version = ${newVersion} WHERE id = ${idParsed.data}`,
         );
       } else {
         await tx.execute(
-          sql`UPDATE inspections SET state = ${targetState} WHERE id = ${idParsed.data}`,
+          sql`UPDATE inspections SET state = ${targetState}, version = ${newVersion} WHERE id = ${idParsed.data}`,
         );
       }
-      return { id: idParsed.data, state: targetState };
+      return { id: idParsed.data, state: targetState, version: newVersion };
     });
     return c.json(result);
   } catch (err) {
     if (err instanceof InspectionWriteAborted) {
-      return c.json(err.payload.body, err.payload.status as 404 | 422);
+      return c.json(err.payload.body, err.payload.status as 404 | 409 | 422);
     }
     throw err;
   }
@@ -923,7 +1059,67 @@ inspectionsRoute.post('/:id/findings', async (c) => {
   }
   const hasResponsibleParty = respKind !== null;
 
-  const findingId = crypto.randomUUID();
+  // 1.10 (ADR-0009 §3.3): ratchet-level idempotency. The finding row
+  // has no actor column; use the inspection's conducted_by_user_id as
+  // the same-actor scope. A different actor reusing a finding clientId
+  // returns 409; the same actor returns the existing row at 200.
+  if (body.clientId) {
+    const existing = (await db.execute(sql`
+      SELECT f.id, f.inspection_id, f.section_key, f.section_label,
+             f.item_key, f.item_label, f.status_vocab, f.status_value,
+             f.observation_ct IS NOT NULL AS has_observation,
+             f.corrective_action_ct IS NOT NULL AS has_corrective_action,
+             f.responsible_party_kind IS NOT NULL AS has_responsible_party,
+             i.conducted_by_user_id
+      FROM inspection_findings f
+      JOIN inspections i ON i.id = f.inspection_id
+      WHERE f.id = ${body.clientId} AND f.inspection_id = ${idParsed.data}
+      LIMIT 1
+    `)) as unknown as Array<{
+      id: string;
+      inspection_id: string;
+      section_key: string;
+      section_label: string;
+      item_key: string;
+      item_label: string;
+      status_vocab: string;
+      status_value: string;
+      has_observation: boolean;
+      has_corrective_action: boolean;
+      has_responsible_party: boolean;
+      conducted_by_user_id: string;
+    }>;
+    if (existing.length > 0) {
+      const row = existing[0]!;
+      if (row.conducted_by_user_id !== auth.userId) {
+        return c.json({ error: 'client_id_conflict' }, 409);
+      }
+      // sec-F7 close-out (T-S55): fetch version for the reuse path
+      // so the typed-client's _server_version is correct.
+      const versionRow = (await db.execute(sql`
+        SELECT version FROM inspection_findings WHERE id = ${row.id} LIMIT 1
+      `)) as unknown as Array<{ version: number }>;
+      return c.json(
+        {
+          id: row.id,
+          inspectionId: row.inspection_id,
+          sectionKey: row.section_key,
+          sectionLabel: row.section_label,
+          itemKey: row.item_key,
+          itemLabel: row.item_label,
+          statusVocab: row.status_vocab as InspectionStatusVocabKind,
+          statusValue: row.status_value,
+          hasObservation: row.has_observation,
+          hasCorrectiveAction: row.has_corrective_action,
+          hasResponsibleParty: row.has_responsible_party,
+          version: versionRow[0]?.version ?? 1,
+        },
+        200,
+      );
+    }
+  }
+
+  const findingId = body.clientId ?? crypto.randomUUID();
   await db.transaction(async (tx) => {
     const chainRow = await append(tx, {
       actorId: auth.userId,
@@ -980,6 +1176,9 @@ inspectionsRoute.post('/:id/findings', async (c) => {
     hasObservation: obsSealed !== null,
     hasCorrectiveAction: correctiveSealed !== null,
     hasResponsibleParty,
+    // sec-F7 close-out (T-S55): freshly-INSERTed finding row has
+    // version=1 (migration 0009 DEFAULT).
+    version: 1,
   });
 });
 
@@ -999,6 +1198,9 @@ inspectionsRoute.post('/:id/findings', async (c) => {
 inspectionsRoute.patch('/findings/:id', async (c) => {
   const idParsed = uuidParam.safeParse(c.req.param('id'));
   if (!idParsed.success) return c.json({ error: 'invalid_id' }, 400);
+  // 1.10 S2 (ADR-0009 §3.7): If-Match etag required.
+  const ifMatch = readIfMatchOr428(c);
+  if (typeof ifMatch !== 'number') return ifMatch.precondition_required;
   const parsed = patchFindingBody.safeParse(await c.req.json().catch(() => null));
   if (!parsed.success) {
     return c.json({ error: 'invalid_body', issues: parsed.error.flatten() }, 400);
@@ -1006,10 +1208,12 @@ inspectionsRoute.patch('/findings/:id', async (c) => {
   const body = parsed.data;
   const db = getDb();
 
+  let newVersion = 0;
   try {
     const result = await db.transaction(async (tx) => {
       const rows = (await tx.execute(sql`
-        SELECT f.id, f.inspection_id, f.status_vocab, f.promoted_action_item_id,
+        SELECT f.id, f.inspection_id, f.status_vocab, f.status_value,
+               f.promoted_action_item_id, f.version,
                i.state
         FROM inspection_findings f
         JOIN inspections i ON i.id = f.inspection_id
@@ -1019,13 +1223,30 @@ inspectionsRoute.patch('/findings/:id', async (c) => {
         id: string;
         inspection_id: string;
         status_vocab: string;
+        status_value: string;
         promoted_action_item_id: string | null;
+        version: number;
         state: string;
       }>;
       if (rows.length === 0) {
         throw new InspectionWriteAborted({ status: 404, body: { error: 'not_found' } });
       }
       const row = rows[0]!;
+      // 1.10 S2 (ADR-0009 §3.7): version check inside the lock.
+      if (row.version !== ifMatch) {
+        throw new InspectionWriteAborted({
+          status: 409,
+          body: versionConflictBody(row.version, {
+            id: row.id,
+            inspectionId: row.inspection_id,
+            statusVocab: row.status_vocab,
+            statusValue: row.status_value,
+            promotedActionItemId: row.promoted_action_item_id,
+            version: row.version,
+          }) as unknown as Record<string, unknown>,
+        });
+      }
+      newVersion = row.version + 1;
       if (row.state !== 'in_progress') {
         throw new InspectionWriteAborted({
           status: 422,
@@ -1124,15 +1345,16 @@ inspectionsRoute.patch('/findings/:id', async (c) => {
       if (setParts.length === 0) {
         throw new InspectionWriteAborted({ status: 400, body: { error: 'no_changes' } });
       }
+      // 1.10 S2 (ADR-0009 §3.7): explicit version write.
       await tx.execute(sql`
-        UPDATE inspection_findings SET ${sql.join(setParts, sql`, `)} WHERE id = ${idParsed.data}
+        UPDATE inspection_findings SET ${sql.join(setParts, sql`, `)}, version = ${newVersion} WHERE id = ${idParsed.data}
       `);
-      return { id: idParsed.data };
+      return { id: idParsed.data, version: newVersion };
     });
     return c.json(result);
   } catch (err) {
     if (err instanceof InspectionWriteAborted) {
-      return c.json(err.payload.body, err.payload.status as 400 | 404 | 422);
+      return c.json(err.payload.body, err.payload.status as 400 | 404 | 409 | 422);
     }
     throw err;
   }
@@ -1290,6 +1512,42 @@ inspectionsRoute.post('/findings/:id/promote', async (c) => {
   const db = getDb();
   const today = new Date().toISOString().slice(0, 10);
 
+  // 1.10 (ADR-0009 §3.3): ratchet-level idempotency. The promote
+  // creates a NEW action item; clientId here is that new id. The
+  // finding's UNIQUE on promoted_action_item_id is the structural
+  // backstop (T-I16). A clientId reuse where the existing action_item
+  // belongs to the same actor (via the create move row) returns 200
+  // with the same shape; cross-actor returns 409.
+  if (parsed.data.clientId) {
+    const existing = (await db.execute(sql`
+      SELECT ai.id, ai.risk,
+             m.moved_by_user_id AS created_by_user_id
+      FROM action_items ai
+      LEFT JOIN action_item_moves m
+        ON m.action_item_id = ai.id AND m.from_section IS NULL
+      WHERE ai.id = ${parsed.data.clientId}
+      LIMIT 1
+    `)) as unknown as Array<{
+      id: string;
+      risk: string;
+      created_by_user_id: string | null;
+    }>;
+    if (existing.length > 0) {
+      const row = existing[0]!;
+      if (row.created_by_user_id !== auth.userId) {
+        return c.json({ error: 'client_id_conflict' }, 409);
+      }
+      return c.json(
+        {
+          findingId: idParsed.data,
+          actionItemId: row.id,
+          risk: row.risk as ActionItemRisk,
+        },
+        200,
+      );
+    }
+  }
+
   try {
     const result = await db.transaction(async (tx) => {
       // FOR UPDATE on the finding row before any check — serializes
@@ -1365,25 +1623,45 @@ inspectionsRoute.post('/findings/:id/promote', async (c) => {
       // 1.6+1.8 action_items_source_fk_guard trigger which validates
       // source_id against inspection_findings (T-I18). meeting_id stays
       // NULL — ADR-0007 §3.7 documented forward seam to the 1.x meetings
-      // backfill.
-      const actionItemRows = (await tx.execute(sql`
-        INSERT INTO action_items (
-          sequence_number, type,
-          description_ct, description_dek_ct,
-          status, risk, section,
-          start_date,
-          source_type, source_id, tags
-        )
-        VALUES (
-          ${sequenceNumber}, 'INSP',
-          ${Buffer.from(descSealed.ct) as unknown as Uint8Array},
-          ${Buffer.from(descSealed.dekCt) as unknown as Uint8Array},
-          'Not Started', ${risk}, 'new_business',
-          ${today},
-          'inspection', ${idParsed.data}, '{}'::text[]
-        )
-        RETURNING id
-      `)) as unknown as Array<{ id: string }>;
+      // backfill. 1.10 §3.3: use clientId when present as the canonical
+      // action_items.id.
+      const actionItemRows = parsed.data.clientId
+        ? ((await tx.execute(sql`
+            INSERT INTO action_items (
+              id, sequence_number, type,
+              description_ct, description_dek_ct,
+              status, risk, section,
+              start_date,
+              source_type, source_id, tags
+            )
+            VALUES (
+              ${parsed.data.clientId}, ${sequenceNumber}, 'INSP',
+              ${Buffer.from(descSealed.ct) as unknown as Uint8Array},
+              ${Buffer.from(descSealed.dekCt) as unknown as Uint8Array},
+              'Not Started', ${risk}, 'new_business',
+              ${today},
+              'inspection', ${idParsed.data}, '{}'::text[]
+            )
+            RETURNING id
+          `)) as unknown as Array<{ id: string }>)
+        : ((await tx.execute(sql`
+            INSERT INTO action_items (
+              sequence_number, type,
+              description_ct, description_dek_ct,
+              status, risk, section,
+              start_date,
+              source_type, source_id, tags
+            )
+            VALUES (
+              ${sequenceNumber}, 'INSP',
+              ${Buffer.from(descSealed.ct) as unknown as Uint8Array},
+              ${Buffer.from(descSealed.dekCt) as unknown as Uint8Array},
+              'Not Started', ${risk}, 'new_business',
+              ${today},
+              'inspection', ${idParsed.data}, '{}'::text[]
+            )
+            RETURNING id
+          `)) as unknown as Array<{ id: string }>);
       const actionItemId = actionItemRows[0]!.id;
 
       // action_item.created chain anchor fires (existing pattern from
@@ -1465,7 +1743,41 @@ inspectionsRoute.post('/:id/signatures', async (c) => {
 
   const noteSealed = sealOptionalField(note);
   const db = getDb();
-  const signatureId = crypto.randomUUID();
+
+  // 1.10 (ADR-0009 §3.3): ratchet-level idempotency. Signature has
+  // signed_by_user_id as the actor scope. Same-actor + same-clientId
+  // returns the existing row at 200; cross-actor returns 409. NB the
+  // (inspection_id, role) UNIQUE already enforces "at most one of each
+  // role per inspection" — a different clientId with the same role
+  // hits that UNIQUE downstream and surfaces as 409 role_already_signed.
+  if (parsed.data.clientId) {
+    const existing = (await getDb().execute(sql`
+      SELECT s.id, s.role, s.signed_at::text AS signed_at,
+             s.signed_by_user_id, i.state
+      FROM inspection_signatures s
+      JOIN inspections i ON i.id = s.inspection_id
+      WHERE s.id = ${parsed.data.clientId} AND s.inspection_id = ${idParsed.data}
+      LIMIT 1
+    `)) as unknown as Array<{
+      id: string;
+      role: string;
+      signed_at: string;
+      signed_by_user_id: string;
+      state: string;
+    }>;
+    if (existing.length > 0) {
+      const row = existing[0]!;
+      if (row.signed_by_user_id !== auth.userId) {
+        return c.json({ error: 'client_id_conflict' }, 409);
+      }
+      return c.json(
+        { signatureId: row.id, inspectionState: row.state as InspectionConductState },
+        200,
+      );
+    }
+  }
+
+  const signatureId = parsed.data.clientId ?? crypto.randomUUID();
 
   try {
     const result = await db.transaction(async (tx) => {

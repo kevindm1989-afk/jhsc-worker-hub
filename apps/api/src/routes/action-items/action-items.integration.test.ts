@@ -217,17 +217,26 @@ describe.skipIf(SKIP)('GET /api/action-items/:id', () => {
 });
 
 describe.skipIf(SKIP)('PATCH /api/action-items/:id', () => {
+  // 1.10 S2: every PATCH carries If-Match. Newly-created rows are version=1.
+  const ifMatchHeaders = (cookie: string, version = 1): Record<string, string> => ({
+    'content-type': 'application/json',
+    'x-requested-with': 'jhsc-web',
+    'if-match': `"${version}"`,
+    cookie,
+  });
+
   it('updates status + risk and emits action_item.updated with changedFields', async () => {
     const { cookie } = await loginAsRep();
     const { id } = await createItem(cookie);
     const res = await app.request(`/api/action-items/${id}`, {
       method: 'PATCH',
-      headers: { 'content-type': 'application/json', 'x-requested-with': 'jhsc-web', cookie },
+      headers: ifMatchHeaders(cookie),
       body: JSON.stringify({ status: 'In Progress', risk: 'High' }),
     });
     expect(res.status).toBe(200);
-    const body = (await res.json()) as { changedFields: string[] };
+    const body = (await res.json()) as { changedFields: string[]; version: number };
     expect(body.changedFields).toEqual(expect.arrayContaining(['status', 'risk']));
+    expect(body.version).toBe(2);
     const db = getDb();
     const chain = (await db.execute(sql`
       SELECT payload FROM audit_log WHERE kind = 'action_item.updated'
@@ -243,7 +252,7 @@ describe.skipIf(SKIP)('PATCH /api/action-items/:id', () => {
     const { id } = await createItem(cookie);
     const res = await app.request(`/api/action-items/${id}`, {
       method: 'PATCH',
-      headers: { 'content-type': 'application/json', 'x-requested-with': 'jhsc-web', cookie },
+      headers: ifMatchHeaders(cookie),
       body: JSON.stringify({ status: 'Closed', closedDate: '2026-05-29' }),
     });
     expect(res.status).toBe(200);
@@ -261,10 +270,49 @@ describe.skipIf(SKIP)('PATCH /api/action-items/:id', () => {
     const { id } = await createItem(cookie);
     const res = await app.request(`/api/action-items/${id}`, {
       method: 'PATCH',
-      headers: { 'content-type': 'application/json', 'x-requested-with': 'jhsc-web', cookie },
+      headers: ifMatchHeaders(cookie),
       body: JSON.stringify({}),
     });
     expect(res.status).toBe(400);
+  });
+
+  // 1.10 S2 (ADR-0009 §3.7): If-Match etag ratchet.
+  it('returns 428 precondition_required when If-Match is absent', async () => {
+    const { cookie } = await loginAsRep();
+    const { id } = await createItem(cookie);
+    const res = await app.request(`/api/action-items/${id}`, {
+      method: 'PATCH',
+      headers: { 'content-type': 'application/json', 'x-requested-with': 'jhsc-web', cookie },
+      body: JSON.stringify({ status: 'In Progress' }),
+    });
+    expect(res.status).toBe(428);
+    const body = (await res.json()) as { error: string };
+    expect(body.error).toBe('precondition_required');
+  });
+
+  it('returns 409 version_conflict when If-Match is stale', async () => {
+    const { cookie } = await loginAsRep();
+    const { id } = await createItem(cookie);
+    const first = await app.request(`/api/action-items/${id}`, {
+      method: 'PATCH',
+      headers: ifMatchHeaders(cookie, 1),
+      body: JSON.stringify({ status: 'In Progress' }),
+    });
+    expect(first.status).toBe(200);
+    const stale = await app.request(`/api/action-items/${id}`, {
+      method: 'PATCH',
+      headers: ifMatchHeaders(cookie, 1),
+      body: JSON.stringify({ status: 'Blocked' }),
+    });
+    expect(stale.status).toBe(409);
+    const body = (await stale.json()) as {
+      error: string;
+      currentVersion: number;
+      serverState: { id: string; status: string; version: number };
+    };
+    expect(body.error).toBe('version_conflict');
+    expect(body.currentVersion).toBe(2);
+    expect(body.serverState.status).toBe('In Progress');
   });
 });
 
@@ -354,5 +402,65 @@ describe.skipIf(SKIP)('POST /api/action-items/:id/moves/:moveId/undo', () => {
     });
     expect(res.status).toBe(401);
     expect(res.headers.get('www-authenticate')).toMatch(/StepUp/);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 1.10 (ADR-0009 §3.3): clientId ratchet for POST /api/action-items.
+// ---------------------------------------------------------------------------
+
+describe.skipIf(SKIP)('POST /api/action-items — clientId idempotency (1.10 S1)', () => {
+  const CLIENT_ID = '22222222-2222-4222-8222-222222222222';
+  const basePayload = {
+    type: 'INSIGHT' as const,
+    description: 'Action item description for the clientId ratchet test.',
+    status: 'Not Started' as const,
+    risk: 'Medium' as const,
+    section: 'new_business' as const,
+    startDate: '2026-05-29',
+  };
+
+  it('first POST with clientId returns the row using clientId as the id', async () => {
+    const { cookie } = await loginAsRep();
+    const res = await app.request('/api/action-items', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-requested-with': 'jhsc-web', cookie },
+      body: JSON.stringify({ ...basePayload, clientId: CLIENT_ID }),
+    });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { id: string; sequenceNumber: number };
+    expect(body.id).toBe(CLIENT_ID);
+    expect(body.sequenceNumber).toBe(1);
+  });
+
+  it('second POST with same clientId returns the existing row at 200 without bumping sequence', async () => {
+    const { cookie } = await loginAsRep();
+    await app.request('/api/action-items', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-requested-with': 'jhsc-web', cookie },
+      body: JSON.stringify({ ...basePayload, clientId: CLIENT_ID }),
+    });
+    const res = await app.request('/api/action-items', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-requested-with': 'jhsc-web', cookie },
+      body: JSON.stringify({ ...basePayload, clientId: CLIENT_ID }),
+    });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { id: string; sequenceNumber: number };
+    expect(body.id).toBe(CLIENT_ID);
+    expect(body.sequenceNumber).toBe(1);
+  });
+
+  it('absent clientId falls back to gen_random_uuid()', async () => {
+    const { cookie } = await loginAsRep();
+    const res = await app.request('/api/action-items', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-requested-with': 'jhsc-web', cookie },
+      body: JSON.stringify(basePayload),
+    });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { id: string };
+    expect(body.id).toMatch(/^[0-9a-f-]{36}$/);
+    expect(body.id).not.toBe(CLIENT_ID);
   });
 });

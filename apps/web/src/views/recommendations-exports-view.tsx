@@ -18,11 +18,14 @@ import {
   recommendationsApi,
   type RecommendationExportSummary,
 } from '@/recommendations/api';
+import { NetworkRequiredError } from '@/sync/typed-client';
+import { NetworkRequiredBanner } from '@/sync/components/network-required-banner';
 
 export function RecommendationsExportsView(): JSX.Element {
   const [items, setItems] = useState<ReadonlyArray<RecommendationExportSummary> | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busyId, setBusyId] = useState<string | null>(null);
+  const [networkRequired, setNetworkRequired] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
@@ -43,16 +46,21 @@ export function RecommendationsExportsView(): JSX.Element {
   async function download(id: string): Promise<void> {
     setBusyId(id);
     setError(null);
+    setNetworkRequired(false);
     try {
       const blob = await recommendationsApi.exports.download(id);
       const url = URL.createObjectURL(blob);
       window.open(url, '_blank', 'noopener,noreferrer');
       window.setTimeout(() => URL.revokeObjectURL(url), 5_000);
     } catch (e) {
-      if (e instanceof RecommendationApiError && e.status === 401) {
+      if (e instanceof NetworkRequiredError) {
+        setNetworkRequired(true);
+      } else if (e instanceof RecommendationApiError && e.status === 401) {
         setError('Re-authenticate to download. The step-up dialog should be open.');
       } else if (e instanceof RecommendationApiError && e.status === 410) {
         setError('This export has expired (30-day TTL).');
+      } else if (e instanceof RecommendationApiError && e.status === 503) {
+        setNetworkRequired(true);
       } else {
         setError(e instanceof Error ? e.message : String(e));
       }
@@ -80,6 +88,12 @@ export function RecommendationsExportsView(): JSX.Element {
           days; the receipt row remains for chain verification.
         </p>
       </header>
+
+      {networkRequired ? (
+        <div className="mb-4">
+          <NetworkRequiredBanner action="Download" onDismiss={() => setNetworkRequired(false)} />
+        </div>
+      ) : null}
 
       {error ? (
         <div

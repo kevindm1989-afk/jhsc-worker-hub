@@ -98,6 +98,35 @@ async function loginWithStepUp(): Promise<{ cookie: string; userId: string }> {
   return session;
 }
 
+// 1.10 S2 (ADR-0009 §3.7): every PATCH carries If-Match: "<version>".
+// The helper reads the current version from the DB so PATCH chains land
+// across multiple bumps without churning the test bodies.
+async function getRecommendationVersion(id: string): Promise<number> {
+  const db = getDb();
+  const rows = (await db.execute(
+    sql`SELECT version FROM recommendations WHERE id = ${id}`,
+  )) as unknown as Array<{ version: number }>;
+  return rows[0]!.version;
+}
+
+async function patchRecommendation(
+  cookie: string,
+  id: string,
+  body: Record<string, unknown>,
+): Promise<Response> {
+  const version = await getRecommendationVersion(id);
+  return app.request(`/api/recommendations/${id}`, {
+    method: 'PATCH',
+    headers: {
+      'content-type': 'application/json',
+      'x-requested-with': 'jhsc-web',
+      'if-match': `"${version}"`,
+      cookie,
+    },
+    body: JSON.stringify(body),
+  });
+}
+
 async function createRecommendation(
   cookie: string,
   override?: Partial<{
@@ -206,10 +235,9 @@ describe.skipIf(SKIP)('PATCH /api/recommendations/:id — draft-state-only edits
   it('accepts title + body changes in draft state', async () => {
     const { cookie } = await loginAsRep();
     const rec = await createRecommendation(cookie);
-    const res = await app.request(`/api/recommendations/${rec.id}`, {
-      method: 'PATCH',
-      headers: { 'content-type': 'application/json', 'x-requested-with': 'jhsc-web', cookie },
-      body: JSON.stringify({ title: 'Updated title', body: 'Updated body text.' }),
+    const res = await patchRecommendation(cookie, rec.id, {
+      title: 'Updated title',
+      body: 'Updated body text.',
     });
     expect(res.status).toBe(200);
   });
@@ -223,11 +251,7 @@ describe.skipIf(SKIP)('PATCH /api/recommendations/:id — draft-state-only edits
       body: JSON.stringify({}),
     });
     expect(submit.status).toBe(200);
-    const res = await app.request(`/api/recommendations/${rec.id}`, {
-      method: 'PATCH',
-      headers: { 'content-type': 'application/json', 'x-requested-with': 'jhsc-web', cookie },
-      body: JSON.stringify({ title: 'Cannot edit' }),
-    });
+    const res = await patchRecommendation(cookie, rec.id, { title: 'Cannot edit' });
     expect(res.status).toBe(422);
     const body = (await res.json()) as { error: string };
     expect(body.error).toBe('not_draft_state');
@@ -236,11 +260,7 @@ describe.skipIf(SKIP)('PATCH /api/recommendations/:id — draft-state-only edits
   it('rejects jurisdiction change with 422 jurisdiction_immutable_after_draft_save', async () => {
     const { cookie } = await loginAsRep();
     const rec = await createRecommendation(cookie, { jurisdiction: 'ON' });
-    const res = await app.request(`/api/recommendations/${rec.id}`, {
-      method: 'PATCH',
-      headers: { 'content-type': 'application/json', 'x-requested-with': 'jhsc-web', cookie },
-      body: JSON.stringify({ jurisdiction: 'CA-FED' }),
-    });
+    const res = await patchRecommendation(cookie, rec.id, { jurisdiction: 'CA-FED' });
     expect(res.status).toBe(422);
     const body = (await res.json()) as { error: string };
     expect(body.error).toBe('jurisdiction_immutable_after_draft_save');
@@ -880,10 +900,8 @@ describe.skipIf(SKIP)(
     it('emits the anchor on body-only PATCH with bodyChanged=true + identical hashes', async () => {
       const { cookie } = await loginAsRep();
       const rec = await createRecommendation(cookie);
-      const res = await app.request(`/api/recommendations/${rec.id}`, {
-        method: 'PATCH',
-        headers: { 'content-type': 'application/json', 'x-requested-with': 'jhsc-web', cookie },
-        body: JSON.stringify({ body: 'Revised draft body without any markers.' }),
+      const res = await patchRecommendation(cookie, rec.id, {
+        body: 'Revised draft body without any markers.',
       });
       expect(res.status).toBe(200);
 
@@ -921,11 +939,7 @@ describe.skipIf(SKIP)(
       // structurally, but the request DID include `citations`, so
       // `hasMutation` is true and the anchor fires.
       const rec = await createRecommendation(cookie);
-      const res = await app.request(`/api/recommendations/${rec.id}`, {
-        method: 'PATCH',
-        headers: { 'content-type': 'application/json', 'x-requested-with': 'jhsc-web', cookie },
-        body: JSON.stringify({ citations: [] }),
-      });
+      const res = await patchRecommendation(cookie, rec.id, { citations: [] });
       expect(res.status).toBe(200);
 
       const db = getDb();
@@ -946,11 +960,7 @@ describe.skipIf(SKIP)(
     it('does NOT emit the anchor on a no-op PATCH (empty body)', async () => {
       const { cookie } = await loginAsRep();
       const rec = await createRecommendation(cookie);
-      const res = await app.request(`/api/recommendations/${rec.id}`, {
-        method: 'PATCH',
-        headers: { 'content-type': 'application/json', 'x-requested-with': 'jhsc-web', cookie },
-        body: JSON.stringify({}),
-      });
+      const res = await patchRecommendation(cookie, rec.id, {});
       expect(res.status).toBe(200);
 
       const db = getDb();
@@ -964,11 +974,7 @@ describe.skipIf(SKIP)(
     it('does NOT emit the anchor on a failed PATCH (jurisdiction change rejected)', async () => {
       const { cookie } = await loginAsRep();
       const rec = await createRecommendation(cookie, { jurisdiction: 'ON' });
-      const res = await app.request(`/api/recommendations/${rec.id}`, {
-        method: 'PATCH',
-        headers: { 'content-type': 'application/json', 'x-requested-with': 'jhsc-web', cookie },
-        body: JSON.stringify({ jurisdiction: 'CA-FED' }),
-      });
+      const res = await patchRecommendation(cookie, rec.id, { jurisdiction: 'CA-FED' });
       expect(res.status).toBe(422);
       const db = getDb();
       const rows = (await db.execute(sql`
@@ -991,10 +997,8 @@ describe.skipIf(SKIP)('PATCH body-only re-validates citation markers (S5 sec-F8)
     // Create a recommendation with NO citations; new body adds a
     // marker without a matching citation row.
     const rec = await createRecommendation(cookie, { body: 'Original body with no markers.' });
-    const res = await app.request(`/api/recommendations/${rec.id}`, {
-      method: 'PATCH',
-      headers: { 'content-type': 'application/json', 'x-requested-with': 'jhsc-web', cookie },
-      body: JSON.stringify({ body: 'Edited body with a dangling [[cite:1]] marker.' }),
+    const res = await patchRecommendation(cookie, rec.id, {
+      body: 'Edited body with a dangling [[cite:1]] marker.',
     });
     expect(res.status).toBe(422);
     const body = (await res.json()) as { error: string };
@@ -1132,3 +1136,159 @@ describe.skipIf(SKIP || SKIP_TIGRIS)(
     });
   },
 );
+
+// ---------------------------------------------------------------------------
+// 1.10 (ADR-0009 §3.3): clientId ratchet on POST /api/recommendations,
+// POST /:id/responses, and POST /:id/exports.
+// ---------------------------------------------------------------------------
+
+describe.skipIf(SKIP)('POST /api/recommendations — clientId idempotency (1.10 S1)', () => {
+  const REC_CLIENT_ID = '66666666-6666-4666-8666-666666666666';
+
+  it('first POST with clientId returns 201 with id=clientId', async () => {
+    const { cookie } = await loginAsRep();
+    const res = await app.request('/api/recommendations', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-requested-with': 'jhsc-web', cookie },
+      body: JSON.stringify({
+        clientId: REC_CLIENT_ID,
+        title: 'Clientside-allocated recommendation',
+        body: 'A recommendation whose id is allocated client-side per ADR-0009 §3.3.',
+        jurisdiction: 'ON',
+      }),
+    });
+    expect(res.status).toBe(201);
+    const body = (await res.json()) as { id: string };
+    expect(body.id).toBe(REC_CLIENT_ID);
+  });
+
+  it('replay with same clientId + same payload returns 200 with the existing row', async () => {
+    const { cookie } = await loginAsRep();
+    const payload = JSON.stringify({
+      clientId: REC_CLIENT_ID,
+      title: 'Clientside-allocated recommendation',
+      body: 'A recommendation whose id is allocated client-side per ADR-0009 §3.3.',
+      jurisdiction: 'ON',
+    });
+    await app.request('/api/recommendations', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-requested-with': 'jhsc-web', cookie },
+      body: payload,
+    });
+    const res = await app.request('/api/recommendations', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-requested-with': 'jhsc-web', cookie },
+      body: payload,
+    });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { id: string; recommendationNumber: number };
+    expect(body.id).toBe(REC_CLIENT_ID);
+    // The sequence number didn't advance — only one draft row exists.
+    expect(body.recommendationNumber).toBe(1);
+  });
+
+  it('absent clientId falls back to gen_random_uuid()', async () => {
+    const { cookie } = await loginAsRep();
+    const res = await app.request('/api/recommendations', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-requested-with': 'jhsc-web', cookie },
+      body: JSON.stringify({
+        title: 'No clientId',
+        body: 'A recommendation drafted without a client-supplied id.',
+        jurisdiction: 'ON',
+      }),
+    });
+    expect(res.status).toBe(201);
+    const body = (await res.json()) as { id: string };
+    expect(body.id).toMatch(/^[0-9a-f-]{36}$/);
+    expect(body.id).not.toBe(REC_CLIENT_ID);
+  });
+});
+
+describe.skipIf(SKIP)('POST /api/recommendations/:id/responses — clientId idempotency', () => {
+  const RESP_CLIENT_ID = '77777777-7777-4777-8777-777777777777';
+
+  it('replay with same clientId returns 200 with the existing response row', async () => {
+    const { cookie } = await loginAsRep();
+    const rec = await createRecommendation(cookie);
+    // Submit so the recommendation can accept responses.
+    await app.request(`/api/recommendations/${rec.id}/submit`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-requested-with': 'jhsc-web', cookie },
+      body: JSON.stringify({}),
+    });
+    const payload = JSON.stringify({
+      clientId: RESP_CLIENT_ID,
+      authorRole: 'manager',
+      body: 'Acknowledged; will review and respond by month end.',
+    });
+    const first = await app.request(`/api/recommendations/${rec.id}/responses`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-requested-with': 'jhsc-web', cookie },
+      body: payload,
+    });
+    expect(first.status).toBe(201);
+    const replay = await app.request(`/api/recommendations/${rec.id}/responses`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-requested-with': 'jhsc-web', cookie },
+      body: payload,
+    });
+    expect(replay.status).toBe(200);
+    const body = (await replay.json()) as { id: string; position: number };
+    expect(body.id).toBe(RESP_CLIENT_ID);
+    expect(body.position).toBe(1);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 1.10 S2 (ADR-0009 §3.7): If-Match etag ratchet on the draft PATCH handler.
+// ---------------------------------------------------------------------------
+
+describe.skipIf(SKIP)('PATCH /api/recommendations/:id — If-Match etag (1.10 S2)', () => {
+  it('returns 428 precondition_required when If-Match is absent', async () => {
+    const { cookie } = await loginAsRep();
+    const rec = await createRecommendation(cookie);
+    const res = await app.request(`/api/recommendations/${rec.id}`, {
+      method: 'PATCH',
+      headers: { 'content-type': 'application/json', 'x-requested-with': 'jhsc-web', cookie },
+      body: JSON.stringify({ body: 'No etag → 428.' }),
+    });
+    expect(res.status).toBe(428);
+    expect(((await res.json()) as { error: string }).error).toBe('precondition_required');
+  });
+
+  it('returns 409 version_conflict when If-Match is stale', async () => {
+    const { cookie } = await loginAsRep();
+    const rec = await createRecommendation(cookie);
+    const first = await patchRecommendation(cookie, rec.id, { body: 'First edit.' });
+    expect(first.status).toBe(200);
+    const stale = await app.request(`/api/recommendations/${rec.id}`, {
+      method: 'PATCH',
+      headers: {
+        'content-type': 'application/json',
+        'x-requested-with': 'jhsc-web',
+        'if-match': '"1"',
+        cookie,
+      },
+      body: JSON.stringify({ body: 'Stale edit.' }),
+    });
+    expect(stale.status).toBe(409);
+    const body = (await stale.json()) as {
+      error: string;
+      currentVersion: number;
+      serverState: { status: string; version: number };
+    };
+    expect(body.error).toBe('version_conflict');
+    expect(body.currentVersion).toBe(2);
+    expect(body.serverState.version).toBe(2);
+  });
+
+  it('200 + bumped version on matching If-Match', async () => {
+    const { cookie } = await loginAsRep();
+    const rec = await createRecommendation(cookie);
+    const res = await patchRecommendation(cookie, rec.id, { body: 'Matching etag PATCH.' });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { version: number };
+    expect(body.version).toBe(2);
+  });
+});

@@ -51,11 +51,15 @@ import {
   sealField,
   sealOptionalField,
 } from '../../action-items/crypto';
+import { idempotencyKey } from '../../middleware/idempotency';
+import { readIfMatchOr428, versionConflictBody } from '../../middleware/if-match';
 import { rateLimit } from '../../middleware/rate-limit';
 
 export const actionItemsRoute = new Hono();
 
 actionItemsRoute.use('*', authMiddleware());
+// 1.10 (ADR-0009 §3.4): idempotencyKey AFTER auth, BEFORE rate-limit.
+actionItemsRoute.use('*', idempotencyKey());
 // sec-review F4 1.6: rateLimit runs BEFORE bodyLimit so an authenticated
 // rep spamming >64KB POSTs still drains the bucket. bodyLimit returns
 // onError without calling next(), so putting it first would let an
@@ -78,6 +82,8 @@ const isoDate = z.string().regex(/^\d{4}-\d{2}-\d{2}$/, 'must be YYYY-MM-DD');
 
 const createBody = z
   .object({
+    // 1.10 (ADR-0009 §3.3): optional client-generated UUID v4.
+    clientId: z.string().uuid().optional(),
     type: z.enum(actionItemType),
     typeSubtype: z.string().min(1).max(64).optional(),
     description: z.string().min(1).max(8000),
@@ -196,6 +202,54 @@ actionItemsRoute.post('/', async (c) => {
   const body = parsed.data;
   const db = getDb();
 
+  // 1.10 (ADR-0009 §3.3): ratchet-level idempotency. Action items
+  // don't have a `reported_by`-equivalent column (the rep is on the
+  // bootstrap action_item_moves row's `moved_by_user_id`). Use that
+  // to scope the "same actor" check: a rep replaying their own
+  // clientId returns the existing row at 200; a different actor
+  // returns 409 client_id_conflict.
+  if (body.clientId) {
+    const existing = (await db.execute(sql`
+      SELECT ai.id, ai.sequence_number, ai.status, ai.section,
+             ai.start_date::text AS start_date,
+             ai.version,
+             m.moved_by_user_id AS created_by_user_id
+      FROM action_items ai
+      LEFT JOIN action_item_moves m
+        ON m.action_item_id = ai.id AND m.from_section IS NULL
+      WHERE ai.id = ${body.clientId}
+      LIMIT 1
+    `)) as unknown as Array<{
+      id: string;
+      sequence_number: number;
+      status: string;
+      section: string;
+      start_date: string;
+      version: number;
+      created_by_user_id: string | null;
+    }>;
+    if (existing.length > 0) {
+      const row = existing[0]!;
+      if (row.created_by_user_id !== auth.userId) {
+        return c.json({ error: 'client_id_conflict' }, 409);
+      }
+      return c.json(
+        {
+          id: row.id,
+          sequenceNumber: row.sequence_number,
+          status: row.status as ActionItemStatus,
+          section: row.section as ActionItemSection,
+          startDate: row.start_date,
+          // sec-F7 close-out (T-S55): version on the clientId-reuse
+          // path so the typed-client's _server_version is correct
+          // for the next PATCH's If-Match.
+          version: row.version,
+        },
+        200,
+      );
+    }
+  }
+
   const descSealed = sealField(body.description);
   const recommendedSealed = sealOptionalField(body.recommendedAction);
   const raisedBySealed = sealOptionalField(body.raisedBy);
@@ -204,43 +258,81 @@ actionItemsRoute.post('/', async (c) => {
   const created = await db.transaction(async (tx) => {
     const sequenceNumber = await allocateSequenceNumber(tx, body.section);
 
-    const inserted = (await tx.execute(sql`
-      INSERT INTO action_items (
-        sequence_number, type, type_subtype,
-        description_ct, description_dek_ct,
-        recommended_action_ct, recommended_action_dek_ct,
-        raised_by_ct, raised_by_dek_ct, raised_by_user_id,
-        follow_up_owner_ct, follow_up_owner_dek_ct, follow_up_owner_user_id,
-        department, status, risk, section,
-        start_date, target_date,
-        source_type, source_id, tags
-      )
-      VALUES (
-        ${sequenceNumber}, ${body.type}, ${body.typeSubtype ?? null},
-        ${Buffer.from(descSealed.ct) as unknown as Uint8Array},
-        ${Buffer.from(descSealed.dekCt) as unknown as Uint8Array},
-        ${recommendedSealed ? (Buffer.from(recommendedSealed.ct) as unknown as Uint8Array) : null},
-        ${recommendedSealed ? (Buffer.from(recommendedSealed.dekCt) as unknown as Uint8Array) : null},
-        ${raisedBySealed ? (Buffer.from(raisedBySealed.ct) as unknown as Uint8Array) : null},
-        ${raisedBySealed ? (Buffer.from(raisedBySealed.dekCt) as unknown as Uint8Array) : null},
-        ${body.raisedByUserId ?? null},
-        ${followUpSealed ? (Buffer.from(followUpSealed.ct) as unknown as Uint8Array) : null},
-        ${followUpSealed ? (Buffer.from(followUpSealed.dekCt) as unknown as Uint8Array) : null},
-        ${body.followUpOwnerUserId ?? null},
-        ${body.department ?? null}, ${body.status}, ${body.risk}, ${body.section},
-        ${body.startDate}, ${body.targetDate ?? null},
-        ${body.sourceType ?? 'manual'}, ${body.sourceId ?? null},
-        ${body.tags ?? []}::text[]
-      )
-      RETURNING id, sequence_number, status, section, start_date::text AS start_date, created_at
-    `)) as unknown as Array<{
-      id: string;
-      sequence_number: number;
-      status: string;
-      section: string;
-      start_date: string;
-      created_at: Date;
-    }>;
+    const inserted = body.clientId
+      ? ((await tx.execute(sql`
+          INSERT INTO action_items (
+            id, sequence_number, type, type_subtype,
+            description_ct, description_dek_ct,
+            recommended_action_ct, recommended_action_dek_ct,
+            raised_by_ct, raised_by_dek_ct, raised_by_user_id,
+            follow_up_owner_ct, follow_up_owner_dek_ct, follow_up_owner_user_id,
+            department, status, risk, section,
+            start_date, target_date,
+            source_type, source_id, tags
+          )
+          VALUES (
+            ${body.clientId}, ${sequenceNumber}, ${body.type}, ${body.typeSubtype ?? null},
+            ${Buffer.from(descSealed.ct) as unknown as Uint8Array},
+            ${Buffer.from(descSealed.dekCt) as unknown as Uint8Array},
+            ${recommendedSealed ? (Buffer.from(recommendedSealed.ct) as unknown as Uint8Array) : null},
+            ${recommendedSealed ? (Buffer.from(recommendedSealed.dekCt) as unknown as Uint8Array) : null},
+            ${raisedBySealed ? (Buffer.from(raisedBySealed.ct) as unknown as Uint8Array) : null},
+            ${raisedBySealed ? (Buffer.from(raisedBySealed.dekCt) as unknown as Uint8Array) : null},
+            ${body.raisedByUserId ?? null},
+            ${followUpSealed ? (Buffer.from(followUpSealed.ct) as unknown as Uint8Array) : null},
+            ${followUpSealed ? (Buffer.from(followUpSealed.dekCt) as unknown as Uint8Array) : null},
+            ${body.followUpOwnerUserId ?? null},
+            ${body.department ?? null}, ${body.status}, ${body.risk}, ${body.section},
+            ${body.startDate}, ${body.targetDate ?? null},
+            ${body.sourceType ?? 'manual'}, ${body.sourceId ?? null},
+            ${body.tags ?? []}::text[]
+          )
+          RETURNING id, sequence_number, status, section, start_date::text AS start_date, created_at
+        `)) as unknown as Array<{
+          id: string;
+          sequence_number: number;
+          status: string;
+          section: string;
+          start_date: string;
+          created_at: Date;
+        }>)
+      : ((await tx.execute(sql`
+          INSERT INTO action_items (
+            sequence_number, type, type_subtype,
+            description_ct, description_dek_ct,
+            recommended_action_ct, recommended_action_dek_ct,
+            raised_by_ct, raised_by_dek_ct, raised_by_user_id,
+            follow_up_owner_ct, follow_up_owner_dek_ct, follow_up_owner_user_id,
+            department, status, risk, section,
+            start_date, target_date,
+            source_type, source_id, tags
+          )
+          VALUES (
+            ${sequenceNumber}, ${body.type}, ${body.typeSubtype ?? null},
+            ${Buffer.from(descSealed.ct) as unknown as Uint8Array},
+            ${Buffer.from(descSealed.dekCt) as unknown as Uint8Array},
+            ${recommendedSealed ? (Buffer.from(recommendedSealed.ct) as unknown as Uint8Array) : null},
+            ${recommendedSealed ? (Buffer.from(recommendedSealed.dekCt) as unknown as Uint8Array) : null},
+            ${raisedBySealed ? (Buffer.from(raisedBySealed.ct) as unknown as Uint8Array) : null},
+            ${raisedBySealed ? (Buffer.from(raisedBySealed.dekCt) as unknown as Uint8Array) : null},
+            ${body.raisedByUserId ?? null},
+            ${followUpSealed ? (Buffer.from(followUpSealed.ct) as unknown as Uint8Array) : null},
+            ${followUpSealed ? (Buffer.from(followUpSealed.dekCt) as unknown as Uint8Array) : null},
+            ${body.followUpOwnerUserId ?? null},
+            ${body.department ?? null}, ${body.status}, ${body.risk}, ${body.section},
+            ${body.startDate}, ${body.targetDate ?? null},
+            ${body.sourceType ?? 'manual'}, ${body.sourceId ?? null},
+            ${body.tags ?? []}::text[]
+          )
+          RETURNING id, sequence_number, status, section, start_date::text AS start_date, created_at
+        `)) as unknown as Array<{
+          id: string;
+          sequence_number: number;
+          status: string;
+          section: string;
+          start_date: string;
+          created_at: Date;
+        }>);
     const row = inserted[0]!;
 
     const chainRow = await append(tx, {
@@ -272,6 +364,8 @@ actionItemsRoute.post('/', async (c) => {
     status: created.status as ActionItemStatus,
     section: created.section as ActionItemSection,
     startDate: created.start_date,
+    // sec-F7 close-out (T-S55): version=1 for freshly-INSERTed row.
+    version: 1,
   });
 });
 
@@ -402,7 +496,7 @@ actionItemsRoute.get('/:id', async (c) => {
            target_date::text AS target_date,
            closed_date::text AS closed_date,
            verified_by_jhsc_id, meeting_id, source_type, source_id, tags,
-           created_at, updated_at
+           created_at, updated_at, version
     FROM action_items WHERE id = ${parsed.data} LIMIT 1
   `)) as unknown as Array<{
     id: string;
@@ -433,6 +527,7 @@ actionItemsRoute.get('/:id', async (c) => {
     tags: string[];
     created_at: Date;
     updated_at: Date;
+    version: number;
   }>;
   if (rows.length === 0) return c.json({ error: 'not_found' }, 404);
   const r = rows[0]!;
@@ -496,6 +591,9 @@ actionItemsRoute.get('/:id', async (c) => {
     sourceId: r.source_id,
     tags: r.tags,
     flag,
+    // 1.10 S2 (ADR-0009 §3.7): optimistic-concurrency etag for the
+    // client's PATCH wrapper.
+    version: r.version,
     allowedTransitions: ACTION_ITEM_ALLOWED_TRANSITIONS[r.section as ActionItemSection],
     history: history.map((h) => ({
       id: h.id,
@@ -518,6 +616,11 @@ actionItemsRoute.get('/:id', async (c) => {
 actionItemsRoute.patch('/:id', async (c) => {
   const idParsed = uuidParam.safeParse(c.req.param('id'));
   if (!idParsed.success) return c.json({ error: 'invalid_id' }, 400);
+  // 1.10 S2 (ADR-0009 §3.7): If-Match etag is required on every PATCH so
+  // the offline queue's optimistic-concurrency invariant holds end-to-end
+  // (queue worker captures version at type-time + ships it on drain).
+  const ifMatch = readIfMatchOr428(c);
+  if (typeof ifMatch !== 'number') return ifMatch.precondition_required;
   const bodyParsed = patchBody.safeParse(await c.req.json().catch(() => null));
   if (!bodyParsed.success) {
     return c.json({ error: 'invalid_body', issues: bodyParsed.error.flatten() }, 400);
@@ -665,16 +768,41 @@ actionItemsRoute.patch('/:id', async (c) => {
     }
   }
 
-  await db
-    .transaction(async (tx) => {
+  let newVersion = 0;
+  try {
+    await db.transaction(async (tx) => {
       const peek = (await tx.execute(sql`
-      SELECT id FROM action_items WHERE id = ${idParsed.data} FOR UPDATE
-    `)) as unknown as Array<{ id: string }>;
+      SELECT id, version FROM action_items WHERE id = ${idParsed.data} FOR UPDATE
+    `)) as unknown as Array<{ id: string; version: number }>;
       if (peek.length === 0) {
         throw new ActionItemWriteAborted({ status: 404, body: { error: 'not_found' } });
       }
+      // 1.10 S2 (ADR-0009 §3.7): version check inside the FOR UPDATE lock.
+      if (peek[0]!.version !== ifMatch) {
+        // Fetch the canonical serverState for the conflict body. We
+        // intentionally project a shallow shape — the conflict UI
+        // re-reads the full detail via GET /:id after resolving.
+        const fresh = (await tx.execute(sql`
+          SELECT id, sequence_number, status, section, risk, version FROM action_items WHERE id = ${idParsed.data} LIMIT 1
+        `)) as unknown as Array<{
+          id: string;
+          sequence_number: number;
+          status: string;
+          section: string;
+          risk: string;
+          version: number;
+        }>;
+        throw new ActionItemWriteAborted({
+          status: 409,
+          body: versionConflictBody(peek[0]!.version, fresh[0] ?? null) as unknown as Record<
+            string,
+            unknown
+          >,
+        });
+      }
+      newVersion = peek[0]!.version + 1;
       await tx.execute(sql`
-        UPDATE action_items SET ${sql.join(setParts, sql`, `)} WHERE id = ${idParsed.data}
+        UPDATE action_items SET ${sql.join(setParts, sql`, `)}, version = ${newVersion} WHERE id = ${idParsed.data}
       `);
 
       await append(tx, {
@@ -687,13 +815,15 @@ actionItemsRoute.patch('/:id', async (c) => {
         resourceType: 'action_items',
         resourceId: idParsed.data,
       });
-    })
-    .catch((err: unknown) => {
-      if (err instanceof ActionItemWriteAborted) throw err;
-      throw err;
     });
+  } catch (err) {
+    if (err instanceof ActionItemWriteAborted) {
+      return c.json(err.payload.body, err.payload.status as 400 | 404 | 409);
+    }
+    throw err;
+  }
 
-  return c.json({ id: idParsed.data, changedFields });
+  return c.json({ id: idParsed.data, changedFields, version: newVersion });
 });
 
 // ---------------------------------------------------------------------------

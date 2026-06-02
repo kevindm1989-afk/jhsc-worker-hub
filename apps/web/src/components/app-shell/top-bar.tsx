@@ -2,6 +2,7 @@ import { Bell, Search, Shield } from 'lucide-react';
 import { useLocation } from 'react-router-dom';
 import { ThemeToggle } from '@/components/theme-toggle';
 import { TABS } from '@/lib/tabs';
+import { SyncStatusChip } from '@/sync/components/sync-status-chip';
 
 // Top bar — 56px sticky, backdrop-blurred. Layout differs by viewport:
 // mobile shows the brand mark (sidebar is hidden); desktop shows the
@@ -33,8 +34,9 @@ export function TopBar(): JSX.Element {
           <span className="font-medium text-foreground">{pageTitle}</span>
         </div>
 
-        {/* Right cluster: Search | Theme | Notifications */}
+        {/* Right cluster: Sync | Search | Theme | Notifications */}
         <div className="flex items-center gap-1">
+          <SyncStatusChip />
           <SearchButton />
           <ThemeToggle />
           <NotificationsButton />

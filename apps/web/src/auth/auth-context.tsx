@@ -13,6 +13,8 @@ import {
   type ReactNode,
 } from 'react';
 import { ApiError, api, type SessionInfo } from './api';
+import { clearOnLogout } from '@/sync/db';
+import { getWorker, setWorkerForTests } from '@/sync/worker-singleton';
 
 export type BootState = 'loading' | 'ready' | 'error';
 
@@ -73,6 +75,22 @@ export function AuthProvider({ children }: { children: ReactNode }): JSX.Element
     } catch {
       // best-effort
     }
+    // sec-F9 close-out (T-S56): tear down the per-session Dexie state
+    // (sync_queue, sync_conflicts, _base_state, legal_clauses,
+    // inspection_templates) so a subsequent rep on the same device
+    // doesn't inherit queued ops bound to the prior actor. Best-
+    // effort: a failure to clear shouldn't block the logout UX.
+    try {
+      // Stop the queue worker BEFORE clearing the queue, otherwise an
+      // in-flight drain can race the clear and emit a partial state.
+      getWorker().stop();
+      await clearOnLogout();
+    } catch {
+      // best-effort
+    }
+    // Drop the queue worker singleton so the next login builds a
+    // fresh one bound to the new auth context.
+    setWorkerForTests(null);
     setSession(null);
   }, []);
 

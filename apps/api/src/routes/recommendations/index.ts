@@ -84,6 +84,8 @@ import {
 } from '@jhsc/shared-types';
 import { getDb } from '../../db/client';
 import { authMiddleware, checkStepUpFreshness } from '../../auth/step-up';
+import { idempotencyKey } from '../../middleware/idempotency';
+import { readIfMatchOr428, versionConflictBody } from '../../middleware/if-match';
 import { rateLimit } from '../../middleware/rate-limit';
 import { openRecommendationField, sealRecommendationField } from '../../recommendations/crypto';
 import { sealField as sealActionItemField } from '../../action-items/crypto';
@@ -95,6 +97,8 @@ import { registerRecommendationExportHandlers } from './exports';
 export const recommendationsRoute = new Hono();
 
 recommendationsRoute.use('*', authMiddleware());
+// 1.10 (ADR-0009 §3.4): idempotencyKey AFTER auth, BEFORE rate-limit.
+recommendationsRoute.use('*', idempotencyKey());
 // Same ordering rationale as inspections: rateLimit BEFORE bodyLimit so
 // spammed oversize POSTs still drain the bucket.
 recommendationsRoute.use(
@@ -152,6 +156,8 @@ const citationSchema = z
 // with the inspections route.
 const createBody = z
   .object({
+    // 1.10 (ADR-0009 §3.3): optional client-generated UUID v4.
+    clientId: z.string().uuid().optional(),
     title: noHtmlBounded({ min: 1, max: 200 }),
     body: noHtmlBounded({ min: 1, max: 16000 }),
     jurisdiction: z.enum(recommendationJurisdiction),
@@ -184,6 +190,8 @@ const resolveBody = z.object({}).strict();
 
 const responseBody = z
   .object({
+    // 1.10 (ADR-0009 §3.3): optional client-generated UUID v4.
+    clientId: z.string().uuid().optional(),
     // S5 priv-F14 close-out: noHtmlBounded refinement on both fields
     // — same rationale as the create / patch bodies above.
     authorRole: noHtmlBounded({ min: 1, max: 120 }),
@@ -387,10 +395,52 @@ recommendationsRoute.post('/', async (c) => {
   const auth = c.get('auth');
   const db = getDb();
 
+  // 1.10 (ADR-0009 §3.3): ratchet-level idempotency. drafted_by_user_id
+  // anchors the actor. Same-actor clientId reuse → 200 with existing
+  // row; cross-actor → 409. Runs before the citation gate so a clientId
+  // replay doesn't burn the citation Zod budget.
+  if (body.clientId) {
+    const existing = (await db.execute(sql`
+      SELECT id, recommendation_number, jurisdiction, status,
+             drafted_at::text AS drafted_at, drafted_by_user_id, version
+      FROM recommendations
+      WHERE id = ${body.clientId}
+      LIMIT 1
+    `)) as unknown as Array<{
+      id: string;
+      recommendation_number: number;
+      jurisdiction: string;
+      status: string;
+      drafted_at: string;
+      drafted_by_user_id: string;
+      version: number;
+    }>;
+    if (existing.length > 0) {
+      const row = existing[0]!;
+      if (row.drafted_by_user_id !== auth.userId) {
+        return c.json({ error: 'client_id_conflict' }, 409);
+      }
+      return c.json(
+        {
+          id: row.id,
+          recommendationNumber: row.recommendation_number,
+          jurisdiction: row.jurisdiction as RecommendationJurisdiction,
+          status: row.status as RecommendationStatus,
+          draftedAt: row.drafted_at,
+          // sec-F7 close-out (T-S55): version field on the clientId-
+          // reuse path so the typed-client's _server_version is
+          // correct for the next PATCH.
+          version: row.version,
+        },
+        200,
+      );
+    }
+  }
+
   // sec-F1-style anchor-first ordering: chain row first so the
   // recommendations.audit_idx FK has a real target. Mirrors hazards /
-  // inspections create paths.
-  const recommendationId = crypto.randomUUID();
+  // inspections create paths. 1.10 §3.3: use clientId when present.
+  const recommendationId = body.clientId ?? crypto.randomUUID();
 
   try {
     const created = await db.transaction(async (tx) => {
@@ -465,6 +515,9 @@ recommendationsRoute.post('/', async (c) => {
         jurisdiction: body.jurisdiction,
         status: 'draft' as RecommendationStatus,
         draftedAt: created.draftedAt,
+        // sec-F7 close-out (T-S55): freshly-INSERTed recommendation
+        // row has version=1 (migration 0009 DEFAULT).
+        version: 1,
       },
       201,
     );
@@ -560,7 +613,7 @@ recommendationsRoute.get('/:id', async (c) => {
            submitted_at::text AS submitted_at,
            resolved_at::text AS resolved_at,
            withdrawn_at::text AS withdrawn_at,
-           withdrawn_reason
+           withdrawn_reason, version
     FROM recommendations
     WHERE id = ${idParsed.data}
     LIMIT 1
@@ -575,6 +628,7 @@ recommendationsRoute.get('/:id', async (c) => {
     resolved_at: string | null;
     withdrawn_at: string | null;
     withdrawn_reason: string | null;
+    version: number;
   }>;
   if (rows.length === 0) return c.json({ error: 'not_found' }, 404);
   const r = rows[0]!;
@@ -632,6 +686,9 @@ recommendationsRoute.get('/:id', async (c) => {
     withdrawnAt: r.withdrawn_at,
     withdrawnReason: r.withdrawn_reason,
     deadline: deadline ? deadline.toISOString() : null,
+    // 1.10 S2 (ADR-0009 §3.7): optimistic-concurrency etag for the
+    // client's PATCH wrapper.
+    version: r.version,
     // The PI surface: only presence flags, never the bytes themselves.
     hasTitle: true,
     hasBody: true,
@@ -752,6 +809,9 @@ recommendationsRoute.get('/:id/reveal', async (c) => {
 recommendationsRoute.patch('/:id', async (c) => {
   const idParsed = uuidParam.safeParse(c.req.param('id'));
   if (!idParsed.success) return c.json({ error: 'invalid_id' }, 400);
+  // 1.10 S2 (ADR-0009 §3.7): If-Match etag required.
+  const ifMatch = readIfMatchOr428(c);
+  if (typeof ifMatch !== 'number') return ifMatch.precondition_required;
   const parsed = patchBody.safeParse(await c.req.json().catch(() => null));
   if (!parsed.success) {
     return c.json({ error: 'invalid_body', issues: parsed.error.flatten() }, 400);
@@ -760,16 +820,18 @@ recommendationsRoute.patch('/:id', async (c) => {
   const auth = c.get('auth');
   const db = getDb();
 
+  let newVersion = 0;
   try {
     const result = await db.transaction(async (tx) => {
       const locked = (await tx.execute(sql`
-        SELECT id, recommendation_number, status, jurisdiction, body_ct, body_dek_ct
+        SELECT id, recommendation_number, status, jurisdiction, version, body_ct, body_dek_ct
         FROM recommendations WHERE id = ${idParsed.data} FOR UPDATE
       `)) as unknown as Array<{
         id: string;
         recommendation_number: number;
         status: string;
         jurisdiction: string;
+        version: number;
         body_ct: Uint8Array;
         body_dek_ct: Uint8Array;
       }>;
@@ -777,6 +839,23 @@ recommendationsRoute.patch('/:id', async (c) => {
         throw new RecommendationWriteAborted({ status: 404, body: { error: 'not_found' } });
       }
       const row = locked[0]!;
+      // 1.10 S2 (ADR-0009 §3.7): version check inside the lock. The
+      // body fields are encrypted at rest; the conflict UI fetches
+      // /api/recommendations/:id/reveal in a step-up flow to compare
+      // plaintext (ADR §3.8).
+      if (row.version !== ifMatch) {
+        throw new RecommendationWriteAborted({
+          status: 409,
+          body: versionConflictBody(row.version, {
+            id: row.id,
+            recommendationNumber: row.recommendation_number,
+            status: row.status,
+            jurisdiction: row.jurisdiction,
+            version: row.version,
+          }) as unknown as Record<string, unknown>,
+        });
+      }
+      newVersion = row.version + 1;
       if (row.status !== 'draft') {
         throw new RecommendationWriteAborted({
           status: 422,
@@ -873,11 +952,22 @@ recommendationsRoute.patch('/:id', async (c) => {
         setFragments.push(sql`body_ct = ${Buffer.from(sealed.ct) as unknown as Uint8Array}`);
         setFragments.push(sql`body_dek_ct = ${Buffer.from(sealed.dekCt) as unknown as Uint8Array}`);
       }
+      // 1.10 S2 (ADR-0009 §3.7): explicit version write. Set the column
+      // even on a no-op-on-paper PATCH so the etag advances and a stale
+      // client can't replay; the migration-0009 bump trigger noops when
+      // we set version explicitly. We do NOT skip the UPDATE when
+      // setFragments is empty because the version still needs to bump
+      // (matches the rest of the route's "draft_patched always anchors"
+      // semantics from §3.5).
       if (setFragments.length > 0) {
         await tx.execute(sql`
-          UPDATE recommendations SET ${sql.join(setFragments, sql`, `)}
+          UPDATE recommendations SET ${sql.join(setFragments, sql`, `)}, version = ${newVersion}
           WHERE id = ${idParsed.data}
         `);
+      } else {
+        await tx.execute(
+          sql`UPDATE recommendations SET version = ${newVersion} WHERE id = ${idParsed.data}`,
+        );
       }
 
       if (body.citations !== undefined) {
@@ -927,12 +1017,12 @@ recommendationsRoute.patch('/:id', async (c) => {
           resourceId: idParsed.data,
         });
       }
-      return { id: idParsed.data };
+      return { id: idParsed.data, version: newVersion };
     });
     return c.json(result);
   } catch (err) {
     if (err instanceof RecommendationWriteAborted) {
-      return c.json(err.payload.body, err.payload.status as 404 | 422);
+      return c.json(err.payload.body, err.payload.status as 404 | 409 | 422);
     }
     throw err;
   }
@@ -1157,7 +1247,32 @@ recommendationsRoute.post('/:id/responses', async (c) => {
   const auth = c.get('auth');
   const body = parsed.data;
   const db = getDb();
-  const responseId = crypto.randomUUID();
+
+  // 1.10 (ADR-0009 §3.3): ratchet-level idempotency on the response
+  // row. received_by_user_id is the actor scope; same-actor returns
+  // existing at 200, cross-actor 409.
+  if (body.clientId) {
+    const existing = (await db.execute(sql`
+      SELECT id, position, received_at::text AS received_at, received_by_user_id
+      FROM recommendation_responses
+      WHERE id = ${body.clientId} AND recommendation_id = ${idParsed.data}
+      LIMIT 1
+    `)) as unknown as Array<{
+      id: string;
+      position: number;
+      received_at: string;
+      received_by_user_id: string;
+    }>;
+    if (existing.length > 0) {
+      const row = existing[0]!;
+      if (row.received_by_user_id !== auth.userId) {
+        return c.json({ error: 'client_id_conflict' }, 409);
+      }
+      return c.json({ id: row.id, position: row.position, receivedAt: row.received_at }, 200);
+    }
+  }
+
+  const responseId = body.clientId ?? crypto.randomUUID();
 
   try {
     const result = await db.transaction(async (tx) => {

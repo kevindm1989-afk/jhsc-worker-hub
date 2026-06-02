@@ -208,17 +208,33 @@ describe.skipIf(SKIP)('PATCH /api/hazards/:id/status', () => {
     return body.id;
   }
 
+  // 1.10 S2: every PATCH carries `If-Match: "<version>"`. Newly-created
+  // rows have version=1 (the migration-0009 DEFAULT). The helper headers
+  // shape mirrors what the typed-client wrapper produces in production.
+  const ifMatchHeaders = (cookie: string, version = 1): Record<string, string> => ({
+    'content-type': 'application/json',
+    'x-requested-with': 'jhsc-web',
+    'if-match': `"${version}"`,
+    cookie,
+  });
+
   it('transitions open -> assessing and emits hazard.status_changed', async () => {
     const { cookie } = await loginAsRep();
     const id = await createHazard(cookie);
     const res = await app.request(`/api/hazards/${id}/status`, {
       method: 'PATCH',
-      headers: { 'content-type': 'application/json', 'x-requested-with': 'jhsc-web', cookie },
+      headers: ifMatchHeaders(cookie),
       body: JSON.stringify({ toStatus: 'assessing' }),
     });
     expect(res.status).toBe(200);
-    const body = (await res.json()) as { status: string; allowedTransitions: string[] };
+    const body = (await res.json()) as {
+      status: string;
+      version: number;
+      allowedTransitions: string[];
+    };
     expect(body.status).toBe('assessing');
+    // version bumped from 1 -> 2.
+    expect(body.version).toBe(2);
     expect(body.allowedTransitions).toEqual(['open', 'assigned', 'withdrawn']);
 
     const db = getDb();
@@ -237,7 +253,7 @@ describe.skipIf(SKIP)('PATCH /api/hazards/:id/status', () => {
     const id = await createHazard(cookie);
     const res = await app.request(`/api/hazards/${id}/status`, {
       method: 'PATCH',
-      headers: { 'content-type': 'application/json', 'x-requested-with': 'jhsc-web', cookie },
+      headers: ifMatchHeaders(cookie),
       body: JSON.stringify({ toStatus: 'archived' }),
     });
     expect(res.status).toBe(422);
@@ -252,7 +268,7 @@ describe.skipIf(SKIP)('PATCH /api/hazards/:id/status', () => {
     const id = await createHazard(cookie);
     const res = await app.request(`/api/hazards/${id}/status`, {
       method: 'PATCH',
-      headers: { 'content-type': 'application/json', 'x-requested-with': 'jhsc-web', cookie },
+      headers: ifMatchHeaders(cookie),
       body: JSON.stringify({ toStatus: 'withdrawn', reason: 'duplicate of H-002' }),
     });
     expect(res.status).toBe(401);
@@ -269,9 +285,159 @@ describe.skipIf(SKIP)('PATCH /api/hazards/:id/status', () => {
     const { cookie } = await loginAsRep();
     const res = await app.request('/api/hazards/00000000-0000-0000-0000-000000000000/status', {
       method: 'PATCH',
-      headers: { 'content-type': 'application/json', 'x-requested-with': 'jhsc-web', cookie },
+      headers: ifMatchHeaders(cookie),
       body: JSON.stringify({ toStatus: 'assessing' }),
     });
     expect(res.status).toBe(404);
+  });
+
+  // 1.10 S2 (ADR-0009 §3.7): If-Match etag ratchet.
+  it('returns 428 precondition_required when If-Match is absent', async () => {
+    const { cookie } = await loginAsRep();
+    const id = await createHazard(cookie);
+    const res = await app.request(`/api/hazards/${id}/status`, {
+      method: 'PATCH',
+      headers: { 'content-type': 'application/json', 'x-requested-with': 'jhsc-web', cookie },
+      body: JSON.stringify({ toStatus: 'assessing' }),
+    });
+    expect(res.status).toBe(428);
+    const body = (await res.json()) as { error: string };
+    expect(body.error).toBe('precondition_required');
+  });
+
+  it('returns 409 version_conflict when If-Match is stale', async () => {
+    const { cookie } = await loginAsRep();
+    const id = await createHazard(cookie);
+    // First PATCH succeeds and bumps version 1 -> 2.
+    const first = await app.request(`/api/hazards/${id}/status`, {
+      method: 'PATCH',
+      headers: ifMatchHeaders(cookie, 1),
+      body: JSON.stringify({ toStatus: 'assessing' }),
+    });
+    expect(first.status).toBe(200);
+    // Second PATCH with stale If-Match: 1 returns 409 with the
+    // canonical serverState body so the conflict UI can render the
+    // three-way merge.
+    const second = await app.request(`/api/hazards/${id}/status`, {
+      method: 'PATCH',
+      headers: ifMatchHeaders(cookie, 1),
+      body: JSON.stringify({ toStatus: 'assigned' }),
+    });
+    expect(second.status).toBe(409);
+    const body = await res2body(second);
+    expect(body.error).toBe('version_conflict');
+    expect(body.currentVersion).toBe(2);
+    expect(body.serverState).toMatchObject({ id, status: 'assessing', version: 2 });
+  });
+
+  it('accepts an unquoted If-Match integer as a defensive client compatibility surface', async () => {
+    const { cookie } = await loginAsRep();
+    const id = await createHazard(cookie);
+    const res = await app.request(`/api/hazards/${id}/status`, {
+      method: 'PATCH',
+      headers: {
+        'content-type': 'application/json',
+        'x-requested-with': 'jhsc-web',
+        cookie,
+        'if-match': '1',
+      },
+      body: JSON.stringify({ toStatus: 'assessing' }),
+    });
+    expect(res.status).toBe(200);
+  });
+
+  it('rejects weak etags (W/"1") with 428', async () => {
+    const { cookie } = await loginAsRep();
+    const id = await createHazard(cookie);
+    const res = await app.request(`/api/hazards/${id}/status`, {
+      method: 'PATCH',
+      headers: {
+        'content-type': 'application/json',
+        'x-requested-with': 'jhsc-web',
+        cookie,
+        'if-match': 'W/"1"',
+      },
+      body: JSON.stringify({ toStatus: 'assessing' }),
+    });
+    expect(res.status).toBe(428);
+  });
+});
+
+// Helper to read a 409 body shape.
+async function res2body(res: Response): Promise<{
+  error: string;
+  currentVersion: number;
+  serverState: { id: string; status: string; version: number };
+}> {
+  return (await res.json()) as {
+    error: string;
+    currentVersion: number;
+    serverState: { id: string; status: string; version: number };
+  };
+}
+
+// ---------------------------------------------------------------------------
+// 1.10 (ADR-0009 §3.3): clientId ratchet — the row's id is the canonical
+// _local_id from the rep's device. Same-clientId + same-actor returns 200
+// with the same row (queue retry / two-device race). Same-clientId +
+// different payload but same-actor returns 200 because the existing row
+// still belongs to the actor (S2's If-Match etag is the source of truth
+// for PATCH-level conflicts; the ratchet itself is content-blind).
+// Cross-actor reuse returns 409 client_id_conflict.
+// ---------------------------------------------------------------------------
+
+describe.skipIf(SKIP)('POST /api/hazards — clientId idempotency (1.10 S1)', () => {
+  const CLIENT_ID = '11111111-1111-4111-8111-111111111111';
+  const basePayload = {
+    title: 'WBV exposure',
+    description: 'Long-form WBV exposure description for the dock cycle.',
+    severity: 'high' as const,
+    jurisdiction: 'ON' as const,
+  };
+
+  it('first POST with clientId returns 200 and uses clientId as the row id', async () => {
+    const { cookie } = await loginAsRep();
+    const res = await app.request('/api/hazards', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-requested-with': 'jhsc-web', cookie },
+      body: JSON.stringify({ ...basePayload, clientId: CLIENT_ID }),
+    });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { id: string; hazardCode: string };
+    expect(body.id).toBe(CLIENT_ID);
+    expect(body.hazardCode).toBe('H-001');
+  });
+
+  it('second POST with same clientId + same payload returns 200 with the existing row id', async () => {
+    const { cookie } = await loginAsRep();
+    await app.request('/api/hazards', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-requested-with': 'jhsc-web', cookie },
+      body: JSON.stringify({ ...basePayload, clientId: CLIENT_ID }),
+    });
+    const res = await app.request('/api/hazards', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-requested-with': 'jhsc-web', cookie },
+      body: JSON.stringify({ ...basePayload, clientId: CLIENT_ID }),
+    });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { id: string; hazardCode: string };
+    expect(body.id).toBe(CLIENT_ID);
+    // The sequence didn't advance — only one hazard row exists.
+    expect(body.hazardCode).toBe('H-001');
+  });
+
+  it('absent clientId falls back to gen_random_uuid() default', async () => {
+    const { cookie } = await loginAsRep();
+    const res = await app.request('/api/hazards', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-requested-with': 'jhsc-web', cookie },
+      body: JSON.stringify(basePayload),
+    });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { id: string };
+    // UUID v4 from gen_random_uuid().
+    expect(body.id).toMatch(/^[0-9a-f-]{36}$/);
+    expect(body.id).not.toBe(CLIENT_ID);
   });
 });
