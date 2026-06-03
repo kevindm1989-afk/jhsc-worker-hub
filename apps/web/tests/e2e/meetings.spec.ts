@@ -376,10 +376,13 @@ test.describe('meeting lifecycle — create → attend → note → adjourn → 
     expect(serialised).not.toContain('Test Co-Chair');
 
     // 7. Append section notes on the first section.
-    // Reload to surface the attendance row, then open the first section
-    // and tap "Add notes".
+    // Reload to surface the attendance row. The detail view auto-expands
+    // the section pointed to by currentSectionId (sections[0], i.e.
+    // call_to_order in the stub), so "Add notes" is already reachable
+    // without an extra toggle click — tapping the accordion header here
+    // would COLLAPSE the section and hide the button.
     await page.reload();
-    await page.getByRole('button', { name: /Call to order/i }).click();
+    await expect(page.getByRole('button', { name: /Call to order/i })).toBeVisible();
     await page.getByRole('button', { name: /Add notes/i }).click();
     await expect(page.getByRole('dialog', { name: /Section notes/ })).toBeVisible();
     await page
