@@ -11,6 +11,7 @@
 //   DATABASE_URL=... bun run scripts/audit-log-verify.ts --check-backfill
 //   DATABASE_URL=... bun run scripts/audit-log-verify.ts --check-evidence
 //   DATABASE_URL=... bun run scripts/audit-log-verify.ts --check-sync
+//   DATABASE_URL=... bun run scripts/audit-log-verify.ts --check-meetings
 //   DATABASE_URL=... bun run scripts/audit-log-verify.ts --full
 //   DATABASE_URL=... bun run scripts/audit-log-verify.ts --full --since=2026-01-01T00:00:00Z
 //   DATABASE_URL=... bun run scripts/audit-log-verify.ts --full --report=json
@@ -277,6 +278,188 @@ async function checkSyncIdempotency(
   return { ok: false, anomalies, rowsChecked: rows.length };
 }
 
+// ---------------------------------------------------------------------------
+// --check-meetings forward defense (Milestone 2.1 S2, ADR-0012 §3.10)
+// ---------------------------------------------------------------------------
+//
+// Walks every `meeting.*` chain event and asserts:
+//
+//   1. Every `meeting.finalized` event has all 4 required
+//      `meeting.signed` events UPSTREAM with the required role coverage
+//      (worker_co_chair + mgmt_co_chair + mgmt_external_1 +
+//      mgmt_external_2). T-ML4 (4-sig bypass) close-out.
+//
+//   2. Every `meeting.adjourned` event has at least one
+//      `meeting.created` event upstream (referencing the same
+//      meetingId) AND a structurally valid metrics dict. T-ML16
+//      (replay) + T-ML9 (PI leak) close-out.
+//
+//   3. Every `meeting.recommendation_drafted` event's
+//      `recommendationCreatedEventHash` matches the `this_hash` of an
+//      upstream `recommendation.drafted` event for the same
+//      recommendationId. TM-fold-3 / T-ML42 cross-chain anchor
+//      integrity.
+//
+// Anomalies are aggregated and reported one per offending event.
+
+interface MeetingChainRow {
+  idx: number;
+  kind: string;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  payload: any;
+  this_hash: Uint8Array | Buffer;
+}
+
+interface MeetingAnomaly {
+  readonly idx: number;
+  readonly kind: string;
+  readonly reason:
+    | 'finalized_missing_signatures'
+    | 'finalized_signatures_wrong_count'
+    | 'adjourned_no_upstream_create'
+    | 'adjourned_metrics_malformed'
+    | 'recommendation_drafted_hash_missing'
+    | 'recommendation_drafted_hash_mismatch';
+  readonly detail: string;
+}
+
+const REQUIRED_SIGNER_ROLES = [
+  'worker_co_chair',
+  'mgmt_co_chair',
+  'mgmt_external_1',
+  'mgmt_external_2',
+] as const;
+
+function checkMeetingChain(
+  rows: ReadonlyArray<MeetingChainRow>,
+):
+  | { ok: true; checked: number }
+  | { ok: false; anomalies: ReadonlyArray<MeetingAnomaly>; checked: number } {
+  const meetingEvents = rows.filter((r) => r.kind.startsWith('meeting.'));
+  const recommendationDraftedEvents = rows.filter((r) => r.kind === 'recommendation.drafted');
+
+  // Index recommendation.drafted by recommendationId for O(1) lookup.
+  const recDraftedByRecId = new Map<string, MeetingChainRow>();
+  for (const r of recommendationDraftedEvents) {
+    const recId = r.payload?.recommendationId;
+    if (typeof recId === 'string') recDraftedByRecId.set(recId, r);
+  }
+
+  // Group meeting events by meetingId.
+  const byMeetingId = new Map<string, MeetingChainRow[]>();
+  for (const e of meetingEvents) {
+    const mid = e.payload?.meetingId;
+    if (typeof mid !== 'string') continue;
+    const list = byMeetingId.get(mid) ?? [];
+    list.push(e);
+    byMeetingId.set(mid, list);
+  }
+
+  const anomalies: MeetingAnomaly[] = [];
+
+  for (const e of meetingEvents) {
+    const mid = e.payload?.meetingId;
+    if (typeof mid !== 'string') continue;
+    const peers = byMeetingId.get(mid) ?? [];
+
+    if (e.kind === 'meeting.finalized') {
+      // Gate 1: 4 meeting.signed events upstream of this finalized event
+      // covering all 4 required roles.
+      const sigsUpstream = peers.filter((p) => p.kind === 'meeting.signed' && p.idx < e.idx);
+      if (sigsUpstream.length !== 4) {
+        anomalies.push({
+          idx: e.idx,
+          kind: e.kind,
+          reason: 'finalized_signatures_wrong_count',
+          detail: `expected 4 meeting.signed events; found ${sigsUpstream.length}`,
+        });
+        continue;
+      }
+      const roles = new Set(sigsUpstream.map((s) => s.payload?.signerRole));
+      const missing = REQUIRED_SIGNER_ROLES.filter((r) => !roles.has(r));
+      if (missing.length > 0) {
+        anomalies.push({
+          idx: e.idx,
+          kind: e.kind,
+          reason: 'finalized_missing_signatures',
+          detail: `missing signer roles: ${missing.join(', ')}`,
+        });
+      }
+    } else if (e.kind === 'meeting.adjourned') {
+      // Gate 2: a meeting.created event upstream.
+      const created = peers.find((p) => p.kind === 'meeting.created' && p.idx < e.idx);
+      if (!created) {
+        anomalies.push({
+          idx: e.idx,
+          kind: e.kind,
+          reason: 'adjourned_no_upstream_create',
+          detail: 'no meeting.created event found upstream of this meeting.adjourned',
+        });
+      }
+      // Structural metrics dict check (PI-free shape).
+      const m = e.payload?.metrics;
+      const metricsOk =
+        m &&
+        typeof m === 'object' &&
+        typeof m.durationSeconds === 'number' &&
+        typeof m.itemsRaised === 'number' &&
+        typeof m.itemsClosed === 'number' &&
+        typeof m.recommendationsDrafted === 'number' &&
+        typeof m.inspectionsReviewed === 'number' &&
+        m.quorumCompliance &&
+        typeof m.quorumCompliance.metAtCallToOrder === 'boolean' &&
+        typeof m.quorumCompliance.ruleCitation === 'string';
+      if (!metricsOk) {
+        anomalies.push({
+          idx: e.idx,
+          kind: e.kind,
+          reason: 'adjourned_metrics_malformed',
+          detail: 'metrics dict missing required structural fields',
+        });
+      }
+    } else if (e.kind === 'meeting.recommendation_drafted') {
+      // Gate 3: cross-chain anchor hash match (TM-fold-3 / T-ML42).
+      const recId = e.payload?.recommendationId;
+      const claimedHash = e.payload?.recommendationCreatedEventHash;
+      if (typeof recId !== 'string' || typeof claimedHash !== 'string') {
+        anomalies.push({
+          idx: e.idx,
+          kind: e.kind,
+          reason: 'recommendation_drafted_hash_missing',
+          detail: 'recommendationId or recommendationCreatedEventHash missing from payload',
+        });
+        continue;
+      }
+      const recDrafted = recDraftedByRecId.get(recId);
+      if (!recDrafted) {
+        anomalies.push({
+          idx: e.idx,
+          kind: e.kind,
+          reason: 'recommendation_drafted_hash_missing',
+          detail: `no upstream recommendation.drafted event for recommendationId=${recId}`,
+        });
+        continue;
+      }
+      const actualHash = Buffer.from(recDrafted.this_hash).toString('hex');
+      if (actualHash !== claimedHash) {
+        anomalies.push({
+          idx: e.idx,
+          kind: e.kind,
+          reason: 'recommendation_drafted_hash_mismatch',
+          detail: `payload hash=${claimedHash} does not match recommendation.drafted hash=${actualHash}`,
+        });
+      }
+    }
+  }
+
+  if (anomalies.length === 0) {
+    return { ok: true, checked: meetingEvents.length };
+  }
+  return { ok: false, anomalies, checked: meetingEvents.length };
+}
+
+export const _internals = { checkMeetingChain };
+
 /**
  * Fetch the audit_log rows in idx-ASC order, optionally bounded by
  * `ts >= sinceIso`. Returns the rows in the in-memory `AuditRow` shape
@@ -334,6 +517,7 @@ async function main(): Promise<void> {
   const checkBackfill = process.argv.includes('--check-backfill');
   const checkEvidence = process.argv.includes('--check-evidence');
   const checkSync = process.argv.includes('--check-sync');
+  const checkMeetings = process.argv.includes('--check-meetings');
   const fullArgs = parseFullArgs(process.argv);
 
   const db = getDb();
@@ -432,6 +616,55 @@ async function main(): Promise<void> {
     }
   }
 
+  if (checkMeetings) {
+    const meetingRows = (await db.execute(sql`
+      SELECT idx, kind, payload, this_hash
+      FROM audit_log
+      WHERE kind LIKE 'meeting.%' OR kind = 'recommendation.drafted'
+      ORDER BY idx ASC
+    `)) as unknown as Array<{
+      idx: number | string;
+      kind: string;
+      payload: unknown;
+      this_hash: Uint8Array | Buffer;
+    }>;
+    const meetingsCheck = checkMeetingChain(
+      meetingRows.map((r) => ({
+        idx: Number(r.idx),
+        kind: r.kind,
+        payload: r.payload,
+        this_hash: r.this_hash,
+      })),
+    );
+    if (!meetingsCheck.ok) {
+      if (quiet) {
+        for (const a of meetingsCheck.anomalies) {
+          process.stdout.write(
+            `audit-log-verify MEETING_ANOMALY idx=${a.idx} kind=${a.kind} reason=${a.reason}\n`,
+          );
+        }
+      } else {
+        process.stderr.write(
+          `audit-log-verify FAIL (meeting lifecycle forward defense)\n  rows checked:  ${meetingsCheck.checked}\n  anomalies:     ${meetingsCheck.anomalies.length}\n`,
+        );
+        for (const a of meetingsCheck.anomalies) {
+          process.stderr.write(
+            `    - idx=${a.idx} kind='${a.kind}' reason=${a.reason} (${a.detail})\n`,
+          );
+        }
+        process.stderr.write(
+          '\nReason codes:\n  finalized_signatures_wrong_count   — meeting.finalized requires 4 meeting.signed upstream (ADR-0012 §3.9).\n  finalized_missing_signatures       — required signer roles missing.\n  adjourned_no_upstream_create       — meeting.adjourned lacks the meeting.created anchor.\n  adjourned_metrics_malformed        — metrics dict missing required PI-free fields.\n  recommendation_drafted_hash_*      — TM-fold-3 cross-chain anchor integrity broken.\n',
+        );
+      }
+      process.exit(1);
+    }
+    if (!quiet) {
+      process.stdout.write(
+        `audit-log-verify meeting forward defense: ${meetingsCheck.checked} meeting.* chain row(s) checked, no anomalies found.\n`,
+      );
+    }
+  }
+
   if (checkBackfill) {
     const backfill = await checkBackfillAnchor(db);
     if (!backfill.ok) {
@@ -471,9 +704,18 @@ async function main(): Promise<void> {
   process.exit(0);
 }
 
-main().catch((e: unknown) => {
-  process.stderr.write(
-    `audit-log-verify operational error: ${e instanceof Error ? e.message : String(e)}\n`,
-  );
-  process.exit(2);
-});
+// Only run main() when invoked as a script (not when imported by tests).
+// Importing the module for its `_internals` export must not trigger the
+// process.exit(2) / DATABASE_URL operational path.
+const invokedAsScript =
+  typeof process !== 'undefined' &&
+  process.argv[1] !== undefined &&
+  /audit-log-verify(\.ts|\.js)?$/.test(process.argv[1]);
+if (invokedAsScript) {
+  main().catch((e: unknown) => {
+    process.stderr.write(
+      `audit-log-verify operational error: ${e instanceof Error ? e.message : String(e)}\n`,
+    );
+    process.exit(2);
+  });
+}

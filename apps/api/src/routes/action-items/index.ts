@@ -54,6 +54,7 @@ import {
 import { idempotencyKey } from '../../middleware/idempotency';
 import { readIfMatchOr428, versionConflictBody } from '../../middleware/if-match';
 import { rateLimit } from '../../middleware/rate-limit';
+import { writeLiveActionItemSnapshot } from '../meetings';
 
 export const actionItemsRoute = new Hono();
 
@@ -101,6 +102,11 @@ const createBody = z
     sourceType: z.enum(actionItemSourceType).optional(),
     sourceId: z.string().uuid().optional(),
     tags: z.array(z.string().min(1).max(40)).max(20).optional(),
+    // 2.1 (ADR-0012 §3.2): meeting provenance. firstRaisedMeetingId is
+    // immutable (set-on-create only); meetingId is mutable operational
+    // context that drives `live` snapshot writes on PATCH.
+    firstRaisedMeetingId: z.string().uuid().optional(),
+    meetingId: z.string().uuid().optional(),
   })
   .strict()
   .refine((b) => b.type !== 'OTHER' || !!b.typeSubtype, {
@@ -176,6 +182,12 @@ const patchBody = z
     typeSubtype: z.string().max(64).nullable().optional(),
     followUpOwner: z.string().max(200).nullable().optional(),
     followUpOwnerUserId: z.string().uuid().nullable().optional(),
+    // 2.1 (ADR-0012 §3.2 Layer 2): mutable meetingId. When set and the
+    // meeting is in_progress, PATCH triggers a `live`
+    // meeting_action_item_state snapshot row alongside the column write.
+    // firstRaisedMeetingId is intentionally NOT here — provenance is
+    // immutable post-create.
+    meetingId: z.string().uuid().nullable().optional(),
   })
   .strict();
 
@@ -268,7 +280,8 @@ actionItemsRoute.post('/', async (c) => {
             follow_up_owner_ct, follow_up_owner_dek_ct, follow_up_owner_user_id,
             department, status, risk, section,
             start_date, target_date,
-            source_type, source_id, tags
+            source_type, source_id, tags,
+            first_raised_meeting_id, meeting_id
           )
           VALUES (
             ${body.clientId}, ${sequenceNumber}, ${body.type}, ${body.typeSubtype ?? null},
@@ -285,7 +298,8 @@ actionItemsRoute.post('/', async (c) => {
             ${body.department ?? null}, ${body.status}, ${body.risk}, ${body.section},
             ${body.startDate}, ${body.targetDate ?? null},
             ${body.sourceType ?? 'manual'}, ${body.sourceId ?? null},
-            ${body.tags ?? []}::text[]
+            ${body.tags ?? []}::text[],
+            ${body.firstRaisedMeetingId ?? null}, ${body.meetingId ?? null}
           )
           RETURNING id, sequence_number, status, section, start_date::text AS start_date, created_at
         `)) as unknown as Array<{
@@ -305,7 +319,8 @@ actionItemsRoute.post('/', async (c) => {
             follow_up_owner_ct, follow_up_owner_dek_ct, follow_up_owner_user_id,
             department, status, risk, section,
             start_date, target_date,
-            source_type, source_id, tags
+            source_type, source_id, tags,
+            first_raised_meeting_id, meeting_id
           )
           VALUES (
             ${sequenceNumber}, ${body.type}, ${body.typeSubtype ?? null},
@@ -322,7 +337,8 @@ actionItemsRoute.post('/', async (c) => {
             ${body.department ?? null}, ${body.status}, ${body.risk}, ${body.section},
             ${body.startDate}, ${body.targetDate ?? null},
             ${body.sourceType ?? 'manual'}, ${body.sourceId ?? null},
-            ${body.tags ?? []}::text[]
+            ${body.tags ?? []}::text[],
+            ${body.firstRaisedMeetingId ?? null}, ${body.meetingId ?? null}
           )
           RETURNING id, sequence_number, status, section, start_date::text AS start_date, created_at
         `)) as unknown as Array<{
@@ -354,6 +370,22 @@ actionItemsRoute.post('/', async (c) => {
       )
       VALUES (${row.id}, ${auth.userId}, NULL, ${body.section}, ${chainRow.idx})
     `);
+
+    // 2.1 (ADR-0012 §3.2 Layer 3): when this action item is being created
+    // in the context of an in-progress meeting, drop a `live` snapshot
+    // row. The follow_up_owner ciphertext doubles as the assignee
+    // ciphertext for the snapshot (CLAUDE.md taxonomy maps the two).
+    if (body.meetingId) {
+      await writeLiveActionItemSnapshot(tx, {
+        actorId: auth.userId,
+        meetingId: body.meetingId,
+        actionItemId: row.id,
+        status: row.status,
+        section: row.section,
+        assigneeCt: followUpSealed?.ct ?? null,
+        assigneeDekCt: followUpSealed?.dekCt ?? null,
+      });
+    }
 
     return row;
   });
@@ -749,6 +781,16 @@ actionItemsRoute.patch('/:id', async (c) => {
     },
   ];
 
+  // 2.1 (ADR-0012 §3.2 Layer 2): mutable meetingId is handled OUTSIDE
+  // the audit allow-list because it's pure operational context (the
+  // `meeting.action_item_snapshot` chain anchor is the audit-of-record
+  // — see writeLiveActionItemSnapshot below). The column WRITE happens
+  // post-tx-start; the snapshot chain row carries the structural
+  // semantics. This keeps `action_item.updated` payloads PI-free
+  // without churning the ActionItemUpdateField allow-list.
+  const meetingIdSetParts: SQL[] =
+    body.meetingId !== undefined ? [sql`meeting_id = ${body.meetingId}`] : [];
+
   const changedFields: ActionItemUpdateField[] = [];
   const setParts: SQL[] = [];
   for (const entry of PATCH_TABLE) {
@@ -756,7 +798,12 @@ actionItemsRoute.patch('/:id', async (c) => {
     if (!changedFields.includes(entry.field)) changedFields.push(entry.field);
     for (const p of entry.setParts) setParts.push(p);
   }
-  if (changedFields.length === 0) {
+  // The meetingId tail counts as a mutation (writes meeting_id +
+  // triggers the snapshot path) but does NOT appear in changedFields
+  // because it is not in the audit allow-list. Track it as a separate
+  // flag so the "no_changes" gate honors both kinds of mutation.
+  const hasMutation = changedFields.length > 0 || meetingIdSetParts.length > 0;
+  if (!hasMutation) {
     return c.json({ error: 'no_changes' }, 400);
   }
   // Defence-in-depth: the field names in PATCH_TABLE are typed against
@@ -768,12 +815,24 @@ actionItemsRoute.patch('/:id', async (c) => {
     }
   }
 
+  const allSetParts: SQL[] = [...setParts, ...meetingIdSetParts];
+
   let newVersion = 0;
   try {
     await db.transaction(async (tx) => {
       const peek = (await tx.execute(sql`
-      SELECT id, version FROM action_items WHERE id = ${idParsed.data} FOR UPDATE
-    `)) as unknown as Array<{ id: string; version: number }>;
+      SELECT id, version, status, section, follow_up_owner_ct, follow_up_owner_dek_ct,
+             meeting_id
+      FROM action_items WHERE id = ${idParsed.data} FOR UPDATE
+    `)) as unknown as Array<{
+        id: string;
+        version: number;
+        status: string;
+        section: string;
+        follow_up_owner_ct: Uint8Array | null;
+        follow_up_owner_dek_ct: Uint8Array | null;
+        meeting_id: string | null;
+      }>;
       if (peek.length === 0) {
         throw new ActionItemWriteAborted({ status: 404, body: { error: 'not_found' } });
       }
@@ -802,19 +861,60 @@ actionItemsRoute.patch('/:id', async (c) => {
       }
       newVersion = peek[0]!.version + 1;
       await tx.execute(sql`
-        UPDATE action_items SET ${sql.join(setParts, sql`, `)}, version = ${newVersion} WHERE id = ${idParsed.data}
+        UPDATE action_items SET ${sql.join(allSetParts, sql`, `)}, version = ${newVersion} WHERE id = ${idParsed.data}
       `);
 
-      await append(tx, {
-        actorId: auth.userId,
-        payload: {
-          kind: 'action_item.updated',
-          itemId: idParsed.data,
-          changedFields,
-        },
-        resourceType: 'action_items',
-        resourceId: idParsed.data,
-      });
+      if (changedFields.length > 0) {
+        await append(tx, {
+          actorId: auth.userId,
+          payload: {
+            kind: 'action_item.updated',
+            itemId: idParsed.data,
+            changedFields,
+          },
+          resourceType: 'action_items',
+          resourceId: idParsed.data,
+        });
+      }
+
+      // 2.1 (ADR-0012 §3.2 Layer 3): if the row (after the PATCH) has a
+      // meeting_id pointing at an in_progress meeting, drop a `live`
+      // snapshot capturing the post-PATCH state. The check is read-after-
+      // write so a PATCH that just set meeting_id snapshots immediately;
+      // a PATCH that only changed status on an already-meeting-bound row
+      // also snapshots.
+      const effectiveMeetingId =
+        body.meetingId !== undefined ? body.meetingId : peek[0]!.meeting_id;
+      const effectiveStatus = body.status ?? peek[0]!.status;
+      // Section is not patchable through this handler (lives in
+      // /moves), so always read from the row.
+      const effectiveSection = peek[0]!.section;
+      // Recompute the assignee envelope: if the PATCH touched
+      // followUpOwner, use the new sealed value; otherwise reuse the
+      // existing row's ciphertext.
+      const assigneeCt =
+        body.followUpOwner !== undefined
+          ? (followUpSealed?.ct ?? null)
+          : peek[0]!.follow_up_owner_ct
+            ? Uint8Array.from(peek[0]!.follow_up_owner_ct)
+            : null;
+      const assigneeDekCt =
+        body.followUpOwner !== undefined
+          ? (followUpSealed?.dekCt ?? null)
+          : peek[0]!.follow_up_owner_dek_ct
+            ? Uint8Array.from(peek[0]!.follow_up_owner_dek_ct)
+            : null;
+      if (effectiveMeetingId) {
+        await writeLiveActionItemSnapshot(tx, {
+          actorId: auth.userId,
+          meetingId: effectiveMeetingId,
+          actionItemId: idParsed.data,
+          status: effectiveStatus,
+          section: effectiveSection,
+          assigneeCt,
+          assigneeDekCt,
+        });
+      }
     });
   } catch (err) {
     if (err instanceof ActionItemWriteAborted) {

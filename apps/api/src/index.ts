@@ -9,6 +9,7 @@ import { hazardsRoute } from './routes/hazards';
 import { healthRoute } from './routes/health';
 import { inspectionsRoute, inspectionTemplatesRoute } from './routes/inspections';
 import { legalRoute } from './routes/legal';
+import { meetingsRoute } from './routes/meetings';
 import { recommendationsRoute } from './routes/recommendations';
 import { workplaceRoute } from './routes/workplace';
 
@@ -30,6 +31,7 @@ app.route('/api/evidence', evidenceRoute);
 app.route('/api/inspection-templates', inspectionTemplatesRoute);
 app.route('/api/inspections', inspectionsRoute);
 app.route('/api/recommendations', recommendationsRoute);
+app.route('/api/meetings', meetingsRoute);
 app.route('/api/excel-imports', excelImportsRoute);
 
 // Bun picks up the default export and calls Bun.serve under the hood. Tests
