@@ -5,6 +5,21 @@
 // - Discriminated unions for fallible operations and for audit payloads
 //   so the typechecker rejects PI fields at every call site.
 
+// Re-export meeting-lifecycle enums + Zod schemas (2.1, ADR-0012).
+// Kept in a sibling module so the surface stays browsable; importers
+// can write `import { meetingStatusSchema } from '@jhsc/shared-types'`.
+export * from './meeting';
+import type {
+  MeetingAttendanceParty,
+  MeetingAttendanceRole,
+  MeetingPresentStatus,
+  MeetingSectionType,
+  MeetingSectionVisibility,
+  MeetingSignedMethod,
+  MeetingSignerRole,
+  MeetingSnapshotKind,
+} from './meeting';
+
 // ---------------------------------------------------------------------------
 // Result<T, E> — fallible operations
 // ---------------------------------------------------------------------------
@@ -125,6 +140,24 @@ export type AuditEventKind =
   | 'excel_import.uploaded'
   | 'excel_import.committed'
   | 'excel_import.reversed'
+  // Meeting lifecycle (Milestone 2.1, ADR-0012 §3.10). PI-clean per
+  // the T-AC9-class invariant — never names, never note plaintexts,
+  // never description plaintexts. IDs + counts + hashes only.
+  // The `meeting.recommendation_drafted` kind is the TM-fold-3 cross-
+  // chain anchor (T-ML42) — emitted when a recommendation is drafted
+  // INSIDE a meeting, carrying the existing 1.9 recommendation.created
+  // event's hash so the two chains compose.
+  | 'meeting.created'
+  | 'meeting.section.added'
+  | 'meeting.section.started'
+  | 'meeting.section.ended'
+  | 'meeting.section.notes_appended'
+  | 'meeting.attendance.recorded'
+  | 'meeting.adjourned'
+  | 'meeting.signed'
+  | 'meeting.finalized'
+  | 'meeting.action_item_snapshot'
+  | 'meeting.recommendation_drafted'
   | AuthEventKind;
 
 // ---------------------------------------------------------------------------
@@ -715,6 +748,133 @@ export type AuditPayload =
       readonly deletedCount: number;
       readonly revertedCount: number;
       readonly refusedCount: number;
+    }
+  // ---------------------------------------------------------------------
+  // Meeting lifecycle (2.1, ADR-0012 §3.10)
+  //
+  // PI-clean per T-AC9 — every kind below carries ONLY:
+  //   - resource ids (uuid)
+  //   - enum-valued discriminators (MeetingStatus, MeetingSectionType,
+  //     MeetingSignedMethod, MeetingSignerRole, MeetingReviewOutcome,
+  //     MeetingSnapshotKind, MeetingAttendanceRole, MeetingAttendanceParty,
+  //     MeetingPresentStatus, RecommendationJurisdiction)
+  //   - counts + durations (integers)
+  //   - hashes (hex SHA-256 strings)
+  //   - timestamps (ISO 8601 strings)
+  //
+  // NEVER: attendee names, signer names, note plaintexts, ciphertext
+  // bytes. The discriminated-union typechecker is the gate.
+  // ---------------------------------------------------------------------
+  | {
+      readonly kind: 'meeting.created';
+      readonly meetingId: string;
+      readonly agendaTemplateVersion: number;
+      readonly scheduledStartAt: string;
+      readonly jurisdiction: 'ON' | 'CA-FED';
+    }
+  | {
+      readonly kind: 'meeting.section.added';
+      readonly meetingId: string;
+      readonly sectionId: string;
+      readonly sectionType: MeetingSectionType;
+      readonly orderIdx: number;
+      readonly visibility: MeetingSectionVisibility;
+    }
+  | {
+      readonly kind: 'meeting.section.started';
+      readonly meetingId: string;
+      readonly sectionId: string;
+      readonly startedAt: string;
+    }
+  | {
+      readonly kind: 'meeting.section.ended';
+      readonly meetingId: string;
+      readonly sectionId: string;
+      readonly endedAt: string;
+      readonly durationSeconds: number;
+    }
+  | {
+      // Notes plaintext is NEVER in the payload. notesHash is sha256 of
+      // the encrypted envelope bytes; a re-edit produces a new hash.
+      readonly kind: 'meeting.section.notes_appended';
+      readonly meetingId: string;
+      readonly sectionId: string;
+      readonly notesHash: string;
+    }
+  | {
+      // Attendee name is NEVER in the payload. nameHash is a sha256 of
+      // the encrypted envelope bytes — a verifier can match against the
+      // row's ciphertext but cannot recover the name.
+      readonly kind: 'meeting.attendance.recorded';
+      readonly meetingId: string;
+      readonly attendanceId: string;
+      readonly role: MeetingAttendanceRole;
+      readonly party: MeetingAttendanceParty;
+      readonly presentStatus: MeetingPresentStatus;
+      readonly nameHash: string;
+    }
+  | {
+      // The adjournment metrics blob is the ONE chain payload that
+      // carries a structured dict (per ADR §3.8). Still PI-clean —
+      // ids + counts + intervals.
+      readonly kind: 'meeting.adjourned';
+      readonly meetingId: string;
+      readonly adjournedAt: string;
+      readonly metrics: {
+        readonly durationSeconds: number;
+        readonly itemsRaised: number;
+        readonly itemsClosed: number;
+        readonly recommendationsDrafted: number;
+        readonly inspectionsReviewed: number;
+        readonly quorumCompliance: {
+          readonly metAtCallToOrder: boolean;
+          readonly ruleCitation: string;
+        };
+      };
+    }
+  | {
+      // Signer name is NEVER in the payload. evidenceHash is the
+      // sha256 of the off-app evidence ciphertext bytes (NULL for
+      // in_app_passkey); attestationSigHash is the sha256 of the
+      // TM-fold-4 Ed25519 detached signature bytes.
+      readonly kind: 'meeting.signed';
+      readonly meetingId: string;
+      readonly signatureId: string;
+      readonly signerRole: MeetingSignerRole;
+      readonly signedMethod: MeetingSignedMethod;
+      readonly evidenceHash: string | null;
+      readonly attestationSigHash: string;
+    }
+  | {
+      readonly kind: 'meeting.finalized';
+      readonly meetingId: string;
+      readonly finalizedAt: string;
+      readonly signatureIds: ReadonlyArray<string>;
+    }
+  | {
+      // Assignee name is NEVER in the payload. nameHash is the sha256
+      // of the encrypted assignee envelope bytes when present; null
+      // when no assignee snapshot was captured.
+      readonly kind: 'meeting.action_item_snapshot';
+      readonly meetingId: string;
+      readonly actionItemId: string;
+      readonly snapshotKind: MeetingSnapshotKind;
+      readonly snapshotAt: string;
+      readonly status: string;
+      readonly section: string;
+      readonly assigneeNameHash: string | null;
+    }
+  | {
+      // TM-fold-3 cross-chain anchor (T-ML42). Emitted when a
+      // recommendation is drafted INSIDE a meeting. Carries the existing
+      // 1.9 `recommendation.created` event's hash so an offline verifier
+      // can compose the two chains for the meeting-drafted-rec
+      // provenance question.
+      readonly kind: 'meeting.recommendation_drafted';
+      readonly meetingId: string;
+      readonly recommendationId: string;
+      readonly sectionId: string;
+      readonly recommendationCreatedEventHash: string;
     }
   | { readonly kind: 'signup'; readonly via: 'first_run' | 'invite' }
   | { readonly kind: 'login.passkey' }

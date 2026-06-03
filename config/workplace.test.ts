@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { loadWorkplaceConfig, resolveZoneLabel } from './workplace';
+import { assertSignerRolesConfigured, loadWorkplaceConfig, resolveZoneLabel } from './workplace';
 
 describe('loadWorkplaceConfig', () => {
   it('produces 10 stable zone IDs regardless of env', () => {
@@ -42,5 +42,55 @@ describe('loadWorkplaceConfig', () => {
     const zone1 = cfg.zones[0];
     expect(zone1).toBeDefined();
     expect(zone1 ? resolveZoneLabel(zone1) : null).toBe('Zone 1');
+  });
+
+  describe('minutesSignerRoles (2.1, ADR-0012)', () => {
+    it('produces the four generic role ids in fixed order', () => {
+      const cfg = loadWorkplaceConfig({});
+      expect(cfg.minutesSignerRoles.map((r) => r.id)).toEqual([
+        'worker_co_chair',
+        'mgmt_co_chair',
+        'mgmt_external_1',
+        'mgmt_external_2',
+      ]);
+      expect(cfg.minutesSignerRoles.map((r) => r.order)).toEqual([0, 1, 2, 3]);
+    });
+
+    it('reads display labels from env vars per non-negotiable #1', () => {
+      const cfg = loadWorkplaceConfig({
+        MINUTES_SIGNER_WORKER_CO_CHAIR_LABEL: 'Worker Rep',
+        MINUTES_SIGNER_MGMT_CO_CHAIR_LABEL: 'Management Rep',
+        MINUTES_SIGNER_MGMT_EXTERNAL_1_LABEL: 'Plant Manager',
+        MINUTES_SIGNER_MGMT_EXTERNAL_2_LABEL: 'Site Director',
+      });
+      expect(cfg.minutesSignerRoles.map((r) => r.displayLabel)).toEqual([
+        'Worker Rep',
+        'Management Rep',
+        'Plant Manager',
+        'Site Director',
+      ]);
+    });
+
+    it('returns empty displayLabel when env vars are missing (non-API boot path)', () => {
+      const cfg = loadWorkplaceConfig({});
+      for (const role of cfg.minutesSignerRoles) {
+        expect(role.displayLabel).toBe('');
+      }
+    });
+
+    it('assertSignerRolesConfigured throws when env vars are missing', () => {
+      expect(() => assertSignerRolesConfigured({})).toThrow(/MINUTES_SIGNER_WORKER_CO_CHAIR_LABEL/);
+    });
+
+    it('assertSignerRolesConfigured succeeds when all env vars are set', () => {
+      expect(() =>
+        assertSignerRolesConfigured({
+          MINUTES_SIGNER_WORKER_CO_CHAIR_LABEL: 'WCC',
+          MINUTES_SIGNER_MGMT_CO_CHAIR_LABEL: 'MCC',
+          MINUTES_SIGNER_MGMT_EXTERNAL_1_LABEL: 'ME1',
+          MINUTES_SIGNER_MGMT_EXTERNAL_2_LABEL: 'ME2',
+        }),
+      ).not.toThrow();
+    });
   });
 });
