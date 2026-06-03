@@ -122,6 +122,9 @@ export type AuditEventKind =
   | 'recommendation.exported'
   | 'recommendation.export.downloaded'
   | 'audit.workplace_signing_key.seeded'
+  | 'excel_import.uploaded'
+  | 'excel_import.committed'
+  | 'excel_import.reversed'
   | AuthEventKind;
 
 // ---------------------------------------------------------------------------
@@ -459,16 +462,28 @@ export type AuditPayload =
       readonly toStatus: HazardStatus;
     }
   | {
+      // S2 (1.11): ADR-0010 §3.9 additive field. When the action_item
+      // was created by an Excel-import commit transaction, this carries
+      // the import batch id so an auditor can grep the chain for every
+      // action_item created by a given import. Optional — existing 1.6
+      // create paths omit it (the field is absent from the canonical
+      // JSON, which keeps the chain hash stable for pre-S2 rows).
       readonly kind: 'action_item.created';
       readonly itemId: string;
       readonly itemType: ActionItemType;
       readonly section: ActionItemSection;
       readonly risk: ActionItemRisk;
+      readonly createdByImportId?: string;
     }
   | {
+      // S2 (1.11): same additive close-out — an update emitted within
+      // the Excel-import commit transaction carries the import batch
+      // id so an auditor can trace every action_item the import
+      // touched. Optional; absent on non-import-driven updates.
       readonly kind: 'action_item.updated';
       readonly itemId: string;
       readonly changedFields: ReadonlyArray<ActionItemUpdateField>;
+      readonly createdByImportId?: string;
     }
   | {
       readonly kind: 'action_item.moved';
@@ -666,6 +681,41 @@ export type AuditPayload =
       readonly algorithm: WorkplaceSigningKeyAlgorithm;
       readonly publicKeySha256: string;
     }
+  | {
+      // Excel-import lifecycle anchor — emitted on upload-record (the
+      // excel_imports row is created at status='preview'). PI-clean:
+      // hash + counts + schema enum only. The source filename is on
+      // the row encrypted; it never enters the chain payload.
+      readonly kind: 'excel_import.uploaded';
+      readonly importId: string;
+      /** Hex SHA-256 of the raw file bytes. Integrity anchor. */
+      readonly sourceSha256: string;
+      readonly rowCount: number;
+      readonly schemaVersion: ExcelImportSchemaVersion;
+    }
+  | {
+      // Emitted at the commit-transaction end, after all per-row
+      // anchors fired. PI-clean: counts only — no row content, no
+      // action_item ids (the per-row anchors carry those).
+      readonly kind: 'excel_import.committed';
+      readonly importId: string;
+      readonly createdCount: number;
+      readonly updatedCount: number;
+      readonly skippedCount: number;
+      readonly conflictResolvedCount: number;
+    }
+  | {
+      // Emitted at the reverse-transaction end (within 30 days; after
+      // 30 days the operator-script path adds the optional
+      // viaOperatorScript + operatorUserId fields — runbook follow-up).
+      // PI-clean: server timestamp + per-decision counts.
+      readonly kind: 'excel_import.reversed';
+      readonly importId: string;
+      readonly reversedAt: string;
+      readonly deletedCount: number;
+      readonly revertedCount: number;
+      readonly refusedCount: number;
+    }
   | { readonly kind: 'signup'; readonly via: 'first_run' | 'invite' }
   | { readonly kind: 'login.passkey' }
   | { readonly kind: 'login.password' }
@@ -826,6 +876,46 @@ export function computeNextBackoff(attemptCount: number): number | null {
   }
   return SYNC_BACKOFF_SCHEDULE[attemptCount]!;
 }
+
+// ---------------------------------------------------------------------------
+// Excel imports (Milestone 1.11, ADR-0010)
+// ---------------------------------------------------------------------------
+
+/** Lifecycle of an excel_imports row. `pending` is the brief window
+ * between the upload-record POST and the preview-ready event;
+ * `preview` is what the rep sees + edits + (optionally) commits or
+ * cancels. `committed` is terminal-but-reversible-for-30-days;
+ * `cancelled` is terminal. `reversed` is the post-30-day-reverse
+ * terminal state added in S2 (ADR-0010 §3.11) — the original
+ * commit's chain anchors stay in place, the reverse fires its own
+ * `excel_import.reversed` anchor, and the action_items the import
+ * created are soft-deleted via status='Cancelled' + section='archived'
+ * for chain-of-custody preservation.
+ *
+ * The status enum is the structural backstop for the migration 0010
+ * state-consistency CHECK (which additionally couples status to the
+ * *_at timestamps).
+ */
+export const excelImportStatus = [
+  'pending',
+  'preview',
+  'committed',
+  'cancelled',
+  'reversed',
+] as const;
+export type ExcelImportStatus = (typeof excelImportStatus)[number];
+
+/** Per-row reconciliation classification (ADR-0010 §3.6).
+ * `conflict_pending` is the rep-must-resolve state before commit.
+ * After commit the row carries one of created / updated / skipped. */
+export const excelImportItemStatus = ['created', 'updated', 'skipped', 'conflict_pending'] as const;
+export type ExcelImportItemStatus = (typeof excelImportItemStatus)[number];
+
+/** Supported Excel-import schema versions. Only Meeting Minutes v1
+ * ships in 1.11; a future workbook shape lands as a separate
+ * detector module per ADR §3.3 schema-versioning. */
+export const excelImportSchemaVersion = ['meeting_minutes_v1'] as const;
+export type ExcelImportSchemaVersion = (typeof excelImportSchemaVersion)[number];
 
 // ---------------------------------------------------------------------------
 // Typed auth errors — exhaustive (consumed by apps/api routes + apps/web copy)

@@ -3,6 +3,9 @@ import {
   computeNextBackoff,
   computeRecommendationDeadline,
   err,
+  excelImportItemStatus,
+  excelImportSchemaVersion,
+  excelImportStatus,
   inspectionConductState,
   inspectionExportKind,
   inspectionFindingResponsiblePartyKind,
@@ -400,6 +403,152 @@ describe('isClientId — RFC 4122 v4 runtime guard', () => {
     expect(isClientId('123e4567-e89b-42d3-a456-42661417400')).toBe(false); // too short
     expect(isClientId('123e4567-e89b-42d3-a456-4266141740000')).toBe(false); // too long
     expect(isClientId('123e4567e89b42d3a456426614174000')).toBe(false); // missing dashes
+  });
+});
+
+describe('excel-import enums (Milestone 1.11, ADR-0010)', () => {
+  it('excelImportStatus exports the five lifecycle states in order (S2 added reversed)', () => {
+    expect([...excelImportStatus]).toEqual([
+      'pending',
+      'preview',
+      'committed',
+      'cancelled',
+      'reversed',
+    ]);
+  });
+
+  it('excelImportItemStatus exports the four classifications in order', () => {
+    expect([...excelImportItemStatus]).toEqual([
+      'created',
+      'updated',
+      'skipped',
+      'conflict_pending',
+    ]);
+  });
+
+  it('excelImportSchemaVersion exports the v1 Meeting Minutes schema only', () => {
+    expect([...excelImportSchemaVersion]).toEqual(['meeting_minutes_v1']);
+  });
+});
+
+describe('AuditPayload — 1.11 excel-import variants (type-level)', () => {
+  it('excel_import.uploaded carries importId + sourceSha256 + rowCount + schemaVersion', () => {
+    const p: AuditPayload = {
+      kind: 'excel_import.uploaded',
+      importId: 'imp-1',
+      sourceSha256: 'a'.repeat(64),
+      rowCount: 47,
+      schemaVersion: 'meeting_minutes_v1',
+    };
+    if (p.kind === 'excel_import.uploaded') {
+      expect(p.rowCount).toBe(47);
+      expect(p.schemaVersion).toBe('meeting_minutes_v1');
+    }
+  });
+
+  it('excel_import.committed carries the four count buckets — PI-clean (no action_item ids)', () => {
+    const p: AuditPayload = {
+      kind: 'excel_import.committed',
+      importId: 'imp-1',
+      createdCount: 12,
+      updatedCount: 3,
+      skippedCount: 30,
+      conflictResolvedCount: 2,
+    };
+    if (p.kind === 'excel_import.committed') {
+      expect(p.createdCount + p.updatedCount + p.skippedCount + p.conflictResolvedCount).toBe(47);
+    }
+  });
+
+  it('excel_import.reversed carries reversedAt + per-decision counts', () => {
+    const p: AuditPayload = {
+      kind: 'excel_import.reversed',
+      importId: 'imp-1',
+      reversedAt: '2026-06-15T12:34:56.000Z',
+      deletedCount: 5,
+      revertedCount: 3,
+      refusedCount: 1,
+    };
+    expect(p.kind).toBe('excel_import.reversed');
+    if (p.kind === 'excel_import.reversed') {
+      expect(p.deletedCount + p.revertedCount + p.refusedCount).toBe(9);
+    }
+  });
+
+  it('narrows on the discriminant for all three excel-import kinds', () => {
+    const payloads: AuditPayload[] = [
+      {
+        kind: 'excel_import.uploaded',
+        importId: 'i1',
+        sourceSha256: '0'.repeat(64),
+        rowCount: 0,
+        schemaVersion: 'meeting_minutes_v1',
+      },
+      {
+        kind: 'excel_import.committed',
+        importId: 'i1',
+        createdCount: 0,
+        updatedCount: 0,
+        skippedCount: 0,
+        conflictResolvedCount: 0,
+      },
+      {
+        kind: 'excel_import.reversed',
+        importId: 'i1',
+        reversedAt: '2026-06-02T00:00:00.000Z',
+        deletedCount: 0,
+        revertedCount: 0,
+        refusedCount: 0,
+      },
+    ];
+    const kinds = payloads.map((p) => p.kind);
+    expect(kinds).toEqual([
+      'excel_import.uploaded',
+      'excel_import.committed',
+      'excel_import.reversed',
+    ]);
+  });
+});
+
+describe('AuditPayload — action_item.created + action_item.updated retain optional createdByImportId (1.11 S2 close-out)', () => {
+  it('action_item.created accepts createdByImportId for excel-import-driven creates', () => {
+    const p: AuditPayload = {
+      kind: 'action_item.created',
+      itemId: 'ai-1',
+      itemType: 'OTHER',
+      section: 'new_business',
+      risk: 'Low',
+      createdByImportId: 'imp-7',
+    };
+    if (p.kind === 'action_item.created') {
+      expect(p.createdByImportId).toBe('imp-7');
+    }
+  });
+
+  it('action_item.created omits createdByImportId for native creates (field is optional)', () => {
+    const p: AuditPayload = {
+      kind: 'action_item.created',
+      itemId: 'ai-2',
+      itemType: 'INSP',
+      section: 'new_business',
+      risk: 'High',
+    };
+    if (p.kind === 'action_item.created') {
+      expect(p.createdByImportId).toBeUndefined();
+    }
+  });
+
+  it('action_item.updated accepts createdByImportId for excel-import-driven updates', () => {
+    const p: AuditPayload = {
+      kind: 'action_item.updated',
+      itemId: 'ai-3',
+      changedFields: ['status', 'risk'],
+      createdByImportId: 'imp-7',
+    };
+    if (p.kind === 'action_item.updated') {
+      expect(p.createdByImportId).toBe('imp-7');
+      expect(p.changedFields).toEqual(['status', 'risk']);
+    }
   });
 });
 
