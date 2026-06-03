@@ -472,6 +472,20 @@ function humanEntityKind(k: SyncEntityKind): string {
       return 'recommendation withdrawal';
     case 'evidence_finalize':
       return 'evidence upload';
+    case 'meeting':
+      return 'meeting';
+    case 'meeting_section':
+      return 'meeting section';
+    case 'meeting_section_notes':
+      return 'section notes';
+    case 'meeting_attendance':
+      return 'attendance';
+    case 'meeting_inspection_review':
+      return 'inspection review';
+    case 'meeting_signature':
+      return 'signature';
+    case 'meeting_finalize':
+      return 'meeting finalize';
   }
 }
 

@@ -968,6 +968,20 @@ export const syncEntityKind = [
   'recommendation_resolution',
   'recommendation_withdrawal',
   'evidence_finalize',
+  // Meeting lifecycle (Milestone 2.1, ADR-0012 §3.4-§3.10). The seven
+  // entity kinds mirror the new server-side route surface — meetings
+  // and their sub-rows (sections, attendees, inspection reviews,
+  // signatures) each enqueue independently through the 1.10 sync
+  // queue. The transition kind is used for state-machine flips
+  // (start, adjourn, finalize, section start/end) that are not strict
+  // CREATE/UPDATE.
+  'meeting',
+  'meeting_section',
+  'meeting_section_notes',
+  'meeting_attendance',
+  'meeting_inspection_review',
+  'meeting_signature',
+  'meeting_finalize',
 ] as const;
 export type SyncEntityKind = (typeof syncEntityKind)[number];
 

@@ -32,16 +32,16 @@ afterEach(async () => {
 
 describe('JhscOfflineDb schema', () => {
   it('exports a stable schema version', () => {
-    expect(DEXIE_SCHEMA_VERSION).toBe(1);
+    expect(DEXIE_SCHEMA_VERSION).toBe(2);
   });
 
   it('exports the canonical singleton db name', () => {
     expect(DEXIE_DB_NAME).toBe('jhsc-offline-sync');
   });
 
-  it('opens cleanly at version 1', async () => {
+  it('opens cleanly at the current version', async () => {
     await testDb.open();
-    expect(testDb.verno).toBe(1);
+    expect(testDb.verno).toBe(DEXIE_SCHEMA_VERSION);
   });
 
   it('has every expected mutable-entity table', async () => {
@@ -68,6 +68,14 @@ describe('JhscOfflineDb schema', () => {
       'recommendations',
       'sync_conflicts',
       'sync_queue',
+      // Milestone 2.1 S3 (ADR-0012 §3.11) — meeting-lifecycle tables.
+      'meetings',
+      'meeting_sections',
+      'meeting_attendance',
+      'meeting_inspection_review',
+      'meeting_signatures',
+      'meeting_action_item_state',
+      'meeting_templates',
     ];
     for (const name of expected) {
       expect(names).toContain(name);
