@@ -22,7 +22,7 @@
     "tailwind-merge": "^2.5.5"
   },
   "devDependencies": {
-    "tailwindcss": "^3.4.17",
+    "tailwindcss": "^4.3.0",
     "typescript": "^5.7.2"
   },
   "peerDependencies": {
