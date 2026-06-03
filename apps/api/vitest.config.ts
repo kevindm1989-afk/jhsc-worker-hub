@@ -7,7 +7,7 @@ import { defineConfig } from 'vitest/config';
 export default defineConfig({
   test: {
     environment: 'node',
-    include: ['src/**/*.test.ts'],
+    include: ['src/**/*.test.ts', 'scripts/__tests__/**/*.test.ts'],
     reporters: ['default'],
     setupFiles: ['./src/__tests__/setup.ts'],
     // Serialize files — DB-dependent suites (lockout, integration)

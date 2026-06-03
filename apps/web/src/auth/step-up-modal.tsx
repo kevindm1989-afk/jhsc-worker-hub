@@ -133,7 +133,7 @@ export function StepUpModal(): JSX.Element | null {
               type="button"
               onClick={() => void onPasskey()}
               disabled={busy}
-              className="inline-flex h-11 w-full items-center justify-center rounded-md bg-accent px-4 text-sm font-medium text-accent-foreground transition-colors hover:bg-accent/90 disabled:opacity-50"
+              className="inline-flex h-11 w-full items-center justify-center rounded-md bg-accent px-4 text-sm font-medium text-accent-foreground transition-colors hover:bg-accent/90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:opacity-50"
             >
               {busy ? 'Waiting for passkey…' : 'Use a passkey'}
             </button>
@@ -145,7 +145,7 @@ export function StepUpModal(): JSX.Element | null {
             <button
               type="button"
               onClick={() => setMode('totp')}
-              className="inline-flex h-11 w-full items-center justify-center rounded-md border border-border bg-card px-4 text-sm font-medium hover:bg-muted"
+              className="inline-flex h-11 w-full items-center justify-center rounded-md border border-border bg-card px-4 text-sm font-medium hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
             >
               Use authenticator code
             </button>
@@ -179,7 +179,7 @@ export function StepUpModal(): JSX.Element | null {
             <button
               type="submit"
               disabled={busy}
-              className="mt-4 inline-flex h-11 w-full items-center justify-center rounded-md bg-accent px-4 text-sm font-medium text-accent-foreground hover:bg-accent/90 disabled:opacity-50"
+              className="mt-4 inline-flex h-11 w-full items-center justify-center rounded-md bg-accent px-4 text-sm font-medium text-accent-foreground hover:bg-accent/90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:opacity-50"
             >
               {busy ? 'Verifying…' : 'Confirm'}
             </button>
@@ -198,7 +198,7 @@ export function StepUpModal(): JSX.Element | null {
         <button
           type="button"
           onClick={() => close(false)}
-          className="mt-4 inline-flex h-9 w-full items-center justify-center rounded-md text-xs font-medium text-muted-foreground hover:bg-muted"
+          className="mt-4 inline-flex h-11 w-full items-center justify-center rounded-md text-xs font-medium text-muted-foreground hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
         >
           Cancel
         </button>

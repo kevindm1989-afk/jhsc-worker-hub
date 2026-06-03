@@ -19,10 +19,18 @@ const buttonVariants = cva(
         link: 'text-accent underline-offset-4 hover:underline',
       },
       size: {
-        default: 'h-9 px-4 py-2',
-        sm: 'h-8 rounded-md px-3 text-xs',
-        lg: 'h-10 rounded-md px-6',
-        icon: 'h-9 w-9',
+        // Per S5 F-P2: shadcn's stock `sm` and `default` sizes ship at
+        // 32px / 36px which fail CLAUDE.md mobile-primary "Touch
+        // targets ≥ 44pt" (WCAG 2.5.5). The fix bumps the responsive
+        // floor on mobile (44pt) and collapses back to shadcn-stock
+        // on `md:` (768px+) where pointer accuracy is finer. The
+        // class names keep the desktop-compact behavior for systemic
+        // surfaces (top-bar, dense data tables) that need to remain
+        // information-dense at desktop.
+        default: 'h-11 px-4 py-2 md:h-9',
+        sm: 'h-11 rounded-md px-3 text-xs md:h-8',
+        lg: 'h-11 rounded-md px-6 md:h-10',
+        icon: 'h-11 w-11 md:h-9 md:w-9',
       },
     },
     defaultVariants: {

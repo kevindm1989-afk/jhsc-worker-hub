@@ -25,7 +25,9 @@ export function ThemeToggle({ className }: { className?: string }): JSX.Element 
       title={LABEL[theme]}
       onClick={() => setTheme(NEXT_THEME[theme])}
       className={cn(
-        'flex h-9 w-9 items-center justify-center rounded-md text-foreground/70 transition-colors',
+        // Mobile touch target: 44px (h-11 w-11) per CLAUDE.md mobile-primary
+        // patterns. Desktop collapses to h-9 w-9 to keep the 56px top-bar.
+        'flex h-11 w-11 items-center justify-center rounded-md text-foreground/70 transition-colors md:h-9 md:w-9',
         'hover:bg-muted hover:text-foreground',
         'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background',
         className,

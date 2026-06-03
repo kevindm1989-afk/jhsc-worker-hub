@@ -11,6 +11,11 @@ export default defineConfig({
     // are stubbed in S2 when the worker body lands.
     environment: 'node',
     include: ['src/**/*.test.ts'],
+    // The fuzz harness lives at test/fuzz/ and has its own config
+    // (`vitest.fuzz.config.ts`). The default unit suite excludes it so
+    // `pnpm test` stays fast for everyday development; CI runs the
+    // fuzz suite via the dedicated `test:fuzz` script in its own job.
+    exclude: ['node_modules/**', 'test/fuzz/**'],
     reporters: ['default'],
   },
 });

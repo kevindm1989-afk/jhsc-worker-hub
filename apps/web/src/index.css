@@ -120,3 +120,140 @@
     }
   }
 }
+
+/*
+  Print stylesheet — evidence-grade output per CLAUDE.md design rules:
+  "Print stylesheet for every printable view — evidence-grade output."
+
+  Canonical pattern (ADR-0011 §3.2):
+    - Source Serif 4 for body text (the Inter UI font is not print-grade).
+    - Hide app chrome: top bar, bottom tab bar, sidebar, swipe affordances,
+      capture FAB, sync chip, theme toggle, the skip-to-content link, and
+      any element marked `data-print="hide"` (action buttons, transition
+      panels, dialogs, reveal-button affordances).
+    - Expand collapsed details — open `<details>` elements so the rep
+      printing the record gets the full content.
+    - `page-break-inside: avoid` on cards + section blocks so a record
+      does not split across pages.
+    - Show evidentially-relevant metadata (chain row indices, timestamps,
+      version numbers) even when hidden on screen via the `print:visible`
+      contract on a `data-print="evidentiary"` element.
+    - NEVER `display: none → display: block` for step-up-gated content
+      (T-HD7). The DOM only contains revealed plaintext when the rep
+      actively requested reveal — the print stylesheet operates on the
+      DOM that's present.
+
+  Per non-negotiable #16, the export PDF (server-rendered) is the
+  canonical document for evidentiary use. This print stylesheet is the
+  browser-side preview that produces equivalent output for a rep who
+  prints directly from the screen.
+*/
+
+@media print {
+  /* Override the screen font stack — Inter is for UI, Source Serif 4 is
+     for generated long-form documents per CLAUDE.md typography rules. */
+  :root,
+  html,
+  body {
+    background: white !important;
+    color: black !important;
+    font-family: '"Source Serif 4 Variable"', '"Source Serif 4"', Georgia, serif !important;
+  }
+
+  /* Force light-mode colors regardless of theme — dark-on-light is the
+     evidentiary norm for printed records. */
+  [data-theme='dark'] {
+    --background: 0 0% 100%;
+    --foreground: 0 0% 0%;
+    --card: 0 0% 100%;
+    --card-foreground: 0 0% 0%;
+    --muted-foreground: 0 0% 30%;
+    --border: 0 0% 70%;
+  }
+
+  /* Hide app chrome — every shell element is print-hidden by class or
+     by structural role. The skip-to-content link is `sr-only` and
+     stays hidden. */
+  header.sticky,
+  nav[aria-label='Primary'],
+  aside[aria-label='Sidebar'],
+  a[href='#main-content'],
+  [data-print='hide'] {
+    display: none !important;
+  }
+
+  /* Restore the main scroll container to flow layout so the print
+     pipeline can paginate cleanly. */
+  main#main-content {
+    overflow: visible !important;
+    padding: 0 !important;
+  }
+
+  /* Anchor links in long-form content keep underline + visible URL
+     suffix for evidentiary use. */
+  a[href]:not([href^='#']):not([href^='javascript:'])::after {
+    content: ' (' attr(href) ')';
+    font-size: 0.75em;
+    color: #555;
+  }
+
+  /* Cards + sections should not split across pages. */
+  article,
+  section,
+  .print-card,
+  [data-print='card'],
+  ul > li,
+  ol > li {
+    page-break-inside: avoid;
+    break-inside: avoid;
+  }
+
+  /* Headings stay with their content. */
+  h1,
+  h2,
+  h3 {
+    page-break-after: avoid;
+    break-after: avoid;
+  }
+
+  /* Open <details> for the printout so the rep sees the full record. */
+  details {
+    display: block !important;
+  }
+  details > summary {
+    display: none !important;
+  }
+  details > *:not(summary) {
+    display: revert !important;
+  }
+
+  /* Surface evidentially-relevant metadata that screen mode collapses. */
+  [data-print='evidentiary'] {
+    display: block !important;
+    margin-top: 0.5rem;
+    border-top: 1px solid #999;
+    padding-top: 0.25rem;
+    font-family: '"JetBrains Mono Variable"', '"JetBrains Mono"', ui-monospace, monospace;
+    font-size: 0.7rem;
+    color: #333;
+  }
+
+  /* Remove background tints from chips/badges so they stay legible in
+     monochrome printing — keep the border + the label text. */
+  .bg-red-50,
+  .bg-amber-50,
+  .bg-blue-50,
+  .bg-emerald-50,
+  .bg-zinc-50,
+  .bg-zinc-100,
+  .bg-orange-50,
+  .bg-slate-50,
+  .bg-slate-100 {
+    background: transparent !important;
+  }
+
+  /* Page setup — letter / A4 friendly, generous margins for filing. */
+  @page {
+    margin: 0.75in;
+  }
+}

@@ -51,3 +51,12 @@ fly.toml.local
 
 # Generated drizzle metadata snapshots are kept; drizzle journals stay versioned.
 # Local Postgres data volume is named, not bind-mounted — nothing to ignore.
+
+# Excel-import fuzz failure dumps (per S5 F-S1). The fuzz harness writes
+# adversarial-byte samples + meta files under this path on failing cases.
+# Some scenarios embed prototype-pollution payloads, bidi spoofing strings,
+# and corrupted-xlsx bytes; under no circumstances should these blobs
+# (synthetic or, worse, locally-substituted real workbook bytes) land in
+# git. See docs/release-1-fuzzing-findings.md.
+packages/excel-import/test/fuzz/failures/
+!packages/excel-import/test/fuzz/failures/.gitkeep

@@ -1,0 +1,47 @@
+# Fly.io configuration for the web service (S5 F-R-GAP-1).
+#
+# Serves the React PWA static bundle (vite + vite-plugin-pwa) over nginx.
+# The Dockerfile multi-stage build produces /usr/share/nginx/html with the
+# vite `dist/` output; nginx serves the SPA + the vite-plugin-pwa-generated
+# service-worker.ts.
+#
+# Region YYZ (Toronto) per ARCHITECTURE.md + ADR-0011 §3.9. Single VM
+# at single-tenant scale; auto-stop deferred since the rep's daily use
+# keeps it warm and a cold-start delay on the rep's mobile data is
+# user-facing friction.
+#
+# TODO (post-Release-1 tunables, not deploy-blockers):
+#   - Switch to Tigris+CDN if the bandwidth profile warrants (per ADR-0011
+#     §3.9 alternative-serving path).
+#   - Tune `cpu_kind` + memory after observing the rep's actual traffic
+#     during the 4-6 week real-world-use window.
+#   - Set `[[services.tls_options]]` for HSTS preload tweaks once the
+#     production hostname is finalized + submitted to the preload list.
+
+app = "jhsc-worker-hub-web"
+primary_region = "yyz"
+
+[build]
+  dockerfile = "Dockerfile"
+
+[http_service]
+  internal_port = 8080
+  force_https = true
+  auto_stop_machines = "stop"
+  auto_start_machines = true
+  min_machines_running = 1
+
+  # Static-site health: serving index.html proves the bundle is intact.
+  # The vite-plugin-pwa-generated service-worker is at /service-worker.js;
+  # we probe / (index.html) for the cheaper health check.
+  [[http_service.checks]]
+    grace_period = "10s"
+    interval = "30s"
+    method = "GET"
+    timeout = "5s"
+    path = "/"
+
+[[vm]]
+  memory = "256mb"
+  cpu_kind = "shared"
+  cpus = 1

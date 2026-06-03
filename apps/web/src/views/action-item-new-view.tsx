@@ -1,6 +1,6 @@
 // /action-items/new — mobile-first intake.
 
-import { useState } from 'react';
+import React, { useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import { ChevronLeft, Lock } from 'lucide-react';
 import { Button } from '@/components/ui/button';
@@ -332,27 +332,57 @@ function Field({
   hint?: string;
   children: React.ReactNode;
 }): JSX.Element {
+  // Wire hint/error to the labelled input via aria-describedby so screen
+  // readers announce both the descriptive hint AND validation errors per
+  // CLAUDE.md WCAG Phase 1 ("Form errors announced to screen readers").
+  //
+  // Per S5 M-3: describedby points at the rendered branch only — error
+  // takes precedence (matches the DOM if/else if below). Avoids a
+  // dangling describedby target when only one of {error, hint} renders.
+  const errorId = error ? `${id}-error` : undefined;
+  const hintId = hint ? `${id}-hint` : undefined;
+  const describedBy = error ? errorId : hintId;
+  const child = children as React.ReactElement<{
+    'aria-describedby'?: string;
+    'aria-required'?: boolean;
+  }> | null;
+  const wired =
+    child && React.isValidElement(child)
+      ? React.cloneElement(child, {
+          'aria-describedby': describedBy,
+          'aria-required': required || undefined,
+        })
+      : children;
   return (
     <div>
       <label htmlFor={id} className="mb-1 block text-sm font-medium text-foreground">
         {label}
         {required ? <span className="ml-0.5 text-status-rejected">*</span> : null}
       </label>
-      {children}
+      {wired}
       {error ? (
-        <div role="alert" aria-live="polite" className="mt-1 text-xs text-status-rejected">
+        <div
+          id={errorId}
+          role="alert"
+          aria-live="polite"
+          className="mt-1 text-xs text-status-rejected"
+        >
           {error}
         </div>
       ) : hint ? (
-        <div className="mt-1 text-xs text-muted-foreground">{hint}</div>
+        <div id={hintId} className="mt-1 text-xs text-muted-foreground">
+          {hint}
+        </div>
       ) : null}
     </div>
   );
 }
 
 function fieldInputClass(invalid: boolean): string {
+  // Per S5 F-P3: text-base (16px) on mobile prevents iOS Safari auto-
+  // zoom on focus; text-sm (14px) at md+ preserves desktop density.
   return cn(
-    'w-full rounded-md border bg-background px-3 py-2 text-sm text-foreground focus:outline-none focus:ring-2 focus:ring-ring',
+    'w-full rounded-md border bg-background px-3 py-2 text-base text-foreground focus:outline-none focus:ring-2 focus:ring-ring md:text-sm',
     invalid ? 'border-status-rejected' : 'border-input',
   );
 }

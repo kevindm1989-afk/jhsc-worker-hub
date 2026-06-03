@@ -253,6 +253,7 @@ function RecommendationDetailInner({ id }: { id: string }): JSX.Element {
     <div className="mx-auto max-w-3xl px-4 py-4 md:px-6 md:py-6">
       <Link
         to="/recommendations"
+        data-print="hide"
         className="mb-3 inline-flex items-center text-xs text-primary hover:underline focus:outline-none focus:ring-2 focus:ring-ring"
       >
         <ChevronLeft className="h-3.5 w-3.5" strokeWidth={2} aria-hidden="true" />

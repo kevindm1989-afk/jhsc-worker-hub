@@ -9,7 +9,7 @@
 // the workplace KEK before writing. Server is the encryption boundary --
 // the browser does NOT hold the KEK in 1.5.
 
-import { useState } from 'react';
+import React, { useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import { ChevronLeft, Lock } from 'lucide-react';
 import { Button } from '@/components/ui/button';
@@ -291,27 +291,65 @@ function Field({
   hint?: string;
   children: React.ReactNode;
 }): JSX.Element {
+  // Wire hint/error to the labelled input via aria-describedby so screen
+  // readers announce both the descriptive hint AND validation errors per
+  // CLAUDE.md WCAG Phase 1 ("Form errors announced to screen readers").
+  // The input itself is rendered by the caller; we clone children to inject
+  // the linking attribute.
+  //
+  // Per S5 M-3: the rendered DOM only contains one of {error, hint} — error
+  // takes precedence (the if/else if below). Pointing aria-describedby at
+  // BOTH ids when only one element is rendered leaves a dangling target;
+  // screen-reader behavior on a dangling describedby is implementation-
+  // defined. We now wire describedby to ONLY the rendered branch's id.
+  const errorId = error ? `${id}-error` : undefined;
+  const hintId = hint ? `${id}-hint` : undefined;
+  const describedBy = error ? errorId : hintId;
+  const child = children as React.ReactElement<{
+    'aria-describedby'?: string;
+    'aria-required'?: boolean;
+  }> | null;
+  const wired =
+    child && React.isValidElement(child)
+      ? React.cloneElement(child, {
+          'aria-describedby': describedBy,
+          'aria-required': required || undefined,
+        })
+      : children;
   return (
     <div>
       <label htmlFor={id} className="mb-1 block text-sm font-medium text-foreground">
         {label}
         {required ? <span className="ml-0.5 text-status-rejected">*</span> : null}
       </label>
-      {children}
+      {wired}
       {error ? (
-        <div role="alert" aria-live="polite" className="mt-1 text-xs text-status-rejected">
+        <div
+          id={errorId}
+          role="alert"
+          aria-live="polite"
+          className="mt-1 text-xs text-status-rejected"
+        >
           {error}
         </div>
       ) : hint ? (
-        <div className="mt-1 text-xs text-muted-foreground">{hint}</div>
+        <div id={hintId} className="mt-1 text-xs text-muted-foreground">
+          {hint}
+        </div>
       ) : null}
     </div>
   );
 }
 
 function fieldInputClass(invalid: boolean): string {
+  // Per S5 F-P3: `text-sm` (14px) below 16px triggers iOS Safari auto-
+  // zoom on focus, then does NOT auto-zoom-out on blur — the rep ends
+  // up at >100% zoom on a sticky-bottom mobile form, breaking the
+  // sticky-bottom invariant. Fix is responsive: text-base (16px) on
+  // mobile, text-sm (14px) on md+ where pointer accuracy is finer
+  // and the desktop dense-input aesthetic remains.
   return cn(
-    'w-full rounded-md border bg-background px-3 py-2 text-sm text-foreground focus:outline-none focus:ring-2 focus:ring-ring',
+    'w-full rounded-md border bg-background px-3 py-2 text-base text-foreground focus:outline-none focus:ring-2 focus:ring-ring md:text-sm',
     invalid ? 'border-status-rejected' : 'border-input',
   );
 }

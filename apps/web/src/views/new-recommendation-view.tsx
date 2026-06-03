@@ -439,7 +439,7 @@ export function RecommendationForm(props: RecommendationFormProps): JSX.Element 
           required
           aria-required="true"
           placeholder="One-line summary (e.g. 'Install secondary guard on shrink-wrap rollers')"
-          className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm text-foreground focus:outline-none focus:ring-2 focus:ring-ring"
+          className="w-full rounded-md border border-input bg-background px-3 py-2 text-base text-foreground focus:outline-none focus:ring-2 focus:ring-ring md:text-sm"
         />
       </FormSection>
 
@@ -469,7 +469,7 @@ export function RecommendationForm(props: RecommendationFormProps): JSX.Element 
           required
           aria-required="true"
           placeholder="Describe the recommended action, the hazard or condition it addresses, and the statutory anchor."
-          className="w-full resize-y rounded-md border border-input bg-background px-3 py-2 font-mono text-sm leading-relaxed text-foreground focus:outline-none focus:ring-2 focus:ring-ring"
+          className="w-full resize-y rounded-md border border-input bg-background px-3 py-2 font-mono text-base leading-relaxed text-foreground focus:outline-none focus:ring-2 focus:ring-ring md:text-sm"
         />
         {/*
           1.9 S5 priv-F8 close-out: role-first / minimize-collection

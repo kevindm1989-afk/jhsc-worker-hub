@@ -1,0 +1,112 @@
+// Shared helpers for the M1.12 S3 mobile Playwright specs.
+//
+// These specs run on `mobile-iphone-15-pro` + `mobile-pixel-9` only
+// (see playwright.config.ts). The helpers are deliberately small —
+// they stub the auth + first-run + session endpoints so the spec
+// exercises the chrome rather than the auth gate, and provide a
+// 44pt-touch-target measurement primitive that both devices share.
+
+import { expect, type Page, type Locator } from '@playwright/test';
+
+/** CSS pixels for the 44pt mobile touch-target minimum (WCAG 2.5.5 +
+ *  CLAUDE.md mobile-primary). 44pt @ 1x DPR = 44 CSS pixels. */
+export const TOUCH_TARGET_MIN_PX = 44;
+
+/** Options for `installAuthMocks`. */
+export interface AuthMockOptions {
+  /** When `true` (default), the session shape advertises step-up as
+   *  inactive (`{ active: false, until: null }`) so the mobile spec
+   *  exercises chrome without an interactive freshness prompt. When
+   *  `false`, the session reports step-up as required so a spec can
+   *  assert the step-up modal appears before a protected action
+   *  proceeds. Per S5 F-S6 — the default kept step-up freshness
+   *  regressions structurally untestable from mobile specs; the
+   *  toggle re-opens the regression-test surface. */
+  readonly stepUpFresh?: boolean;
+}
+
+/** Install the standard "you are authenticated" + "first-run done"
+ *  network mocks. Same shape the existing smoke + print specs use,
+ *  duplicated here so the mobile specs are self-contained.
+ *
+ *  Per S5 F-S6, accepts a `{ stepUpFresh }` flag so a mobile spec can
+ *  exercise the not-fresh path and assert the step-up modal renders
+ *  before a protected action proceeds. CLAUDE.md non-negotiable #16
+ *  (exports require step-up + audit-logged with hash) is the
+ *  load-bearing rule the mobile inventory now covers.
+ */
+export async function installAuthMocks(page: Page, opts: AuthMockOptions = {}): Promise<void> {
+  const stepUpFresh = opts.stepUpFresh ?? true;
+  await page.route('**/api/auth/first-run/status', (route) =>
+    route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({ completed: true }),
+    }),
+  );
+  await page.route('**/api/auth/session', (route) =>
+    route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({
+        userId: 'mobile-e2e-user',
+        displayName: 'Mobile E2E',
+        sessionId: 'mobile-e2e-session',
+        // When `stepUpFresh` is false the session is structurally
+        // valid but the step-up grant has expired (active: false,
+        // until: null). The protected route must gate on step-up
+        // freshness; a regression that flips the gate off would
+        // surface here.
+        stepUp: stepUpFresh
+          ? { active: true, until: new Date(Date.now() + 60_000).toISOString() }
+          : { active: false, until: null },
+      }),
+    }),
+  );
+}
+
+/** Assert a locator's bounding box has width and height at least the
+ *  44pt mobile touch-target minimum. Skips silently if the element
+ *  is detached (boundingBox returns null). */
+export async function expectTouchTargetSize(locator: Locator): Promise<void> {
+  const box = await locator.boundingBox();
+  expect(box).not.toBeNull();
+  if (box === null) return;
+  expect(box.width).toBeGreaterThanOrEqual(TOUCH_TARGET_MIN_PX);
+  expect(box.height).toBeGreaterThanOrEqual(TOUCH_TARGET_MIN_PX);
+}
+
+/** The five primary tabs locked at 1.11 close-out (TABS in
+ *  apps/web/src/lib/tabs.ts). The bootstrap brief named a different
+ *  five-set (Hazards / Action Items / Capture FAB / Inspections /
+ *  More); the shipped 1.11 inventory locked Minutes / Hazards /
+ *  Inspections / Recommendations / More. We test the shipped lock
+ *  and document the brief-divergence in
+ *  `docs/release-1-mobile-test-gaps.md`.
+ *
+ *  Each entry carries the full label (used for desktop sidebar matches)
+ *  AND a regex that accepts the bottom-tab shortLabel — Recommendations
+ *  renders as "Recs" inside the 5-column mobile grid (apps/web/src/lib/
+ *  tabs.ts:54). Specs that walk the bottom tab bar match on `pattern`;
+ *  specs that walk the desktop sidebar can use `label`. */
+export interface TabLabelSpec {
+  readonly label: string;
+  readonly pattern: RegExp;
+}
+
+export const EXPECTED_TAB_LABELS: readonly TabLabelSpec[] = [
+  { label: 'Minutes', pattern: /minutes/i },
+  { label: 'Hazards', pattern: /hazards/i },
+  { label: 'Inspections', pattern: /inspections/i },
+  { label: 'Recommendations', pattern: /recs|recommendations/i },
+  { label: 'More', pattern: /more/i },
+] as const;
+
+/** When set in the environment, the SW-dependent mobile specs (offline
+ *  navigation, PWA install) run instead of skipping. The dev server
+ *  (vite + vite-plugin-pwa with devOptions.enabled=false) does not
+ *  register the SW, so these specs only carry signal when the CI job
+ *  runs against `vite build && vite preview`. A future CI job can set
+ *  E2E_WITH_SW=1 against the prod-shape server. Documented in
+ *  docs/release-1-mobile-test-gaps.md. */
+export const E2E_WITH_SW: boolean = process.env.E2E_WITH_SW === '1';

@@ -26,6 +26,7 @@ export function CaptureFab({
     <Link
       to={href}
       aria-label="Capture evidence"
+      data-print="hide"
       className="fixed bottom-20 right-4 z-30 flex h-14 w-14 items-center justify-center rounded-full bg-primary text-primary-foreground shadow-lg ring-1 ring-black/5 focus:outline-none focus:ring-2 focus:ring-ring md:bottom-6"
     >
       <Camera className="h-6 w-6" strokeWidth={2} aria-hidden="true" />
