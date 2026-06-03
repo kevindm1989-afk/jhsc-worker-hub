@@ -158,6 +158,14 @@ export type AuditEventKind =
   | 'meeting.finalized'
   | 'meeting.action_item_snapshot'
   | 'meeting.recommendation_drafted'
+  // S4 administrative kind — emitted by seed-meeting-template.ts when
+  // an agenda template version is seeded (or re-attempted idempotently).
+  // Administrative, NOT operational: it does not belong to a single
+  // meeting's lifecycle. The --check-meetings forward-defense walker
+  // requires every `meeting.created` event's agendaTemplateVersion to
+  // have a corresponding `audit.meeting_template.seeded` upstream in
+  // the chain for the same jurisdiction.
+  | 'audit.meeting_template.seeded'
   | AuthEventKind;
 
 // ---------------------------------------------------------------------------
@@ -875,6 +883,22 @@ export type AuditPayload =
       readonly recommendationId: string;
       readonly sectionId: string;
       readonly recommendationCreatedEventHash: string;
+    }
+  | {
+      // S4 administrative anchor — emitted by the seed-meeting-template
+      // script when an agenda template version row is INSERTed. PI-clean:
+      // template version (int) + jurisdiction enum + canonical hash of
+      // the sections_json array (hex SHA-256). NEVER carries the section
+      // texts themselves (the template content is structural, not
+      // sensitive, but the chain payload discipline keeps the chain
+      // small + hashed). The --check-meetings forward-defense walker
+      // matches every `meeting.created` event's
+      // (jurisdiction, agendaTemplateVersion) against an upstream
+      // event of this kind.
+      readonly kind: 'audit.meeting_template.seeded';
+      readonly templateVersion: number;
+      readonly jurisdiction: 'ON' | 'CA-FED';
+      readonly templateHash: string;
     }
   | { readonly kind: 'signup'; readonly via: 'first_run' | 'invite' }
   | { readonly kind: 'login.passkey' }

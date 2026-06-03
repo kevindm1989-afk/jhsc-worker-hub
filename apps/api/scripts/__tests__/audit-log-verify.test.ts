@@ -751,3 +751,69 @@ describe('checkMeetingChain — cross-chain anchor (TM-fold-3 / T-ML42)', () => 
     }
   });
 });
+
+// ---------------------------------------------------------------------------
+// M2.1 S4 — meeting.created must reference a seeded template version
+// ---------------------------------------------------------------------------
+
+describe('checkMeetingChain — created_template_not_seeded (M2.1 S4)', () => {
+  it('passes when an upstream audit.meeting_template.seeded matches the (jurisdiction, version) pair', () => {
+    const rows = [
+      meetingRow({
+        idx: 0,
+        kind: 'audit.meeting_template.seeded',
+        payload: {
+          templateVersion: 1,
+          jurisdiction: 'ON',
+          templateHash: 'a'.repeat(64),
+        },
+      }),
+      meetingRow({
+        idx: 1,
+        kind: 'meeting.created',
+        payload: { meetingId: MID, agendaTemplateVersion: 1, jurisdiction: 'ON' },
+      }),
+    ];
+    const result = verifyInternals.checkMeetingChain(rows);
+    expect(result.ok).toBe(true);
+  });
+
+  it('detects a meeting.created event with no upstream template seed event', () => {
+    const rows = [
+      meetingRow({
+        idx: 0,
+        kind: 'meeting.created',
+        payload: { meetingId: MID, agendaTemplateVersion: 1, jurisdiction: 'ON' },
+      }),
+    ];
+    const result = verifyInternals.checkMeetingChain(rows);
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.anomalies.some((a) => a.reason === 'created_template_not_seeded')).toBe(true);
+    }
+  });
+
+  it('detects a meeting.created event when the seed is for the wrong jurisdiction', () => {
+    const rows = [
+      meetingRow({
+        idx: 0,
+        kind: 'audit.meeting_template.seeded',
+        payload: {
+          templateVersion: 1,
+          jurisdiction: 'CA-FED',
+          templateHash: 'a'.repeat(64),
+        },
+      }),
+      meetingRow({
+        idx: 1,
+        kind: 'meeting.created',
+        payload: { meetingId: MID, agendaTemplateVersion: 1, jurisdiction: 'ON' },
+      }),
+    ];
+    const result = verifyInternals.checkMeetingChain(rows);
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.anomalies.some((a) => a.reason === 'created_template_not_seeded')).toBe(true);
+    }
+  });
+});

@@ -28,7 +28,8 @@
     "db:down": "docker compose down",
     "db:logs": "docker compose logs -f postgres",
     "audit": "node scripts/audit-with-allowlist.mjs",
-    "seed:inspection-templates": "bun apps/api/scripts/seed-inspection-templates.ts"
+    "seed:inspection-templates": "bun apps/api/scripts/seed-inspection-templates.ts",
+    "seed:meeting-template": "bun apps/api/scripts/seed-meeting-template.ts"
   },
   "devDependencies": {
     "@types/node": "^20.14.0",

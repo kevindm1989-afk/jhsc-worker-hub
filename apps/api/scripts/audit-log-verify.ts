@@ -300,6 +300,15 @@ async function checkSyncIdempotency(
 //      recommendationId. TM-fold-3 / T-ML42 cross-chain anchor
 //      integrity.
 //
+//   4. Every `meeting.created` event references an
+//      (agendaTemplateVersion, jurisdiction) pair that has a
+//      corresponding `audit.meeting_template.seeded` UPSTREAM in the
+//      chain. The seed script (M2.1 S4) is the only emitter of that
+//      kind; the gate catches a deploy where the route handler
+//      bootstrapped a meeting against a template row that was not also
+//      anchored in the chain (e.g. a manual INSERT into
+//      meeting_templates that bypassed the seed script).
+//
 // Anomalies are aggregated and reported one per offending event.
 
 interface MeetingChainRow {
@@ -319,7 +328,8 @@ interface MeetingAnomaly {
     | 'adjourned_no_upstream_create'
     | 'adjourned_metrics_malformed'
     | 'recommendation_drafted_hash_missing'
-    | 'recommendation_drafted_hash_mismatch';
+    | 'recommendation_drafted_hash_mismatch'
+    | 'created_template_not_seeded';
   readonly detail: string;
 }
 
@@ -337,12 +347,26 @@ function checkMeetingChain(
   | { ok: false; anomalies: ReadonlyArray<MeetingAnomaly>; checked: number } {
   const meetingEvents = rows.filter((r) => r.kind.startsWith('meeting.'));
   const recommendationDraftedEvents = rows.filter((r) => r.kind === 'recommendation.drafted');
+  const templateSeededEvents = rows.filter((r) => r.kind === 'audit.meeting_template.seeded');
 
   // Index recommendation.drafted by recommendationId for O(1) lookup.
   const recDraftedByRecId = new Map<string, MeetingChainRow>();
   for (const r of recommendationDraftedEvents) {
     const recId = r.payload?.recommendationId;
     if (typeof recId === 'string') recDraftedByRecId.set(recId, r);
+  }
+
+  // Index template-seeded events by `${jurisdiction}|${templateVersion}`.
+  // The seed payload carries jurisdiction + templateVersion; the
+  // meeting.created payload carries jurisdiction + agendaTemplateVersion;
+  // the pair joins the two on those keys.
+  const seededByJurVer = new Map<string, MeetingChainRow>();
+  for (const r of templateSeededEvents) {
+    const jur = r.payload?.jurisdiction;
+    const ver = r.payload?.templateVersion;
+    if (typeof jur === 'string' && typeof ver === 'number') {
+      seededByJurVer.set(`${jur}|${ver}`, r);
+    }
   }
 
   // Group meeting events by meetingId.
@@ -362,7 +386,26 @@ function checkMeetingChain(
     if (typeof mid !== 'string') continue;
     const peers = byMeetingId.get(mid) ?? [];
 
-    if (e.kind === 'meeting.finalized') {
+    if (e.kind === 'meeting.created') {
+      // Gate 4: the (jurisdiction, agendaTemplateVersion) pair must have
+      // a corresponding audit.meeting_template.seeded UPSTREAM. The seed
+      // script is the only emitter; a meeting.created that references an
+      // unseeded version is the canonical "manual INSERT bypassed the
+      // seed" attack surface (M2.1 S4 forward defense).
+      const jur = e.payload?.jurisdiction;
+      const ver = e.payload?.agendaTemplateVersion;
+      if (typeof jur === 'string' && typeof ver === 'number') {
+        const seeded = seededByJurVer.get(`${jur}|${ver}`);
+        if (!seeded || seeded.idx >= e.idx) {
+          anomalies.push({
+            idx: e.idx,
+            kind: e.kind,
+            reason: 'created_template_not_seeded',
+            detail: `no upstream audit.meeting_template.seeded for jurisdiction=${jur} version=${ver}`,
+          });
+        }
+      }
+    } else if (e.kind === 'meeting.finalized') {
       // Gate 1: 4 meeting.signed events upstream of this finalized event
       // covering all 4 required roles.
       const sigsUpstream = peers.filter((p) => p.kind === 'meeting.signed' && p.idx < e.idx);
@@ -620,7 +663,9 @@ async function main(): Promise<void> {
     const meetingRows = (await db.execute(sql`
       SELECT idx, kind, payload, this_hash
       FROM audit_log
-      WHERE kind LIKE 'meeting.%' OR kind = 'recommendation.drafted'
+      WHERE kind LIKE 'meeting.%'
+         OR kind = 'recommendation.drafted'
+         OR kind = 'audit.meeting_template.seeded'
       ORDER BY idx ASC
     `)) as unknown as Array<{
       idx: number | string;
@@ -653,7 +698,7 @@ async function main(): Promise<void> {
           );
         }
         process.stderr.write(
-          '\nReason codes:\n  finalized_signatures_wrong_count   — meeting.finalized requires 4 meeting.signed upstream (ADR-0012 §3.9).\n  finalized_missing_signatures       — required signer roles missing.\n  adjourned_no_upstream_create       — meeting.adjourned lacks the meeting.created anchor.\n  adjourned_metrics_malformed        — metrics dict missing required PI-free fields.\n  recommendation_drafted_hash_*      — TM-fold-3 cross-chain anchor integrity broken.\n',
+          '\nReason codes:\n  finalized_signatures_wrong_count   — meeting.finalized requires 4 meeting.signed upstream (ADR-0012 §3.9).\n  finalized_missing_signatures       — required signer roles missing.\n  adjourned_no_upstream_create       — meeting.adjourned lacks the meeting.created anchor.\n  adjourned_metrics_malformed        — metrics dict missing required PI-free fields.\n  recommendation_drafted_hash_*      — TM-fold-3 cross-chain anchor integrity broken.\n  created_template_not_seeded        — meeting.created references a template version with no upstream audit.meeting_template.seeded (M2.1 S4).\n',
         );
       }
       process.exit(1);
