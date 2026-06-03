@@ -83,5 +83,21 @@ export default [
       '@typescript-eslint/no-explicit-any': 'off',
     },
   },
+  // Node-script files (CI/devops helpers under scripts/). console + process
+  // globals available; no-console relaxed.
+  {
+    files: ['scripts/**/*.mjs'],
+    languageOptions: {
+      ecmaVersion: 2022,
+      sourceType: 'module',
+      globals: {
+        ...globals.node,
+        ...globals.es2022,
+      },
+    },
+    rules: {
+      'no-console': 'off',
+    },
+  },
   prettier,
 ];
