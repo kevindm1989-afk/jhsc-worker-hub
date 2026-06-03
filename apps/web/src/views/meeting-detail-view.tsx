@@ -44,7 +44,10 @@ import { cn } from '@/lib/utils';
 import { AttendanceSheet, ATTENDANCE_ROLE_LABELS } from '@/components/meetings/attendance-sheet';
 import { QuorumChip } from '@/components/meetings/quorum-chip';
 import { humaniseSectionType, SectionNotesSheet } from '@/components/meetings/section-notes-sheet';
+import { LiveMetricsPanel } from '@/components/meetings/live-metrics-panel';
+import { SectionActionItems } from '@/components/meetings/section-action-items';
 import { CitationRef } from '@/legal/citation-ref';
+import { useAuth } from '@/auth/auth-context';
 import {
   MeetingApiError,
   meetingsApi,
@@ -54,8 +57,22 @@ import {
 } from '@/meetings/api';
 import { MEETING_RIGHTS_COPY } from '@/meetings/rights-protective-copy';
 import { MEETING_STATUS_LABELS } from './minutes-view';
-import type { MeetingPresentStatus, MeetingStatus } from '@jhsc/shared-types';
+import type {
+  ActionItemSection,
+  MeetingPresentStatus,
+  MeetingSectionType,
+  MeetingStatus,
+} from '@jhsc/shared-types';
 import type { QuorumJurisdiction } from '@/meetings/quorum';
+
+// Mapping of meeting section types that surface action items inline
+// (per ADR §3.9). Other section types (roll_call, agenda, etc.) do
+// not host action items.
+const MEETING_TO_ACTION_SECTION: Partial<Record<MeetingSectionType, ActionItemSection>> = {
+  new_business: 'new_business',
+  old_business: 'old_business',
+  recommendations: 'recommendation',
+};
 
 export function MeetingDetailView(): JSX.Element {
   const { id } = useParams<{ id: string }>();
@@ -126,6 +143,8 @@ interface InnerProps {
 }
 
 function MeetingDetailInner({ id }: InnerProps): JSX.Element {
+  const auth = useAuth();
+  const currentUserId = auth.session?.userId ?? null;
   const [detail, setDetail] = useState<MeetingDetail | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [notFound, setNotFound] = useState(false);
@@ -341,6 +360,10 @@ function MeetingDetailInner({ id }: InnerProps): JSX.Element {
       {/* Body: section accordion + attendance summary */}
       <div className="grid grid-cols-1 gap-4 px-4 py-4 md:grid-cols-3 md:px-6 md:py-6">
         <div className="md:col-span-2">
+          {/* M2.2 §3.4 — live metrics dashboard above the section accordion. */}
+          <div className="mb-4">
+            <LiveMetricsPanel meetingId={detail.id} meetingStatus={detail.status} />
+          </div>
           <h2 className="mb-2 text-sm font-medium uppercase tracking-wide text-muted-foreground">
             Sections
           </h2>
@@ -358,6 +381,7 @@ function MeetingDetailInner({ id }: InnerProps): JSX.Element {
                   attendance={detail.attendance}
                   jurisdiction={jurisdiction}
                   meetingId={detail.id}
+                  currentUserId={currentUserId}
                 />
               </li>
             ))}
@@ -451,13 +475,13 @@ function MeetingDetailInner({ id }: InnerProps): JSX.Element {
               Action items
             </h3>
             <p className="text-xs text-muted-foreground">
-              Action items live in the dedicated tab. They are not owned by this meeting — meetings
-              reference them.
+              Action items appear inline inside each section above (M2.2). Meetings reference action
+              items — they do not own them, per non-negotiable #12.
             </p>
-            <Button asChild variant="outline" size="sm" className="mt-2">
+            <Button asChild variant="outline" size="sm" className="mt-2" data-print="hide">
               <Link to={`/action-items?meetingId=${encodeURIComponent(detail.id)}`}>
                 <ClipboardCheck className="h-3.5 w-3.5" strokeWidth={2} aria-hidden="true" />
-                Open action items
+                Open full list
               </Link>
             </Button>
           </div>
@@ -618,6 +642,7 @@ interface SectionAccordionProps {
   readonly attendance: ReadonlyArray<MeetingAttendee>;
   readonly jurisdiction: QuorumJurisdiction;
   readonly meetingId: string;
+  readonly currentUserId: string | null;
 }
 
 function SectionAccordion(props: SectionAccordionProps): JSX.Element {
@@ -631,9 +656,12 @@ function SectionAccordion(props: SectionAccordionProps): JSX.Element {
     status,
     attendance,
     jurisdiction,
+    meetingId,
+    currentUserId,
   } = props;
   const isMutable = status === 'scheduled' || status === 'in_progress' || status === 'adjourned';
   const isCoChairOnly = section.visibility === 'co_chair_only';
+  const actionSection = MEETING_TO_ACTION_SECTION[section.sectionType] ?? null;
 
   // M2.1 S5 F-P1 close-out: render the body unconditionally + hide via
   // CSS so the print stylesheet (apps/web/src/index.css `@media print`)
@@ -759,6 +787,15 @@ function SectionAccordion(props: SectionAccordionProps): JSX.Element {
               {section.notesEnvelopeCt ? 'Edit notes' : 'Add notes'}
             </Button>
           </div>
+        ) : null}
+
+        {/* M2.2 §3.9 — inline action items inside the section body. */}
+        {actionSection && !isCoChairOnly ? (
+          <SectionActionItems
+            meetingId={meetingId}
+            section={actionSection}
+            currentUserId={currentUserId}
+          />
         ) : null}
       </div>
     </div>

@@ -4,6 +4,7 @@ import { ThemeProvider } from './components/theme-provider';
 import { AuthProvider } from './auth/auth-context';
 import { AuthRouter } from './auth/route-guard';
 import { StepUpModal } from './auth/step-up-modal';
+import { ActionItemCloseVerificationView } from './views/action-item-close-verification-view';
 import { ActionItemDetailView } from './views/action-item-detail-view';
 import { CaptureView } from './views/capture-view';
 import { ActionItemNewView } from './views/action-item-new-view';
@@ -67,6 +68,10 @@ export function App(): JSX.Element {
                 <Route path="/action-items" element={<ActionItemsView />} />
                 <Route path="/action-items/new" element={<ActionItemNewView />} />
                 <Route path="/action-items/:id" element={<ActionItemDetailView />} />
+                <Route
+                  path="/action-items/:id/close-verify"
+                  element={<ActionItemCloseVerificationView />}
+                />
                 <Route path="/capture" element={<CaptureView />} />
                 <Route path="/inspections" element={<InspectionsView />} />
                 <Route path="/inspections/new" element={<NewInspectionView />} />
