@@ -630,7 +630,14 @@ interface ActionItemAnomaly {
     | 'reopened_no_prior_closure'
     | 'status_changed_closed_bypass'
     | 'status_changed_cross_anchor_hash_mismatch'
-    | 'status_changed_cross_anchor_no_upstream';
+    | 'status_changed_cross_anchor_no_upstream'
+    // M2.2 S5 F-S2 fix: the payload now carries closureReasonHash +
+    // closedAt + counterSignedAt so a chain-only verifier can re-
+    // derive the canonical digest the Ed25519 attestation signed
+    // over. A missing field on a post-S5 event indicates either a
+    // forged chain row or a route regression that dropped the
+    // payload extension.
+    | 'closure_verified_payload_missing_attestation_fields';
   readonly detail: string;
 }
 
@@ -685,6 +692,26 @@ function checkActionItemChain(
             detail: `no upstream action_item.created for actionItemId=${aid}`,
           });
         }
+      }
+      // M2.2 S5 F-S2: every post-S5 closure_verified payload MUST
+      // carry closureReasonHash + closedAt + counterSignedAt so a
+      // chain-only verifier can re-derive the canonical digest the
+      // Ed25519 attestation signed over. Missing = either forged
+      // chain row or a route regression.
+      const closureReasonHash = e.payload?.closureReasonHash;
+      const closedAt = e.payload?.closedAt;
+      const counterSignedAt = e.payload?.counterSignedAt;
+      const missing: string[] = [];
+      if (typeof closureReasonHash !== 'string') missing.push('closureReasonHash');
+      if (typeof closedAt !== 'string') missing.push('closedAt');
+      if (typeof counterSignedAt !== 'string') missing.push('counterSignedAt');
+      if (missing.length > 0) {
+        anomalies.push({
+          idx: e.idx,
+          kind: e.kind,
+          reason: 'closure_verified_payload_missing_attestation_fields',
+          detail: `payload missing required attestation field(s): ${missing.join(', ')}`,
+        });
       }
     } else if (e.kind === 'action_item.reopened') {
       const aid = e.payload?.actionItemId;

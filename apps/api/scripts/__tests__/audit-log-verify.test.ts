@@ -941,6 +941,9 @@ describe('checkMeetingChain — Gate 5 closure_verification_count (M2.2)', () =>
           closerActorId: ACTOR,
           counterSignerActorId: ACTOR,
           selfAttestation: true,
+          closureReasonHash: 'a'.repeat(64),
+          closedAt: '2026-06-10T13:30:00.000Z',
+          counterSignedAt: '2026-06-10T13:30:00.000Z',
         },
       }),
       meetingRow({
@@ -953,6 +956,9 @@ describe('checkMeetingChain — Gate 5 closure_verification_count (M2.2)', () =>
           closerActorId: ACTOR,
           counterSignerActorId: ACTOR,
           selfAttestation: true,
+          closureReasonHash: 'b'.repeat(64),
+          closedAt: '2026-06-10T13:40:00.000Z',
+          counterSignedAt: '2026-06-10T13:40:00.000Z',
         },
       }),
       meetingRow({
@@ -1003,6 +1009,9 @@ describe('checkMeetingChain — Gate 5 closure_verification_count (M2.2)', () =>
           closerActorId: ACTOR,
           counterSignerActorId: ACTOR,
           selfAttestation: true,
+          closureReasonHash: 'a'.repeat(64),
+          closedAt: '2026-06-10T13:30:00.000Z',
+          counterSignedAt: '2026-06-10T13:30:00.000Z',
         },
       }),
       meetingRow({
@@ -1100,12 +1109,49 @@ describe('checkActionItemChain — happy path', () => {
           closerActorId: ACTOR,
           counterSignerActorId: ACTOR,
           selfAttestation: true,
+          closureReasonHash: 'a'.repeat(64),
+          closedAt: '2026-06-10T13:30:00.000Z',
+          counterSignedAt: '2026-06-10T13:30:00.000Z',
         },
       }),
     ];
     const result = verifyInternals.checkActionItemChain(rows);
     expect(result.ok).toBe(true);
     if (result.ok) expect(result.checked).toBe(2);
+  });
+});
+
+describe('checkActionItemChain — F-S2 payload includes attestation fields', () => {
+  it('flags a closure_verified payload missing closureReasonHash / closedAt / counterSignedAt', () => {
+    const rows = [
+      meetingRow({
+        idx: 0,
+        kind: 'action_item.created',
+        payload: { itemId: AID_1, itemType: 'INSIGHT', section: 'new_business', risk: 'Medium' },
+      }),
+      meetingRow({
+        idx: 1,
+        kind: 'action_item.closure_verified',
+        payload: {
+          actionItemId: AID_1,
+          closureId: CLOSURE_1,
+          meetingId: null,
+          closerActorId: ACTOR,
+          counterSignerActorId: ACTOR,
+          selfAttestation: true,
+          // Intentionally omits closureReasonHash, closedAt, counterSignedAt.
+        },
+      }),
+    ];
+    const result = verifyInternals.checkActionItemChain(rows);
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(
+        result.anomalies.some(
+          (a) => a.reason === 'closure_verified_payload_missing_attestation_fields',
+        ),
+      ).toBe(true);
+    }
   });
 });
 
@@ -1122,6 +1168,9 @@ describe('checkActionItemChain — Gate 1 closure_verified requires upstream cre
           closerActorId: ACTOR,
           counterSignerActorId: ACTOR,
           selfAttestation: true,
+          closureReasonHash: 'a'.repeat(64),
+          closedAt: '2026-06-10T13:30:00.000Z',
+          counterSignedAt: '2026-06-10T13:30:00.000Z',
         },
       }),
     ];
@@ -1179,6 +1228,9 @@ describe('checkActionItemChain — Gate 2 reopened requires prior closure (T-IM4
           closerActorId: ACTOR,
           counterSignerActorId: ACTOR,
           selfAttestation: true,
+          closureReasonHash: 'a'.repeat(64),
+          closedAt: '2026-06-10T13:30:00.000Z',
+          counterSignedAt: '2026-06-10T13:30:00.000Z',
         },
       }),
       meetingRow({

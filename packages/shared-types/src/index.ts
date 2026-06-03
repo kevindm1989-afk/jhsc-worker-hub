@@ -891,6 +891,18 @@ export type AuditPayload =
           readonly metAtCallToOrder: boolean;
           readonly ruleCitation: string;
         };
+        // M2.2 S5 F-S5 fix: the type-level enumeration of the
+        // closureVerifications dict is the structural backstop
+        // against payload-drift toward per-actor breakdowns. T-IM27
+        // (no per-rep attribution) is preserved by enforcing AGGREGATE
+        // counts only — never `selfAttestationActorIds` or analogous
+        // fields. Optional so M2.1 finalized rows emitted pre-2.2
+        // (which lack the field) still type-check.
+        readonly closureVerifications?: {
+          readonly total: number;
+          readonly selfAttestation: number;
+          readonly peerVerified: number;
+        };
       };
     }
   | {
@@ -962,6 +974,14 @@ export type AuditPayload =
       // is null when no evidence blob is attached. attestationSigHash
       // is the sha256 of the TM-fold-5 Ed25519 detached signature
       // bytes (mirrors meeting.signed).
+      //
+      // M2.2 S5 F-S2 fix: closureReasonHash + closedAt + counterSignedAt
+      // are emitted so an offline verifier walking the chain alone can
+      // re-derive the canonical digest the Ed25519 attestation signs
+      // over. Pre-fix, the payload omitted both fields and the verifier
+      // had to fetch the action_item_closures row to reconstruct the
+      // signed bytes — forfeiting the chain's standalone tamper-
+      // detection property.
       readonly kind: 'action_item.closure_verified';
       readonly actionItemId: string;
       readonly closureId: string;
@@ -970,6 +990,9 @@ export type AuditPayload =
       readonly counterSignerActorId: string;
       readonly selfAttestation: boolean;
       readonly signingKeyId: string;
+      readonly closureReasonHash: string;
+      readonly closedAt: string;
+      readonly counterSignedAt: string;
       readonly evidenceHash: string | null;
       readonly attestationSigHash: string;
     }

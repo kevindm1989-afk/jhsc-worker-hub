@@ -31,15 +31,7 @@
 
 import { useEffect, useId, useRef, useState } from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
-import {
-  AlertTriangle,
-  CheckCircle2,
-  ChevronLeft,
-  FileSignature,
-  Lock,
-  ShieldCheck,
-  WifiOff,
-} from 'lucide-react';
+import { CheckCircle2, ChevronLeft, FileSignature, Info, Lock, WifiOff } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { useAuth } from '@/auth/auth-context';
 import { stepUpEmitter } from '@/auth/api';
@@ -159,8 +151,17 @@ function Inner({ id }: { id: string }): JSX.Element {
   if (!item) return <></>;
 
   const alreadyClosed = item.status === 'Closed' || item.verifiedByJhscId !== null;
-  const ineligibleStatus =
-    item.status === 'Cancelled' || (item.status === 'Not Started' && state.kind !== 'success');
+  // M2.2 S5 F-P2 fix: `Not Started` is NOT ineligible. Per ADR §3.2
+  // the route accepts a Not-Started → Closed closure verification
+  // with a SOFT-WARNING UI banner — never a gate. Pre-fix the view
+  // treated Not Started as ineligible with amber AlertTriangle
+  // gatekeeping framing, contradicting the rights-protective stance
+  // (T-IM25). The amber AlertTriangle gate is now reserved for
+  // `Cancelled` items (which the route DOES reject with
+  // not_closable_via_verification — see ADR §3.5). Not Started
+  // surfaces as a neutral informational banner below the form.
+  const ineligibleStatus = item.status === 'Cancelled';
+  const notStartedSoftWarning = item.status === 'Not Started' && state.kind !== 'success';
   const userId = auth.session?.userId ?? '';
   const selfAttestation = true; // M2.2 single-rep — see S0 Q1.
 
@@ -321,24 +322,36 @@ function Inner({ id }: { id: string }): JSX.Element {
         <div
           role="status"
           aria-live="polite"
-          className="mb-4 rounded-md border border-amber-300 bg-amber-50 p-3 text-sm text-amber-900"
+          className="mb-4 rounded-md border border-zinc-300 bg-zinc-50 p-3 text-sm text-zinc-800"
           data-testid="closure-ineligible-status"
         >
-          <AlertTriangle className="mr-1 inline h-4 w-4" strokeWidth={2} aria-hidden="true" />
-          This action item is in status <strong>{item.status}</strong> and is not eligible for
-          closure verification. Move it to <strong>Pending Review</strong> first, or cancel it via
-          the routine status flow if it will not be pursued.
+          <Info className="mr-1 inline h-4 w-4" strokeWidth={2} aria-hidden="true" />
+          This action item was cancelled. Cancellations are recorded via the routine status flow and
+          do not require closure verification.
         </div>
       ) : null}
 
       {state.kind !== 'success' && !alreadyClosed && !ineligibleStatus ? (
         <>
+          {notStartedSoftWarning ? (
+            <div
+              role="status"
+              aria-live="polite"
+              className="mb-4 rounded-md border border-blue-200 bg-blue-50 p-3 text-sm text-blue-900"
+              data-testid="closure-not-started-notice"
+            >
+              <Info className="mr-1 inline h-4 w-4" strokeWidth={2} aria-hidden="true" />
+              This item is marked <strong>Not Started</strong>. Confirm the work was done; closure
+              verification is your evidence that addresses the item.
+            </div>
+          ) : null}
+
           <div
             data-print="hide"
             className="mb-4 rounded-md border border-blue-200 bg-blue-50 p-3 text-xs leading-relaxed text-blue-900"
             data-testid="closure-self-attestation-banner"
           >
-            <ShieldCheck className="mr-1 inline h-3.5 w-3.5" strokeWidth={2} aria-hidden="true" />
+            <Info className="mr-1 inline h-3.5 w-3.5" strokeWidth={2} aria-hidden="true" />
             {MEETING_RIGHTS_COPY.closureSelfAttestationBanner}
           </div>
 

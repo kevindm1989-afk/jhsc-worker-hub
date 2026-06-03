@@ -184,6 +184,14 @@ describe('ActionItemDetailView', () => {
   it('renders the decrypted description + move buttons + history', async () => {
     mockFetch((url) => {
       if (url === `/api/action-items/${ITEM_ID}`) return jsonResponse(detail);
+      if (url === `/api/action-items/${ITEM_ID}/meeting-history`) {
+        return jsonResponse({
+          actionItemId: ITEM_ID,
+          firstRaisedMeetingId: null,
+          items: [],
+          asOf: '2026-06-03T10:00:00Z',
+        });
+      }
       return undefined;
     });
     render(
@@ -212,6 +220,14 @@ describe('ActionItemDetailView', () => {
           id: ITEM_ID,
           section: 'old_business',
           allowedTransitions: ['completed_this_period', 'archived', 'recommendation'],
+        });
+      }
+      if (url === `/api/action-items/${ITEM_ID}/meeting-history`) {
+        return jsonResponse({
+          actionItemId: ITEM_ID,
+          firstRaisedMeetingId: null,
+          items: [],
+          asOf: '2026-06-03T10:00:00Z',
         });
       }
       return undefined;
@@ -248,6 +264,14 @@ describe('ActionItemDetailView', () => {
             { error: 'step_up_required', action: 'action_item.move.archived' },
             401,
           );
+        }
+        if (url === `/api/action-items/${ITEM_ID}/meeting-history`) {
+          return jsonResponse({
+            actionItemId: ITEM_ID,
+            firstRaisedMeetingId: null,
+            items: [],
+            asOf: '2026-06-03T10:00:00Z',
+          });
         }
         return undefined;
       });

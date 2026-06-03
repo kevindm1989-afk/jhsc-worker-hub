@@ -19,12 +19,16 @@ interface SectionActionItemsProps {
   readonly meetingId: string;
   readonly section: ActionItemSection;
   readonly currentUserId: string | null;
+  /** M2.2 S5 F-P1 fix: forwarded to SectionActionItemCard so the
+   *  Reopen affordance gates on the actual worker_co_chair role. */
+  readonly currentUserRoles?: ReadonlyArray<string>;
 }
 
 export function SectionActionItems({
   meetingId,
   section,
   currentUserId,
+  currentUserRoles,
 }: SectionActionItemsProps): JSX.Element {
   const [items, setItems] = useState<ReadonlyArray<ActionItemListItem> | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -109,6 +113,7 @@ export function SectionActionItems({
                 meetingId={meetingId}
                 onChanged={refresh}
                 currentUserId={currentUserId}
+                currentUserRoles={currentUserRoles}
               />
             </li>
           ))}

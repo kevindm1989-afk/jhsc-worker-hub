@@ -190,6 +190,46 @@ export interface ActionItemReopenResponse {
   readonly version: number;
 }
 
+// M2.2 S5 F-L3 fix: GET /api/action-items/:id/meeting-history
+// returns the per-meeting touch history (snapshots + moves +
+// closures grouped by meetingId, chronological). Replaces the
+// "faked from moves only" client-side timeline in S3.
+export interface ActionItemMeetingHistoryEntry {
+  readonly meetingId: string;
+  readonly meetingDate: string | null;
+  readonly meetingStatus: string | null;
+  readonly meetingLocation: string | null;
+  readonly snapshotsThisMeeting: ReadonlyArray<{
+    readonly snapshotKind: 'live' | 'finalized';
+    readonly snapshotAt: string;
+    readonly status: string;
+    readonly section: string;
+  }>;
+  readonly movesThisMeeting: ReadonlyArray<{
+    readonly id: string;
+    readonly fromSection: string | null;
+    readonly toSection: string;
+    readonly movedAt: string;
+    readonly movedByActorId: string;
+  }>;
+  readonly closuresThisMeeting: ReadonlyArray<{
+    readonly id: string;
+    readonly closedAt: string;
+    readonly counterSignedAt: string;
+    readonly closedByActorId: string;
+    readonly counterSignerActorId: string;
+    readonly selfAttestation: boolean;
+    readonly superseded: boolean;
+  }>;
+}
+
+export interface ActionItemMeetingHistoryResponse {
+  readonly actionItemId: string;
+  readonly firstRaisedMeetingId: string | null;
+  readonly items: ReadonlyArray<ActionItemMeetingHistoryEntry>;
+  readonly asOf: string;
+}
+
 export const actionItemsApi = {
   list: (
     filters: ActionItemListFilters = {},
@@ -239,4 +279,9 @@ export const actionItemsApi = {
    * (Closed → In Progress transition). Require-online per ADR §3.8. */
   reopen: (id: string, body: ActionItemReopenBody): Promise<ActionItemReopenResponse> =>
     call(`/${encodeURIComponent(id)}/reopen`, { method: 'POST', json: body }),
+  /** GET /api/action-items/:id/meeting-history — Milestone 2.2 S5
+   *  F-L3. Per-meeting touch history (snapshots + moves +
+   *  closures grouped by meetingId, chronological). */
+  meetingHistory: (id: string): Promise<ActionItemMeetingHistoryResponse> =>
+    call(`/${encodeURIComponent(id)}/meeting-history`),
 };

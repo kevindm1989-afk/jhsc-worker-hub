@@ -1618,9 +1618,22 @@ export const actionItemClosures = pgTable(
     createdAt: timestamp('created_at', { withTimezone: true })
       .notNull()
       .default(sql`now()`),
+    // M2.2 S5 fix bundle (F-L1 / F-S4): superseded_at marks closure
+    // rows that were active at some point but have since been
+    // superseded by a later reopen + re-close cycle. NULL = active
+    // (current closure); NOT NULL = historical evidence preserved on
+    // an append-only timeline. Migration 0013 replaces the strict
+    // UNIQUE on action_item_id with a partial UNIQUE WHERE
+    // superseded_at IS NULL so only one ACTIVE closure exists per
+    // item at any moment; superseded rows stack.
+    supersededAt: timestamp('superseded_at', { withTimezone: true }),
   },
   (t) => ({
-    actionItemUnique: uniqueIndex('action_item_closures_action_item_unique').on(t.actionItemId),
+    // M2.2 S5 fix bundle: partial UNIQUE replacing the strict 0012
+    // UNIQUE. See migration 0013_action_item_closures_superseded.sql.
+    activeClosureUnique: uniqueIndex('action_item_closures_active_uq')
+      .on(t.actionItemId)
+      .where(sql`${t.supersededAt} IS NULL`),
     meetingIdx: index('action_item_closures_meeting_idx')
       .on(t.meetingId)
       .where(sql`${t.meetingId} IS NOT NULL`),

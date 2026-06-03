@@ -145,6 +145,9 @@ interface InnerProps {
 function MeetingDetailInner({ id }: InnerProps): JSX.Element {
   const auth = useAuth();
   const currentUserId = auth.session?.userId ?? null;
+  // M2.2 S5 F-P1 fix: pass roles through to the card so the Reopen
+  // affordance gates on worker_co_chair, not "any authenticated user".
+  const currentUserRoles = auth.session?.roles ?? [];
   const [detail, setDetail] = useState<MeetingDetail | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [notFound, setNotFound] = useState(false);
@@ -382,6 +385,7 @@ function MeetingDetailInner({ id }: InnerProps): JSX.Element {
                   jurisdiction={jurisdiction}
                   meetingId={detail.id}
                   currentUserId={currentUserId}
+                  currentUserRoles={currentUserRoles}
                 />
               </li>
             ))}
@@ -643,6 +647,7 @@ interface SectionAccordionProps {
   readonly jurisdiction: QuorumJurisdiction;
   readonly meetingId: string;
   readonly currentUserId: string | null;
+  readonly currentUserRoles?: ReadonlyArray<string>;
 }
 
 function SectionAccordion(props: SectionAccordionProps): JSX.Element {
@@ -658,6 +663,7 @@ function SectionAccordion(props: SectionAccordionProps): JSX.Element {
     jurisdiction,
     meetingId,
     currentUserId,
+    currentUserRoles,
   } = props;
   const isMutable = status === 'scheduled' || status === 'in_progress' || status === 'adjourned';
   const isCoChairOnly = section.visibility === 'co_chair_only';
@@ -795,6 +801,7 @@ function SectionAccordion(props: SectionAccordionProps): JSX.Element {
             meetingId={meetingId}
             section={actionSection}
             currentUserId={currentUserId}
+            currentUserRoles={currentUserRoles}
           />
         ) : null}
       </div>

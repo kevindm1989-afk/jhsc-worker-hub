@@ -16,7 +16,7 @@
 //     client-computed from the move history meetingId + the per-meeting
 //     state already in the action item detail response).
 
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useState } from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
 import {
   CalendarRange,
@@ -33,7 +33,7 @@ import {
   ActionItemsApiError,
   actionItemsApi,
   type ActionItemDetail,
-  type ActionItemHistoryEntry,
+  type ActionItemMeetingHistoryResponse,
 } from '@/action-items/api';
 import { ActionFlagBadge, RiskDot, SectionBadge, StatusBadge } from '@/action-items/components';
 import { ReopenDialog } from '@/components/action-items/reopen-dialog';
@@ -315,7 +315,7 @@ function DetailInner({ id }: { id: string }): JSX.Element {
         />
       ) : null}
 
-      <MeetingHistoryTimeline history={item.history} firstRaisedAt={item.startDate} />
+      <MeetingHistoryTimeline actionItemId={item.id} firstRaisedAt={item.startDate} />
 
       <HistoryPanel history={item.history} onUndo={applyUndo} pendingUndo={pendingUndo} />
       <CaptureFab linkedType="action_item" linkedId={item.id} />
@@ -342,7 +342,15 @@ function DetailInner({ id }: { id: string }): JSX.Element {
         </div>
       ) : null}
 
-      {item.status === 'Closed' && session !== null ? (
+      {/* M2.2 S5 F-P1 fix: gate the Reopen CTA on the actual
+       * worker_co_chair role (read from the session). The route
+       * is the structural backstop; the UI gate prevents a non-
+       * co-chair from seeing a CTA that will 403 on click. Falls
+       * back to "session present" when roles aren't yet on the
+       * session (test harness compatibility). */}
+      {item.status === 'Closed' &&
+      session !== null &&
+      (session.roles === undefined || session.roles.includes('worker_co_chair')) ? (
         <div
           data-print="hide"
           className="fixed inset-x-0 bottom-16 z-30 mx-auto flex max-w-3xl gap-2 border-t border-border bg-background px-3 py-2 md:static md:mt-4 md:max-w-none md:border-none md:bg-transparent md:px-0 md:py-0"
@@ -599,54 +607,49 @@ function DetailRow({
 // Meeting history timeline — Milestone 2.2 §3.7
 // ---------------------------------------------------------------------------
 //
-// The M2.2 S3 boundary forbids new server endpoints; the timeline is
-// computed client-side from the existing move history (which carries
-// meetingId per the 1.6 schema). Each unique meetingId contributes one
-// timeline entry summarising the moves that touched the item within
-// that meeting. Cross-meeting visibility per S0 Q5: this surface is
-// the canonical "where has this item been" view.
-
-interface MeetingTimelineEntry {
-  readonly meetingId: string;
-  readonly firstSeenAt: string;
-  readonly lastTouchedAt: string;
-  readonly moveCount: number;
-}
-
-function buildMeetingTimeline(
-  history: ReadonlyArray<ActionItemHistoryEntry>,
-): ReadonlyArray<MeetingTimelineEntry> {
-  const byMeeting = new Map<string, MeetingTimelineEntry>();
-  for (const h of history) {
-    if (!h.meetingId) continue;
-    const existing = byMeeting.get(h.meetingId);
-    if (existing) {
-      byMeeting.set(h.meetingId, {
-        meetingId: h.meetingId,
-        firstSeenAt: h.movedAt < existing.firstSeenAt ? h.movedAt : existing.firstSeenAt,
-        lastTouchedAt: h.movedAt > existing.lastTouchedAt ? h.movedAt : existing.lastTouchedAt,
-        moveCount: existing.moveCount + 1,
-      });
-    } else {
-      byMeeting.set(h.meetingId, {
-        meetingId: h.meetingId,
-        firstSeenAt: h.movedAt,
-        lastTouchedAt: h.movedAt,
-        moveCount: 1,
-      });
-    }
-  }
-  return Array.from(byMeeting.values()).sort((a, b) => (a.firstSeenAt < b.firstSeenAt ? -1 : 1));
-}
+// M2.2 S5 F-L3 + M-3 (F-P6) fixes: the timeline now reads the real
+// per-meeting touch history from GET /api/action-items/:id/meeting-
+// history. Pre-fix the timeline was "faked" client-side from moves
+// alone — items raised in A, status-changed twice in B without a
+// section move, then closed in C would surface only A and C. The
+// endpoint joins moves ∪ snapshots ∪ closures so the timeline now
+// surfaces every meeting the item touched + the closure entries
+// where applicable. Meeting labels lead with date · location
+// instead of raw UUID prefixes (F-P6).
 
 function MeetingHistoryTimeline({
-  history,
+  actionItemId,
   firstRaisedAt,
 }: {
-  history: ReadonlyArray<ActionItemHistoryEntry>;
+  actionItemId: string;
   firstRaisedAt: string;
 }): JSX.Element {
-  const timeline = useMemo(() => buildMeetingTimeline(history), [history]);
+  const [history, setHistory] = useState<ActionItemMeetingHistoryResponse | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    actionItemsApi
+      .meetingHistory(actionItemId)
+      .then((res) => {
+        if (!cancelled) {
+          setHistory(res);
+          setError(null);
+        }
+      })
+      .catch((e: unknown) => {
+        if (cancelled) return;
+        if (e instanceof ActionItemsApiError) {
+          setError(`Could not load meeting history (HTTP ${e.status}).`);
+        } else {
+          setError(e instanceof Error ? e.message : String(e));
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [actionItemId]);
+
   return (
     <section
       aria-labelledby="meeting-history-heading"
@@ -661,46 +664,88 @@ function MeetingHistoryTimeline({
         <CalendarRange className="h-3 w-3" strokeWidth={2} aria-hidden="true" />
         Meeting history
       </h2>
-      <p
-        className="mb-3 text-xs text-muted-foreground"
-        style={{ fontFamily: '"Source Serif 4 Variable", "Source Serif 4", Georgia, serif' }}
-      >
+      <p className="mb-3 text-xs text-muted-foreground">
         Cross-meeting touch history. First raised{' '}
         <span className="font-mono tabular-nums">{firstRaisedAt}</span>.
       </p>
-      {timeline.length === 0 ? (
+      {error ? (
+        <div
+          role="alert"
+          aria-live="polite"
+          className="rounded-md border border-amber-200 bg-amber-50 p-2 text-xs text-amber-900"
+        >
+          {error}
+        </div>
+      ) : null}
+      {history === null && !error ? (
+        <div className="h-12 animate-pulse rounded-md border border-border bg-muted/40" />
+      ) : null}
+      {history !== null && history.items.length === 0 ? (
         <p className="text-xs text-muted-foreground">
-          This item has not been touched in a meeting yet.
+          This item has not been touched in a meeting yet. Status changes and section moves recorded
+          during a meeting will appear here, alongside the meeting&apos;s closure verification when
+          applicable.
         </p>
-      ) : (
+      ) : null}
+      {history !== null && history.items.length > 0 ? (
         <ol className="space-y-3 border-l-2 border-border pl-3">
-          {timeline.map((entry) => (
-            <li key={entry.meetingId} className="relative">
-              <span
-                className="absolute -left-[7px] top-1 inline-block h-2 w-2 rounded-full bg-primary"
-                aria-hidden="true"
-              />
-              <div className="flex flex-wrap items-baseline gap-x-2 text-xs">
-                <Link
-                  to={`/meetings/${encodeURIComponent(entry.meetingId)}`}
-                  className="font-mono tabular-nums text-primary hover:underline"
+          {history.items.map((entry) => {
+            const dateLabel = entry.meetingDate
+              ? new Date(entry.meetingDate).toLocaleDateString()
+              : null;
+            const totalTouches =
+              entry.snapshotsThisMeeting.length +
+              entry.movesThisMeeting.length +
+              entry.closuresThisMeeting.length;
+            const closureCount = entry.closuresThisMeeting.length;
+            return (
+              <li key={entry.meetingId} className="relative">
+                <span
+                  className="absolute -left-[7px] top-1 inline-block h-2 w-2 rounded-full bg-primary"
+                  aria-hidden="true"
+                />
+                <div className="flex flex-wrap items-baseline gap-x-2 text-xs">
+                  <Link
+                    to={`/meetings/${encodeURIComponent(entry.meetingId)}`}
+                    className="text-primary hover:underline"
+                  >
+                    {/* M-3 (F-P6) fix: lead with the meeting
+                     * date · location instead of the raw UUID
+                     * prefix. The UUID still ships in the
+                     * data-print="evidentiary" row below for
+                     * the printed chain-traceable identifier. */}
+                    {dateLabel ?? 'unscheduled meeting'}
+                    {entry.meetingLocation ? ` · ${entry.meetingLocation}` : ''}
+                  </Link>
+                  <span className="text-muted-foreground">·</span>
+                  <span className="inline-flex items-center gap-1 text-muted-foreground">
+                    <Hash className="h-3 w-3" strokeWidth={2} aria-hidden="true" />
+                    {totalTouches} {totalTouches === 1 ? 'touch' : 'touches'}
+                  </span>
+                  {entry.movesThisMeeting.length > 0 ? (
+                    <span className="text-muted-foreground">
+                      · {entry.movesThisMeeting.length}{' '}
+                      {entry.movesThisMeeting.length === 1 ? 'move' : 'moves'}
+                    </span>
+                  ) : null}
+                  {closureCount > 0 ? (
+                    <span className="inline-flex items-center gap-1 rounded-full border border-emerald-300 bg-emerald-50 px-2 py-0.5 text-[10px] font-medium text-emerald-800">
+                      <ShieldCheck className="h-3 w-3" strokeWidth={2} aria-hidden="true" />
+                      {closureCount === 1 ? 'closure verified' : `${closureCount} closures`}
+                    </span>
+                  ) : null}
+                </div>
+                <span
+                  className="mt-0.5 block font-mono text-[10px] text-muted-foreground"
+                  data-print="evidentiary"
                 >
-                  {entry.meetingId.slice(0, 8)}…
-                </Link>
-                <span className="text-muted-foreground">·</span>
-                <span className="text-muted-foreground">
-                  first touch {new Date(entry.firstSeenAt).toLocaleString()}
+                  {entry.meetingId}
                 </span>
-                <span className="text-muted-foreground">·</span>
-                <span className="inline-flex items-center gap-1 text-muted-foreground">
-                  <Hash className="h-3 w-3" strokeWidth={2} aria-hidden="true" />
-                  {entry.moveCount} {entry.moveCount === 1 ? 'move' : 'moves'}
-                </span>
-              </div>
-            </li>
-          ))}
+              </li>
+            );
+          })}
         </ol>
-      )}
+      ) : null}
     </section>
   );
 }

@@ -77,7 +77,10 @@ export function SectionMoveHistory({
 
       <div className={cn('border-t border-border px-3 py-2', open ? '' : 'hidden print:block')}>
         {filtered.length === 0 ? (
-          <p className="text-xs text-muted-foreground">No moves in this meeting yet.</p>
+          <p className="text-xs text-muted-foreground">
+            No section moves recorded in this meeting yet. Items move between sections when reps tap
+            the section name on an action item card; every move is anchored in the audit chain.
+          </p>
         ) : (
           <ol className="space-y-2">
             {filtered.map((m) => (

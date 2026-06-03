@@ -73,8 +73,17 @@ import {
   getActiveWorkplaceSigningPublicKey,
 } from '../../evidence/workplace-signing-key';
 import { verifyEvidenceObject } from '../../evidence/tigris';
-import { computeQuorum, type QuorumAttendanceRow } from '../../lib/compute-quorum';
+import { type QuorumAttendanceRow, type QuorumJurisdiction } from '../../lib/compute-quorum';
 import { sha256Hex, signAttestation, type AttestationRowCanonical } from '../../lib/meeting-crypto';
+import {
+  computeMeetingLiveMetrics,
+  type MeetingActionItemSnapshotRow,
+  type MeetingClosureRow,
+  type MeetingInspectionReviewRow,
+  type MeetingMetricsContext,
+  type MeetingRecommendationRow,
+} from '../../lib/compute-meeting-live-metrics';
+import type { ActionItemSection, ActionItemStatus } from '@jhsc/shared-types';
 import { idempotencyKey } from '../../middleware/idempotency';
 import { readIfMatchOr428, versionConflictBody } from '../../middleware/if-match';
 import { rateLimit } from '../../middleware/rate-limit';
@@ -1606,48 +1615,55 @@ meetingsRoute.post('/:id/adjourn', async (c) => {
             });
           }
 
-          // Compute metrics from query results.
-          const itemsRaisedRows = (await tx.execute(sql`
-        SELECT COUNT(*)::int AS n FROM action_items WHERE first_raised_meeting_id = ${idParsed.data}
-      `)) as unknown as Array<{ n: number }>;
-          const itemsClosedRows = (await tx.execute(sql`
-        SELECT COUNT(*)::int AS n FROM action_items
-        WHERE meeting_id = ${idParsed.data}
-          AND status IN ('Closed','Cancelled')
-      `)) as unknown as Array<{ n: number }>;
-          const recsDraftedRows = (await tx.execute(sql`
-        SELECT COUNT(*)::int AS n FROM recommendations WHERE meeting_id = ${idParsed.data}
-      `)) as unknown as Array<{ n: number }>;
-          const inspReviewedRows = (await tx.execute(sql`
-        SELECT COUNT(*)::int AS n FROM meeting_inspection_review WHERE meeting_id = ${idParsed.data}
-      `)) as unknown as Array<{ n: number }>;
-
-          // M2.2 S2 (ADR-0013 TM-fold-5 + T-IM33): closure verifications
-          // scoped to this meeting. Self-attestation vs peer-verified are
-          // counted separately so a reviewer can see the structural
-          // composition of the meeting's closures at a glance.
+          // M2.2 S5 F-L2 fix: the adjourn route hand-rolled a
+          // DIFFERENT itemsClosed formula than the
+          // computeMeetingLiveMetrics helper that backs the live
+          // dashboard. Pre-fix:
+          //   - adjourn counted action_items WHERE meeting_id AND
+          //     status IN ('Closed','Cancelled') (operational
+          //     column, includes Cancelled, no FK to closures).
+          //   - the helper counted DISTINCT action_item_closures
+          //     rows scoped to this meeting (verified closures
+          //     only, NO Cancelled).
+          // The single-source-of-truth invariant (helper's
+          // docstring) was violated: an arbitrator comparing the
+          // mid-meeting chip-bar to the chain-anchored adjournment
+          // metrics would see drift. This refactor fetches the same
+          // row shapes the metrics endpoint fetches and feeds them
+          // into computeMeetingLiveMetrics so both paths share one
+          // formula by construction.
+          const snapshotRowsForMetrics = (await tx.execute(sql`
+        SELECT m.action_item_id,
+               m.snapshot_kind,
+               m.snapshot_status,
+               m.snapshot_section,
+               m.snapshot_at,
+               ai.first_raised_meeting_id
+        FROM meeting_action_item_state m
+        LEFT JOIN action_items ai ON ai.id = m.action_item_id
+        WHERE m.meeting_id = ${idParsed.data}
+        ORDER BY m.action_item_id, m.snapshot_at DESC
+      `)) as unknown as Array<{
+            action_item_id: string;
+            snapshot_kind: string;
+            snapshot_status: string;
+            snapshot_section: string;
+            snapshot_at: Date;
+            first_raised_meeting_id: string | null;
+          }>;
           const closureRows = (await tx.execute(sql`
-        SELECT self_attestation FROM action_item_closures WHERE meeting_id = ${idParsed.data}
-      `)) as unknown as Array<{ self_attestation: boolean }>;
-          const closureTotal = closureRows.length;
-          let closureSelfAttestation = 0;
-          let closurePeerVerified = 0;
-          for (const c of closureRows) {
-            if (c.self_attestation) closureSelfAttestation += 1;
-            else closurePeerVerified += 1;
-          }
-
-          // Quorum compute at adjournment (snapshot of current attendance).
+        SELECT action_item_id, self_attestation
+        FROM action_item_closures WHERE meeting_id = ${idParsed.data}
+      `)) as unknown as Array<{ action_item_id: string; self_attestation: boolean }>;
+          const recsRowsForMetrics = (await tx.execute(sql`
+        SELECT id FROM recommendations WHERE meeting_id = ${idParsed.data}
+      `)) as unknown as Array<{ id: string }>;
+          const inspReviewedRowsForMetrics = (await tx.execute(sql`
+        SELECT inspection_id FROM meeting_inspection_review WHERE meeting_id = ${idParsed.data}
+      `)) as unknown as Array<{ inspection_id: string }>;
           const attendanceRows = (await tx.execute(sql`
         SELECT role, present_status FROM meeting_attendance WHERE meeting_id = ${idParsed.data}
       `)) as unknown as Array<{ role: string; present_status: string }>;
-          const quorum = computeQuorum(
-            attendanceRows.map((a) => ({
-              role: a.role as QuorumAttendanceRow['role'],
-              presentStatus: a.present_status as QuorumAttendanceRow['presentStatus'],
-            })),
-            workplace.jurisdiction,
-          );
 
           // Promote every `live` snapshot to a `finalized` snapshot if no
           // finalized row exists yet for (meeting_id, action_item_id). The
@@ -1722,26 +1738,77 @@ meetingsRoute.post('/:id/adjourn', async (c) => {
             version = ${newVersion},
             updated_at = now()
         WHERE id = ${idParsed.data}
-        RETURNING actual_end_at::text AS actual_end_at,
-                  EXTRACT(EPOCH FROM (now() - actual_start_at))::int AS duration_seconds
-      `)) as unknown as Array<{ actual_end_at: string; duration_seconds: number }>;
-          const adjournedAt = adjourned[0]!.actual_end_at;
-          const durationSeconds = Number(adjourned[0]!.duration_seconds);
-
+        RETURNING actual_start_at,
+                  actual_end_at,
+                  actual_end_at::text AS actual_end_at_text
+      `)) as unknown as Array<{
+            actual_start_at: Date | null;
+            actual_end_at: Date | null;
+            actual_end_at_text: string;
+          }>;
+          const adjournedAt = adjourned[0]!.actual_end_at_text;
+          // M2.2 S5 F-L2 fix: compute metrics via the same helper
+          // the live dashboard uses. Single source of truth.
+          const meetingCtx: MeetingMetricsContext = {
+            meetingId: idParsed.data,
+            status: 'pending_finalization',
+            actualStartAtMs: adjourned[0]!.actual_start_at
+              ? adjourned[0]!.actual_start_at.getTime()
+              : null,
+            actualEndAtMs: adjourned[0]!.actual_end_at
+              ? adjourned[0]!.actual_end_at.getTime()
+              : null,
+            jurisdiction: workplace.jurisdiction as QuorumJurisdiction,
+          };
+          const helperSnapshots: ReadonlyArray<MeetingActionItemSnapshotRow> =
+            snapshotRowsForMetrics.map((r) => ({
+              actionItemId: r.action_item_id,
+              snapshotKind: r.snapshot_kind as 'live' | 'finalized',
+              snapshotStatus: r.snapshot_status as ActionItemStatus,
+              snapshotSection: r.snapshot_section as ActionItemSection,
+              snapshotAtMs: r.snapshot_at.getTime(),
+              firstRaisedHere: r.first_raised_meeting_id === idParsed.data,
+            }));
+          const helperAttendance: ReadonlyArray<QuorumAttendanceRow> = attendanceRows.map((a) => ({
+            role: a.role as QuorumAttendanceRow['role'],
+            presentStatus: a.present_status as QuorumAttendanceRow['presentStatus'],
+          }));
+          const helperInspectionReviews: ReadonlyArray<MeetingInspectionReviewRow> =
+            inspReviewedRowsForMetrics.map((r) => ({ inspectionId: r.inspection_id }));
+          const helperRecommendations: ReadonlyArray<MeetingRecommendationRow> =
+            recsRowsForMetrics.map((r) => ({ recommendationId: r.id }));
+          const helperClosures: ReadonlyArray<MeetingClosureRow> = closureRows.map((r) => ({
+            actionItemId: r.action_item_id,
+            selfAttestation: r.self_attestation,
+          }));
+          const liveMetrics = computeMeetingLiveMetrics({
+            meeting: meetingCtx,
+            snapshots: helperSnapshots,
+            attendance: helperAttendance,
+            inspectionReviews: helperInspectionReviews,
+            recommendations: helperRecommendations,
+            closures: helperClosures,
+            nowMs: adjourned[0]!.actual_end_at ? adjourned[0]!.actual_end_at.getTime() : Date.now(),
+          });
+          // M2.2 S5 F-L2 / F-S5 fix: emit the canonical shape the
+          // shared-types discriminated union enumerates. The payload
+          // is a strict projection of the helper's output so the
+          // type-level gate catches drift if a future contributor
+          // edits either side.
           const metrics = {
-            durationSeconds,
-            itemsRaised: Number(itemsRaisedRows[0]!.n),
-            itemsClosed: Number(itemsClosedRows[0]!.n),
-            recommendationsDrafted: Number(recsDraftedRows[0]!.n),
-            inspectionsReviewed: Number(inspReviewedRows[0]!.n),
+            durationSeconds: liveMetrics.durationSeconds,
+            itemsRaised: liveMetrics.itemsRaised,
+            itemsClosed: liveMetrics.itemsClosed,
+            recommendationsDrafted: liveMetrics.recommendationsDrafted,
+            inspectionsReviewed: liveMetrics.inspectionsReviewed,
             quorumCompliance: {
-              metAtCallToOrder: quorum.compliant,
-              ruleCitation: quorum.ruleCitation,
+              metAtCallToOrder: liveMetrics.quorumCompliance.metAtCallToOrder,
+              ruleCitation: liveMetrics.quorumCompliance.ruleCitation,
             },
             closureVerifications: {
-              total: closureTotal,
-              selfAttestation: closureSelfAttestation,
-              peerVerified: closurePeerVerified,
+              total: liveMetrics.closureVerifications.total,
+              selfAttestation: liveMetrics.closureVerifications.selfAttestation,
+              peerVerified: liveMetrics.closureVerifications.peerVerified,
             },
           };
 
@@ -2236,7 +2303,17 @@ export async function writeLiveActionItemSnapshot(
   if (meeting.length === 0 || meeting[0]!.status !== 'in_progress') return;
 
   const snapshotId = randomUUID();
-  await tx.execute(sql`
+  // M2.2 S5 F-L4 / F-S1 fix: ON CONFLICT DO NOTHING on the TM-fold-2
+  // partial UNIQUE makes idempotent retries silent (the dedupe was
+  // the explicit intent per SECURITY §2.14 T-IM11). Pre-fix a bare
+  // INSERT bubbled the UNIQUE violation through db.transaction,
+  // rolling back the entire status PATCH (the action_items UPDATE +
+  // per-item chain + cross-anchor + closure row in the close-
+  // verification path) and surfacing as a 500 to the rep. A flaky
+  // mobile network during in-meeting status changes would surface
+  // this routinely. RETURNING id lets us short-circuit the chain
+  // emit when the INSERT deduped silently — no orphan chain row.
+  const inserted = (await tx.execute(sql`
     INSERT INTO meeting_action_item_state (
       id, meeting_id, action_item_id, snapshot_kind,
       snapshot_status, snapshot_section,
@@ -2248,7 +2325,13 @@ export async function writeLiveActionItemSnapshot(
       ${args.assigneeCt ? (Buffer.from(args.assigneeCt) as unknown as Uint8Array) : null},
       ${args.assigneeDekCt ? (Buffer.from(args.assigneeDekCt) as unknown as Uint8Array) : null}
     )
-  `);
+    ON CONFLICT ON CONSTRAINT meeting_action_item_state_live_dedupe_unique DO NOTHING
+    RETURNING id
+  `)) as unknown as Array<{ id: string }>;
+  if (inserted.length === 0) {
+    // Dedupe hit — no chain row to emit; idempotent no-op.
+    return;
+  }
   const assigneeNameHash = args.assigneeCt ? sha256Hex(Uint8Array.from(args.assigneeCt)) : null;
   await append(tx, {
     actorId: args.actorId,

@@ -682,6 +682,179 @@ actionItemsRoute.get('/:id', async (c) => {
 });
 
 // ---------------------------------------------------------------------------
+// GET /api/action-items/:id/meeting-history — Milestone 2.2 S5 F-L3
+// ---------------------------------------------------------------------------
+//
+// ADR-0013 §3.7 cross-meeting visibility surface. Returns the per-
+// meeting touch history for an action item: every meeting the item
+// touched via a section move, a status snapshot, or a closure
+// verification. The S3 web client's MeetingHistoryTimeline was
+// previously "faked" from moves alone — items raised in A,
+// status-changed twice in B without a section move, then closed in C
+// would surface only A and C. This endpoint joins the canonical
+// tables so the timeline reflects the true touch history.
+//
+// Read-only; no step-up; same auth gate as GET /api/action-items/:id.
+// Per ADR §3.3 + §3.10: read-anchoring posture is selective; this
+// route is NOT chain-anchored (the canonical anchors are the
+// per-meeting events already in the chain).
+
+actionItemsRoute.get('/:id/meeting-history', async (c) => {
+  const parsed = uuidParam.safeParse(c.req.param('id'));
+  if (!parsed.success) return c.json({ error: 'invalid_id' }, 400);
+  const db = getDb();
+
+  const existsRows = (await db.execute(sql`
+    SELECT id, first_raised_meeting_id, meeting_id
+    FROM action_items WHERE id = ${parsed.data} LIMIT 1
+  `)) as unknown as Array<{
+    id: string;
+    first_raised_meeting_id: string | null;
+    meeting_id: string | null;
+  }>;
+  if (existsRows.length === 0) return c.json({ error: 'not_found' }, 404);
+  const ai = existsRows[0]!;
+
+  const moves = (await db.execute(sql`
+    SELECT id, from_section, to_section, moved_by_user_id,
+           moved_at::text AS moved_at, meeting_id
+    FROM action_item_moves
+    WHERE action_item_id = ${parsed.data}
+      AND meeting_id IS NOT NULL
+    ORDER BY moved_at ASC
+  `)) as unknown as Array<{
+    id: string;
+    from_section: string | null;
+    to_section: string;
+    moved_by_user_id: string;
+    moved_at: string;
+    meeting_id: string;
+  }>;
+
+  const snapshots = (await db.execute(sql`
+    SELECT id, meeting_id, snapshot_kind, snapshot_status, snapshot_section,
+           snapshot_at::text AS snapshot_at
+    FROM meeting_action_item_state
+    WHERE action_item_id = ${parsed.data}
+    ORDER BY snapshot_at ASC
+  `)) as unknown as Array<{
+    id: string;
+    meeting_id: string;
+    snapshot_kind: string;
+    snapshot_status: string;
+    snapshot_section: string;
+    snapshot_at: string;
+  }>;
+
+  const closures = (await db.execute(sql`
+    SELECT id, meeting_id, closed_by_actor_id, counter_signed_by_actor_id,
+           closed_at::text AS closed_at,
+           counter_signed_at::text AS counter_signed_at,
+           self_attestation, superseded_at::text AS superseded_at
+    FROM action_item_closures
+    WHERE action_item_id = ${parsed.data}
+      AND meeting_id IS NOT NULL
+    ORDER BY closed_at ASC
+  `)) as unknown as Array<{
+    id: string;
+    meeting_id: string;
+    closed_by_actor_id: string;
+    counter_signed_by_actor_id: string;
+    closed_at: string;
+    counter_signed_at: string;
+    self_attestation: boolean;
+    superseded_at: string | null;
+  }>;
+
+  // Union of all distinct meeting_ids touched by this action item.
+  const touchedMeetingIds = new Set<string>();
+  if (ai.first_raised_meeting_id) touchedMeetingIds.add(ai.first_raised_meeting_id);
+  if (ai.meeting_id) touchedMeetingIds.add(ai.meeting_id);
+  for (const m of moves) touchedMeetingIds.add(m.meeting_id);
+  for (const s of snapshots) touchedMeetingIds.add(s.meeting_id);
+  for (const c2 of closures) touchedMeetingIds.add(c2.meeting_id);
+
+  if (touchedMeetingIds.size === 0) {
+    return c.json({
+      actionItemId: parsed.data,
+      firstRaisedMeetingId: ai.first_raised_meeting_id,
+      items: [],
+      asOf: new Date().toISOString(),
+    });
+  }
+
+  const meetingIdList = Array.from(touchedMeetingIds);
+  // Use ANY to avoid building a dynamic IN list.
+  const meetings = (await db.execute(sql`
+    SELECT id, status, scheduled_at::text AS scheduled_at,
+           actual_start_at::text AS actual_start_at,
+           location
+    FROM meetings
+    WHERE id = ANY(${meetingIdList}::uuid[])
+  `)) as unknown as Array<{
+    id: string;
+    status: string;
+    scheduled_at: string | null;
+    actual_start_at: string | null;
+    location: string | null;
+  }>;
+  const meetingById = new Map(meetings.map((m) => [m.id, m]));
+
+  const items = meetingIdList
+    .map((meetingId) => {
+      const meeting = meetingById.get(meetingId) ?? null;
+      const itemSnapshots = snapshots.filter((s) => s.meeting_id === meetingId);
+      const itemMoves = moves.filter((m) => m.meeting_id === meetingId);
+      // Closures that occurred in this meeting (may include
+      // superseded rows from prior reopen + re-close cycles).
+      const itemClosures = closures.filter((c2) => c2.meeting_id === meetingId);
+      const meetingDate = meeting?.actual_start_at ?? meeting?.scheduled_at ?? null;
+      return {
+        meetingId,
+        meetingDate,
+        meetingStatus: meeting?.status ?? null,
+        meetingLocation: meeting?.location ?? null,
+        snapshotsThisMeeting: itemSnapshots.map((s) => ({
+          snapshotKind: s.snapshot_kind as 'live' | 'finalized',
+          snapshotAt: s.snapshot_at,
+          status: s.snapshot_status,
+          section: s.snapshot_section,
+        })),
+        movesThisMeeting: itemMoves.map((m) => ({
+          id: m.id,
+          fromSection: m.from_section,
+          toSection: m.to_section,
+          movedAt: m.moved_at,
+          movedByActorId: m.moved_by_user_id,
+        })),
+        closuresThisMeeting: itemClosures.map((c2) => ({
+          id: c2.id,
+          closedAt: c2.closed_at,
+          counterSignedAt: c2.counter_signed_at,
+          closedByActorId: c2.closed_by_actor_id,
+          counterSignerActorId: c2.counter_signed_by_actor_id,
+          selfAttestation: c2.self_attestation,
+          superseded: c2.superseded_at !== null,
+        })),
+      };
+    })
+    .sort((a, b) => {
+      // Chronological: prefer meetingDate; nulls last.
+      if (a.meetingDate === null && b.meetingDate === null) return 0;
+      if (a.meetingDate === null) return 1;
+      if (b.meetingDate === null) return -1;
+      return a.meetingDate < b.meetingDate ? -1 : 1;
+    });
+
+  return c.json({
+    actionItemId: parsed.data,
+    firstRaisedMeetingId: ai.first_raised_meeting_id,
+    items,
+    asOf: new Date().toISOString(),
+  });
+});
+
+// ---------------------------------------------------------------------------
 // PATCH /api/action-items/:id — non-section update
 // ---------------------------------------------------------------------------
 

@@ -421,3 +421,75 @@ The §2.14 threat-modeler surfaced 5 folds that need to land in S1 to satisfy th
 ### Slice handoff
 
 S1 begins from this ADR + SECURITY §2.14. The S1 brief MUST reference these 5 TM-folds explicitly so implementation doesn't drift. S5 reviewers verify each fold landed (security reviewer reads the action_item_closures table + chain-anchor payloads; linkage reviewer reads the closure_verification_id FK CHECK).
+
+## Post-M2.2 backlog (S5 fix-bundle deferrals)
+
+The three S5 reviewers (security, privacy/UX, linkage) surfaced 1
+CRITICAL + 8 HIGH + 10 MEDIUM defects, all closed in the S5 fix
+bundle. A short tail of 5 LOW findings is deferred to a dedicated
+follow-up milestone — the items are real but the impact is bounded
+and the fixes are heavier than an S5 bundle warrants (workflow
+extensions, new server endpoints with their own threat surfaces,
+or substantive design-system additions).
+
+1. **F-S7 — step-up freshness `action` claim is decorative.** The
+   `checkStepUpFreshness` helper accepts a step-up grant for ANY
+   action within the 60s window; the SECURITY §2.14 T-IM2 / T-IM41
+   mitigation language promises per-action and per-resource binding
+   that the substrate doesn't enforce. The fix is a step-up grant
+   tuple `(action, until, resourceId?)` + tightened freshness check;
+   this is a workspace-wide auth refactor, not an action-item-
+   scoped change. Track as the dedicated step-up hardening
+   milestone alongside the per-resource `clientDataJSON` binding
+   (T-IM41 deepening fold).
+
+2. **F-S8 — reopen route emits no `meeting.*` cross-anchor.** An
+   in-meeting reopen lands only the per-item `action_item.reopened`
+   event; the meeting's chain envelope has no parallel event even
+   when the reopen happens during an `in_progress` meeting (a
+   plausible workflow: a closure verified earlier is reconsidered
+   later in the same meeting). The fix mirrors the PATCH + close-
+   verification cross-anchor pattern: emit `meeting.action_item_
+status_changed { fromStatus: 'Closed', toStatus: 'In Progress'
+}` when the reopen's meeting_id points at an `in_progress`
+   meeting. Defer to the post-M2.2 reopen-completion pass.
+
+3. **F-S9 — counter-signer role gate is a string equality.** The
+   close-verification route gates on `counterSignerActorId ===
+auth.userId` per single-tenant scope; the documented
+   `worker_co_chair` role check is collapsed because the rep is
+   the sole in-app worker_co_chair until 2.5 introduces a second
+   in-app worker rep. The fix is the 2.5 second-worker-rep
+   onboarding — replace the equality with a JOIN against the
+   user_roles table filtered by `role IN minutesSignerRoles`.
+   Surface in the M2.2 runbook so the 2.5 implementer doesn't
+   drift; no work needed at single-rep scope.
+
+4. **F-S6 — `previousClosureId` chain semantics under repeat
+   reopen + re-close cycles.** With the S5 CRITICAL fix (F-L1)
+   landing the partial UNIQUE on (action_item_id) WHERE
+   superseded_at IS NULL, the chain CAN now anchor multiple
+   `closure_verified` events per item interleaved with
+   `reopened` events. Gate 2 (`reopened_no_prior_closure`) only
+   checks that SOME prior closure exists; it doesn't validate
+   that `previousClosureId` matches the MOST-RECENT prior
+   closure. A tampered chain could pair a reopen with an
+   earlier-still-superseded closure. The fix tightens Gate 2 to
+   resolve `previousClosureId` against the most-recent closure
+   upstream; modest verifier work but requires a payload-shape
+   migration. Defer to the chain-verifier hardening pass.
+
+5. **F-L7 — `action_item_closures.audit_idx` FK was not added.**
+   The ADR §3.1 column list specifies `audit_idx bigint not null
+references audit_log(idx)` + a `action_item_closures_audit_idx_
+unique` index for the per-entity audit-anchor invariant carried
+   forward from ADR-0007 §3.6. The verifier walks the chain (not
+   the table) so the operational impact is limited to out-of-band
+   admin discoverability ("show me the chain event for closure
+   X"). The fix is a new migration + closure-route update to
+   populate the column from `closureChainRow.idx`. Defer to the
+   chain-row-back-pointer pass.
+
+Once these five items have a target milestone, they should be
+lifted out of this Post-M2.2 backlog into the relevant ROADMAP
+entries with the appropriate cross-references.

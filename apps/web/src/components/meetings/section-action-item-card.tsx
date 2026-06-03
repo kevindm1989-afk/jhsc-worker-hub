@@ -28,7 +28,7 @@
 // dropdown + swipe affordance + quick-action buttons carry
 // data-print="hide".
 
-import { useRef, useState } from 'react';
+import { useEffect, useId, useRef, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { CheckCircle2, ChevronRight, MoreVertical, RotateCcw, ShieldCheck } from 'lucide-react';
 import { Button } from '@/components/ui/button';
@@ -71,6 +71,10 @@ interface SectionActionItemCardProps {
   /** Called after a successful PATCH / move so the parent re-fetches. */
   readonly onChanged: () => void;
   readonly currentUserId: string | null;
+  /** Roles held by the current user. Source: /api/auth/session. The
+   *  parent (section-action-items) reads from useAuth and threads
+   *  the list down so this leaf component stays a pure render. */
+  readonly currentUserRoles?: ReadonlyArray<string>;
 }
 
 export function SectionActionItemCard({
@@ -78,6 +82,7 @@ export function SectionActionItemCard({
   meetingId,
   onChanged,
   currentUserId,
+  currentUserRoles,
 }: SectionActionItemCardProps): JSX.Element {
   const [menuOpen, setMenuOpen] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -85,9 +90,46 @@ export function SectionActionItemCard({
   const [error, setError] = useState<string | null>(null);
   const [swipeOffset, setSwipeOffset] = useState(0);
   const touchStartXRef = useRef<number | null>(null);
+  // M2.2 S5 M-4 (F-P7) fix: WCAG 2.2 AA keyboard accessibility.
+  // The hand-rolled menu was missing Esc + outside-click + aria-
+  // controls linkage. Radix DropdownMenu is not installed in this
+  // workspace (would be a new dep + scope-creep for an S5 bundle);
+  // instead we add native handlers that mirror Radix's defaults.
+  const menuId = useId();
+  const triggerRef = useRef<HTMLButtonElement | null>(null);
+  const menuRef = useRef<HTMLDivElement | null>(null);
+
+  useEffect(() => {
+    if (!menuOpen) return;
+    const onKey = (e: KeyboardEvent): void => {
+      if (e.key === 'Escape') {
+        setMenuOpen(false);
+        triggerRef.current?.focus();
+      }
+    };
+    const onClickAway = (e: MouseEvent): void => {
+      const t = e.target as Node | null;
+      if (!t) return;
+      if (menuRef.current?.contains(t)) return;
+      if (triggerRef.current?.contains(t)) return;
+      setMenuOpen(false);
+    };
+    document.addEventListener('keydown', onKey);
+    document.addEventListener('mousedown', onClickAway);
+    return () => {
+      document.removeEventListener('keydown', onKey);
+      document.removeEventListener('mousedown', onClickAway);
+    };
+  }, [menuOpen]);
 
   const isClosed = item.status === 'Closed';
-  const isCoChair = currentUserId !== null; // single-rep scope per S0 Q1
+  // M2.2 S5 F-P1 fix: read the actual role from the auth session
+  // instead of the stubbed "any authenticated user" check. The
+  // Reopen route enforces the structural backstop (worker_co_chair
+  // gating); the UI gate prevents a non-co-chair from seeing a CTA
+  // that will 403 on click. currentUserRoles is optional for the
+  // M2.1 test harness that mounts cards without auth.
+  const isCoChair = currentUserId !== null && (currentUserRoles ?? []).includes('worker_co_chair');
 
   const onTouchStart = (e: React.TouchEvent<HTMLDivElement>): void => {
     if (e.touches.length !== 1) return;
@@ -246,9 +288,11 @@ export function SectionActionItemCard({
 
             <div className="relative">
               <button
+                ref={triggerRef}
                 type="button"
                 aria-haspopup="menu"
                 aria-expanded={menuOpen}
+                aria-controls={menuId}
                 aria-label="Status menu"
                 onClick={() => setMenuOpen((v) => !v)}
                 disabled={busy || isClosed}
@@ -259,8 +303,11 @@ export function SectionActionItemCard({
               </button>
               {menuOpen ? (
                 <div
+                  id={menuId}
+                  ref={menuRef}
                   role="menu"
-                  className="absolute right-0 top-full z-10 mt-1 w-44 rounded-md border border-border bg-popover p-1 shadow-lg"
+                  aria-labelledby={menuId}
+                  className="absolute right-0 top-full z-10 mt-1 w-48 rounded-md border border-border bg-popover p-1 shadow-lg"
                 >
                   <div className="px-2 py-1 text-[10px] uppercase tracking-wide text-muted-foreground">
                     Set status
@@ -272,8 +319,11 @@ export function SectionActionItemCard({
                       role="menuitem"
                       onClick={() => void setStatus(s)}
                       disabled={busy || s === item.status}
+                      // M-4 (F-P7) fix: bump menu items to 44pt
+                      // mobile / 32pt desktop to meet the touch
+                      // target rule on mobile (non-negotiable #9).
                       className={cn(
-                        'flex w-full items-center gap-2 rounded px-2 py-2 text-left text-xs hover:bg-muted focus:outline-none focus-visible:ring-2 focus-visible:ring-ring',
+                        'flex w-full min-h-11 items-center gap-2 rounded px-2 py-2 text-left text-sm hover:bg-muted focus:outline-none focus-visible:ring-2 focus-visible:ring-ring md:min-h-8 md:text-xs',
                         s === item.status ? 'text-muted-foreground' : 'text-foreground',
                       )}
                       data-testid={`action-item-status-option-${s.replace(/\s+/g, '-').toLowerCase()}`}

@@ -272,14 +272,21 @@ actionItemClosureRoute.post('/:id/close-verification', async (c) => {
     try {
       await db.transaction(async (tx) => {
         // T-IM10 mitigation: SELECT FOR UPDATE serializes concurrent
-        // close-verifications on the same action_item; the UNIQUE on
-        // (action_item_id) is the structural backstop.
+        // close-verifications on the same action_item; the partial
+        // UNIQUE on (action_item_id) WHERE superseded_at IS NULL is
+        // the structural backstop (migration 0013).
+        //
+        // M2.2 S5 F-S3 fix: `section` MUST be projected so the
+        // closure-route's snapshot write below records the item's
+        // actual section (not a hardcoded 'new_business' that
+        // mislabeled closures from old_business / recommendation).
         const locked = (await tx.execute(sql`
-          SELECT id, status, closure_verification_id, meeting_id, version
+          SELECT id, status, section, closure_verification_id, meeting_id, version
           FROM action_items WHERE id = ${idParsed.data} FOR UPDATE
         `)) as unknown as Array<{
           id: string;
           status: string;
+          section: string;
           closure_verification_id: string | null;
           meeting_id: string | null;
           version: number;
@@ -348,7 +355,18 @@ actionItemClosureRoute.post('/:id/close-verification', async (c) => {
             )
           `);
         } catch (e) {
-          if (e instanceof Error && /action_item_closures_action_item_unique/.test(e.message)) {
+          // M2.2 S5 F-L1 / F-S4 fix: migration 0013 replaced the
+          // strict UNIQUE on (action_item_id) with a partial UNIQUE
+          // on (action_item_id) WHERE superseded_at IS NULL named
+          // `action_item_closures_active_uq`. A re-close after reopen
+          // succeeds because the reopen route stamps superseded_at
+          // on the prior row. A duplicate active closure (two
+          // simultaneous close-verifications on the same item) still
+          // trips the partial UNIQUE → 409 ALREADY_CLOSED.
+          if (
+            e instanceof Error &&
+            /action_item_closures_active_uq|action_item_closures_action_item_unique/.test(e.message)
+          ) {
             throw new ClosureWriteAborted({
               status: 409,
               body: { error: 'ALREADY_CLOSED' },
@@ -370,6 +388,10 @@ actionItemClosureRoute.post('/:id/close-verification', async (c) => {
           WHERE id = ${idParsed.data}
         `);
 
+        // M2.2 S5 F-S2 fix: payload now carries closureReasonHash +
+        // closedAt + counterSignedAt so an offline verifier walking
+        // the chain alone can re-derive the canonical digest the
+        // Ed25519 attestation signs over.
         const closureChainRow = await append(tx, {
           actorId: auth.userId,
           payload: {
@@ -381,6 +403,9 @@ actionItemClosureRoute.post('/:id/close-verification', async (c) => {
             counterSignerActorId,
             selfAttestation: body.selfAttestation,
             signingKeyId: signingKey.id,
+            closureReasonHash,
+            closedAt,
+            counterSignedAt,
             evidenceHash: evidenceHashHex,
             attestationSigHash,
           },
@@ -398,12 +423,19 @@ actionItemClosureRoute.post('/:id/close-verification', async (c) => {
             SELECT status FROM meetings WHERE id = ${body.meetingId} LIMIT 1
           `)) as unknown as Array<{ status: string }>;
           if (meetingStatus.length > 0 && meetingStatus[0]!.status === 'in_progress') {
+            // M2.2 S5 F-S3 fix: use the action item's ACTUAL section
+            // (projected above into `item.section`). Pre-fix the
+            // ternary was structurally unreachable (status='Closed'
+            // is rejected at line 294 BEFORE this code runs) so the
+            // section was unconditionally 'new_business', mislabeling
+            // closures from old_business / recommendation in the
+            // finalized snapshot that backs the M2.3 PDF.
             await writeLiveActionItemSnapshot(tx, {
               actorId: auth.userId,
               meetingId: body.meetingId,
               actionItemId: idParsed.data,
               status: 'Closed',
-              section: item.status === 'Closed' ? 'completed_this_period' : 'new_business',
+              section: item.section,
               assigneeCt: null,
               assigneeDekCt: null,
             });
@@ -519,16 +551,23 @@ actionItemClosureRoute.post('/:id/reopen', async (c) => {
       // TM-fold-1: the CHECK constraint requires
       // (status='Closed') == (closure_verification_id IS NOT NULL),
       // so we clear BOTH atomically inside the transaction. The prior
-      // closure row in action_item_closures STAYS (per ADR §3.5 append-
-      // only history) — re-closing later writes a NEW row.
+      // closure row in action_item_closures STAYS (per ADR §3.5
+      // append-only history) — re-closing later writes a NEW row.
       //
-      // Wait — UNIQUE on (action_item_id) means there can be exactly
-      // ONE closure row per item ever. The S1 brief and the ADR are
-      // explicit on this point: re-opening clears the FK but the prior
-      // closure row remains as historical evidence. Re-closing
-      // requires a fresh route call (no second closure row is allowed
-      // by the UNIQUE; the re-open chain anchor + the existing closure
-      // row are the operational trace).
+      // M2.2 S5 F-L1 / F-S4 fix: stamp superseded_at on the prior
+      // closure row BEFORE clearing the FK. Migration 0013 replaced
+      // the strict UNIQUE on (action_item_id) with a partial UNIQUE
+      // WHERE superseded_at IS NULL — stamping here means a later
+      // re-close's INSERT no longer collides because the partial
+      // UNIQUE only counts ACTIVE rows. Pre-fix this was structurally
+      // impossible and re-closes returned 409 ALREADY_CLOSED
+      // indefinitely.
+      await tx.execute(sql`
+        UPDATE action_item_closures
+        SET superseded_at = now()
+        WHERE id = ${previousClosureId}
+          AND superseded_at IS NULL
+      `);
       await tx.execute(sql`
         UPDATE action_items
         SET status = 'In Progress',

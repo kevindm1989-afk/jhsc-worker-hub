@@ -267,17 +267,19 @@ function MetricsGrid({ metrics }: { metrics: MeetingLiveMetricsResponse }): JSX.
           <div className="text-[10px] uppercase tracking-wide text-muted-foreground">
             Closure verifications
           </div>
-          <div className="mt-1 flex items-center gap-3 text-xs">
+          {/* M2.2 S5 M-1 (F-P4) fix: collapse to total only. The
+           * self/peer breakdown at single-tenant scale is
+           * operationally equivalent to "the rep self-attested" vs
+           * "someone other than the rep counter-signed" — both
+           * trivially de-anonymize. T-IM27 (no per-rep attribution)
+           * is the structural defense; surfacing the breakdown on
+           * the running dashboard turns the self-attestation rate
+           * into a productivity metric. The breakdown still lives
+           * on the per-item closure-verification panel where it
+           * has evidentiary value. */}
+          <div className="mt-1 text-xs">
             <span className="font-mono tabular-nums text-foreground">
               total {metrics.closureVerifications.total}
-            </span>
-            <span className="text-muted-foreground">·</span>
-            <span className="font-mono tabular-nums text-muted-foreground">
-              self {metrics.closureVerifications.selfAttestation}
-            </span>
-            <span className="text-muted-foreground">·</span>
-            <span className="font-mono tabular-nums text-muted-foreground">
-              peer {metrics.closureVerifications.peerVerified}
             </span>
           </div>
         </div>
@@ -320,8 +322,7 @@ function MetricsGrid({ metrics }: { metrics: MeetingLiveMetricsResponse }): JSX.
         Meeting metrics as of {metrics.asOf}. Items raised: {metrics.itemsRaised} · closed:{' '}
         {metrics.itemsClosed} · recs drafted: {metrics.recommendationsDrafted} · inspections
         reviewed: {metrics.inspectionsReviewed} · closure verifications total{' '}
-        {metrics.closureVerifications.total} (self {metrics.closureVerifications.selfAttestation} /
-        peer {metrics.closureVerifications.peerVerified}).
+        {metrics.closureVerifications.total}.
       </div>
     </div>
   );

@@ -27,6 +27,12 @@ describe('action_item.closure_verified — type + runtime contract', () => {
       counterSignerActorId: '55555555-5555-4555-8555-555555555555',
       selfAttestation: false,
       signingKeyId: '66666666-6666-4666-8666-666666666666',
+      // M2.2 S5 F-S2 fix: payload now carries the attestation
+      // fields the chain-only verifier needs to re-derive the
+      // canonical digest.
+      closureReasonHash: 'c'.repeat(64),
+      closedAt: '2026-06-10T13:30:00.000Z',
+      counterSignedAt: '2026-06-10T13:30:00.000Z',
       evidenceHash: 'a'.repeat(64),
       attestationSigHash: 'b'.repeat(64),
     };
@@ -43,6 +49,9 @@ describe('action_item.closure_verified — type + runtime contract', () => {
       counterSignerActorId: 'y',
       selfAttestation: false,
       signingKeyId: 'k',
+      closureReasonHash: 'h'.repeat(64),
+      closedAt: '2026-06-10T13:30:00.000Z',
+      counterSignedAt: '2026-06-10T13:30:00.000Z',
       evidenceHash: null,
       attestationSigHash: 'z'.repeat(64),
     };
@@ -61,6 +70,9 @@ describe('action_item.closure_verified — type + runtime contract', () => {
       counterSignerActorId: 'y',
       selfAttestation: true,
       signingKeyId: 'k',
+      closureReasonHash: 'h'.repeat(64),
+      closedAt: '2026-06-10T13:30:00.000Z',
+      counterSignedAt: '2026-06-10T13:30:00.000Z',
       evidenceHash: null,
       attestationSigHash: 'z'.repeat(64),
     };
@@ -75,6 +87,29 @@ describe('action_item.closure_verified — type + runtime contract', () => {
       void _bad2;
       void _bad3;
       expect(p.selfAttestation).toBe(true);
+    }
+  });
+
+  it('carries closureReasonHash + closedAt + counterSignedAt for chain-only Ed25519 re-derivation (M2.2 S5 F-S2)', () => {
+    const p: AuditPayload = {
+      kind: 'action_item.closure_verified',
+      actionItemId: 'a',
+      closureId: 'c',
+      meetingId: null,
+      closerActorId: 'x',
+      counterSignerActorId: 'y',
+      selfAttestation: true,
+      signingKeyId: 'k',
+      closureReasonHash: 'd'.repeat(64),
+      closedAt: '2026-06-10T13:30:00.000Z',
+      counterSignedAt: '2026-06-10T13:30:00.000Z',
+      evidenceHash: null,
+      attestationSigHash: 'z'.repeat(64),
+    };
+    if (p.kind === 'action_item.closure_verified') {
+      expect(p.closureReasonHash).toHaveLength(64);
+      expect(p.closedAt).toBe('2026-06-10T13:30:00.000Z');
+      expect(p.counterSignedAt).toBe('2026-06-10T13:30:00.000Z');
     }
   });
 });

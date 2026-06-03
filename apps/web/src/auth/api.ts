@@ -144,6 +144,11 @@ export interface SessionInfo {
   readonly userId: string;
   readonly displayName: string | null;
   readonly sessionId: string;
+  // M2.2 S5 F-P1 fix: the rep's role(s) so the web client can gate
+  // affordances (Reopen CTA, counter-sign CTA) against the actual
+  // permission. Optional for backward compatibility with sessions
+  // captured before the server extension landed.
+  readonly roles?: ReadonlyArray<string>;
   readonly stepUp: { readonly active: boolean; readonly until: string | null };
 }
 
