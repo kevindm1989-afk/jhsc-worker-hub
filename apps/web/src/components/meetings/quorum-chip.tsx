@@ -31,6 +31,13 @@ export function QuorumChip({ attendance, jurisdiction }: QuorumChipProps): JSX.E
   const [statute, citation] = result.ruleCitation.split(/\s+/, 2);
   return (
     <div
+      // M2.1 S5 M-5 (F-P5) close-out: aria-live="polite" so screen-
+      // reader users hear the compliance flip when attendance changes
+      // mid-meeting. role="status" pairs with the existing aria-label
+      // text so the announcement is the threshold + worker rep count.
+      role="status"
+      aria-live="polite"
+      aria-atomic="true"
       className={
         result.compliant
           ? 'inline-flex items-center gap-1.5 rounded-full border border-emerald-300 bg-emerald-50 px-2.5 py-0.5 text-xs font-medium text-emerald-800'

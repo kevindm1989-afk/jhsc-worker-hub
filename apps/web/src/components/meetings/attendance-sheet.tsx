@@ -12,7 +12,7 @@
 // uniqueness; the UI surfaces the 409 verbatim so the rep can
 // correct.
 
-import { useId, useMemo, useState } from 'react';
+import { useEffect, useId, useMemo, useRef, useState } from 'react';
 import { Users, X } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { MeetingApiError, meetingsApi } from '@/meetings/api';
@@ -88,6 +88,27 @@ export function AttendanceSheet(props: AttendanceSheetProps): JSX.Element | null
     () => partyOverride ?? partyFromRole(role),
     [partyOverride, role],
   );
+
+  // M2.1 S5 M-4 (F-P4) close-out: Escape closes + focus returns to the
+  // previously focused trigger element. The trigger is captured at
+  // open-time. Focus return matches the modal-dialog WCAG 2.2 contract.
+  const previouslyFocusedRef = useRef<HTMLElement | null>(null);
+  const firstFieldRef = useRef<HTMLInputElement | null>(null);
+  useEffect(() => {
+    if (!open) return;
+    previouslyFocusedRef.current =
+      typeof document !== 'undefined' ? (document.activeElement as HTMLElement | null) : null;
+    // Autofocus the first input for keyboard reps.
+    firstFieldRef.current?.focus();
+    const onKey = (e: KeyboardEvent): void => {
+      if (e.key === 'Escape') onClose();
+    };
+    document.addEventListener('keydown', onKey);
+    return () => {
+      document.removeEventListener('keydown', onKey);
+      previouslyFocusedRef.current?.focus?.();
+    };
+  }, [open, onClose]);
 
   if (!open) return null;
 
@@ -200,6 +221,7 @@ export function AttendanceSheet(props: AttendanceSheetProps): JSX.Element | null
             </label>
             <input
               id={nameId}
+              ref={firstFieldRef}
               type="text"
               value={displayName}
               onChange={(e) => setDisplayName(e.target.value)}

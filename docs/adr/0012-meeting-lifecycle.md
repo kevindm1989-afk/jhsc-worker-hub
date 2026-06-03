@@ -674,3 +674,13 @@ The §2.13 threat-modeler flagged five concerns that need to land in S1 to satis
 ### Slice handoff
 
 S1 begins from this ADR + SECURITY §2.13. The S1 brief MUST reference these five TM-folds explicitly so the implementation doesn't drift. S5 reviewers verify each fold landed.
+
+## S5 close — Post-M2.1 backlog
+
+The S5 fix bundle (8 HIGH + 6 MEDIUM) shipped against the three independent reviewers' findings. Five LOW items were explicitly deferred to a future 2.x slice or accepted as residual; tracked here so a future reviewer cross-checks them against the shipped behaviour rather than re-discovering them.
+
+- **L-1: Same-day duplicate meeting check (F-L6).** Per ADR §3.4 step 5 a soft warning when a meeting already exists on `meeting_date` was specified but not implemented. Defer to **M2.2** (In-Meeting Action Item Management) — add `UNIQUE(workplace_singleton, meeting_date)` (or a route-level pre-insert check) when 2.2 touches the meetings route surface. Accepted as residual until then because the rep is single-tenant and unlikely to double-book; the operator runbook flags this.
+- **L-2: `meeting.attendance.updated` kind reuse vs. separate (F-L7).** PATCH on attendance re-uses `meeting.attendance.recorded`. The verifier cannot distinguish "added" from "updated" without timestamp ordering. **Accepted as documented in ADR §3.10.** A future slice that needs the distinction can add `meeting.attendance.updated`; for 2.1 the timestamp-order signal is enough.
+- **L-3: Action item count chip on /minutes cards (F-L8).** The meeting detail view links to `/action-items` rather than embedding a live count. **Defer to M2.2** which absorbs the in-meeting action-item management view — the count chip lives there alongside the card-list inside the section view.
+- **L-4: Dead `adjourned` status (F-L9).** The DB enum + finalize handler reference `adjourned` but the adjourn route flips status straight to `pending_finalization`. Removing the enum value requires a migration — not worth the cost in 2.1. **Documented in the deploy runbook** as the sub-state collapse.
+- **L-5: Routine section start/end step-up friction (F-L10).** Per ADR §3.10 the 60s step-up window applies to create/adjourn/sign/finalize only — section start/end and notes append are NOT step-up-gated, matching ADR §3.10. **Accepted per "Negative tradeoffs"** — the 4-step-up signature flow is the cost of the T-ML6 mitigation; the recovery path (clean 401 → modal dispatch) works.

@@ -255,12 +255,31 @@
     margin-bottom: 0.5rem;
   }
 
-  /* Force expanded body rendering on meeting section accordions. The
-   * SectionAccordion component conditionally renders the body when
-   * `expanded` state is true. For print we don't have access to that
-   * state; the spec accepts the on-screen collapse state. A future
-   * S4/S5 enhancement could expose a "Print all sections expanded"
-   * toggle that opens every accordion before printing. */
+  /*
+   * Force-expand every meeting SectionAccordion body on print
+   * (M2.1 S5 F-P1 close-out). The SectionAccordion component now
+   * renders the body unconditionally with `data-section-accordion-body`
+   * and uses Tailwind's `hidden` class on screen when collapsed; the
+   * rule below un-hides every body for the printout so the rep gets
+   * the full canonical minutes regardless of on-screen state. The
+   * toggle button itself stays in the DOM but conveys no print value
+   * — we hide it so the print output reads as flat content under each
+   * section header.
+   */
+  [data-section-accordion-body] {
+    display: block !important;
+    height: auto !important;
+    overflow: visible !important;
+    visibility: visible !important;
+  }
+  [data-section-accordion-body].hidden {
+    display: block !important;
+  }
+  [data-section-accordion-toggle] {
+    /* Keep the heading text but remove the toggle affordance look. */
+    cursor: default !important;
+    pointer-events: none !important;
+  }
 
   /* Surface evidentially-relevant metadata that screen mode collapses. */
   [data-print='evidentiary'] {

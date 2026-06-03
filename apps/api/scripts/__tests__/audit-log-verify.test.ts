@@ -817,3 +817,102 @@ describe('checkMeetingChain — created_template_not_seeded (M2.1 S4)', () => {
     }
   });
 });
+
+// ---------------------------------------------------------------------------
+// M2.1 S5 F-S2 — runtime signer roles config
+// ---------------------------------------------------------------------------
+//
+// The verifier's Gate 1 (4-of-4 signature presence) MUST match the
+// route's runtime config so a workplace whose env declares a different
+// role set is verifiable end-to-end. The pre-S5 verifier hardcoded the
+// 4 role IDs; this test asserts the Gate accepts a 3-role config when
+// passed via options and that Gates 2/3/4 still hold.
+
+describe('checkMeetingChain — runtime signer roles (M2.1 S5 F-S2)', () => {
+  it('accepts a meeting.finalized chain with 3 sigs when 3 roles are configured', () => {
+    const rows = [
+      meetingRow({
+        idx: 0,
+        kind: 'audit.meeting_template.seeded',
+        payload: { templateVersion: 1, jurisdiction: 'ON', templateHash: 'a'.repeat(64) },
+      }),
+      meetingRow({
+        idx: 1,
+        kind: 'meeting.created',
+        payload: { meetingId: MID, agendaTemplateVersion: 1, jurisdiction: 'ON' },
+      }),
+      meetingRow({
+        idx: 2,
+        kind: 'meeting.adjourned',
+        payload: { meetingId: MID, metrics: VALID_METRICS },
+      }),
+      meetingRow({
+        idx: 3,
+        kind: 'meeting.signed',
+        payload: { meetingId: MID, signerRole: 'worker_co_chair' },
+      }),
+      meetingRow({
+        idx: 4,
+        kind: 'meeting.signed',
+        payload: { meetingId: MID, signerRole: 'mgmt_co_chair' },
+      }),
+      meetingRow({
+        idx: 5,
+        kind: 'meeting.signed',
+        payload: { meetingId: MID, signerRole: 'mgmt_external_1' },
+      }),
+      meetingRow({ idx: 6, kind: 'meeting.finalized', payload: { meetingId: MID } }),
+    ];
+    const result = verifyInternals.checkMeetingChain(rows, {
+      requiredSignerRoles: ['worker_co_chair', 'mgmt_co_chair', 'mgmt_external_1'],
+    });
+    expect(result.ok).toBe(true);
+  });
+
+  it('flags a finalized chain that does NOT match the configured role count', () => {
+    // 3-role config but the chain has 4 sigs — count mismatch.
+    const rows = [
+      meetingRow({ idx: 0, kind: 'meeting.created', payload: { meetingId: MID } }),
+      meetingRow({
+        idx: 1,
+        kind: 'meeting.signed',
+        payload: { meetingId: MID, signerRole: 'worker_co_chair' },
+      }),
+      meetingRow({
+        idx: 2,
+        kind: 'meeting.signed',
+        payload: { meetingId: MID, signerRole: 'mgmt_co_chair' },
+      }),
+      meetingRow({
+        idx: 3,
+        kind: 'meeting.signed',
+        payload: { meetingId: MID, signerRole: 'mgmt_external_1' },
+      }),
+      meetingRow({
+        idx: 4,
+        kind: 'meeting.signed',
+        payload: { meetingId: MID, signerRole: 'mgmt_external_2' },
+      }),
+      meetingRow({ idx: 5, kind: 'meeting.finalized', payload: { meetingId: MID } }),
+    ];
+    const result = verifyInternals.checkMeetingChain(rows, {
+      requiredSignerRoles: ['worker_co_chair', 'mgmt_co_chair', 'mgmt_external_1'],
+    });
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.anomalies.some((a) => a.reason === 'finalized_signatures_wrong_count')).toBe(
+        true,
+      );
+    }
+  });
+
+  it('readRequiredSignerRolesFromEnv falls back to the canonical 4 roles when env is empty', () => {
+    const roles = verifyInternals.readRequiredSignerRolesFromEnv({});
+    expect(roles).toEqual([
+      'worker_co_chair',
+      'mgmt_co_chair',
+      'mgmt_external_1',
+      'mgmt_external_2',
+    ]);
+  });
+});

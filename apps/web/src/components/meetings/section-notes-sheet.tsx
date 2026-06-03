@@ -13,7 +13,7 @@
 // T-ML9 mitigation (apps/api/src/routes/meetings/index.ts §POST
 // /sections/:sid/notes). The full plaintext NEVER crosses the wire.
 
-import { useId, useState } from 'react';
+import { useEffect, useId, useRef, useState } from 'react';
 import { ScrollText, X } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { MeetingApiError, meetingsApi } from '@/meetings/api';
@@ -39,6 +39,23 @@ export function SectionNotesSheet(props: SectionNotesSheetProps): JSX.Element | 
   const [notes, setNotes] = useState(initialPlaintext ?? '');
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  // M2.1 S5 M-4 (F-P4) close-out: Escape closes + focus returns to
+  // the previously focused trigger.
+  const previouslyFocusedRef = useRef<HTMLElement | null>(null);
+  useEffect(() => {
+    if (!open) return;
+    previouslyFocusedRef.current =
+      typeof document !== 'undefined' ? (document.activeElement as HTMLElement | null) : null;
+    const onKey = (e: KeyboardEvent): void => {
+      if (e.key === 'Escape') onClose();
+    };
+    document.addEventListener('keydown', onKey);
+    return () => {
+      document.removeEventListener('keydown', onKey);
+      previouslyFocusedRef.current?.focus?.();
+    };
+  }, [open, onClose]);
 
   if (!open) return null;
 

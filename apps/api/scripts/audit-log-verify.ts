@@ -42,6 +42,7 @@ import {
   verifyChainFull,
   type AuditRow,
 } from '../src/lib/audit-verify-full';
+import { loadWorkplaceConfig, type SignerRoleId } from '../../../config/workplace';
 
 interface AuthEventRow {
   id: string;
@@ -333,18 +334,42 @@ interface MeetingAnomaly {
   readonly detail: string;
 }
 
-const REQUIRED_SIGNER_ROLES = [
+// M2.1 S5 F-S2 close-out: the verifier's Gate 1 (4-of-4 signature
+// presence by role) MUST match the route's runtime configuration. The
+// pre-S5 verifier hardcoded the role IDs, which meant a workplace
+// whose `MINUTES_SIGNER_*_LABEL` env was edited to a 3- or 5-role set
+// would surface a fleet of `finalized_missing_signatures` anomalies
+// even though the route's finalize gate (which reads the same env)
+// accepted the same row. The default callers below read the runtime
+// config; tests can pass a fixed array to validate edge cases.
+const DEFAULT_REQUIRED_SIGNER_ROLES: ReadonlyArray<SignerRoleId> = [
   'worker_co_chair',
   'mgmt_co_chair',
   'mgmt_external_1',
   'mgmt_external_2',
-] as const;
+];
+
+function readRequiredSignerRolesFromEnv(
+  env: NodeJS.ProcessEnv = process.env,
+): ReadonlyArray<SignerRoleId> {
+  // Allow-empty mode: in dev/test where the labels aren't set the
+  // verifier still ships the canonical 4-role expectation rather than
+  // refusing to start.
+  try {
+    const roles = loadWorkplaceConfig(env).minutesSignerRoles.map((r) => r.id);
+    return roles.length > 0 ? roles : DEFAULT_REQUIRED_SIGNER_ROLES;
+  } catch {
+    return DEFAULT_REQUIRED_SIGNER_ROLES;
+  }
+}
 
 function checkMeetingChain(
   rows: ReadonlyArray<MeetingChainRow>,
+  options: { readonly requiredSignerRoles?: ReadonlyArray<SignerRoleId> } = {},
 ):
   | { ok: true; checked: number }
   | { ok: false; anomalies: ReadonlyArray<MeetingAnomaly>; checked: number } {
+  const requiredSignerRoles = options.requiredSignerRoles ?? DEFAULT_REQUIRED_SIGNER_ROLES;
   const meetingEvents = rows.filter((r) => r.kind.startsWith('meeting.'));
   const recommendationDraftedEvents = rows.filter((r) => r.kind === 'recommendation.drafted');
   const templateSeededEvents = rows.filter((r) => r.kind === 'audit.meeting_template.seeded');
@@ -406,20 +431,22 @@ function checkMeetingChain(
         }
       }
     } else if (e.kind === 'meeting.finalized') {
-      // Gate 1: 4 meeting.signed events upstream of this finalized event
-      // covering all 4 required roles.
+      // Gate 1: N meeting.signed events upstream of this finalized event
+      // covering all N required roles, where N comes from runtime config
+      // (M2.1 S5 F-S2 close-out). The route's finalize handler reads
+      // the same source — change the env, change the gate.
       const sigsUpstream = peers.filter((p) => p.kind === 'meeting.signed' && p.idx < e.idx);
-      if (sigsUpstream.length !== 4) {
+      if (sigsUpstream.length !== requiredSignerRoles.length) {
         anomalies.push({
           idx: e.idx,
           kind: e.kind,
           reason: 'finalized_signatures_wrong_count',
-          detail: `expected 4 meeting.signed events; found ${sigsUpstream.length}`,
+          detail: `expected ${requiredSignerRoles.length} meeting.signed events; found ${sigsUpstream.length}`,
         });
         continue;
       }
       const roles = new Set(sigsUpstream.map((s) => s.payload?.signerRole));
-      const missing = REQUIRED_SIGNER_ROLES.filter((r) => !roles.has(r));
+      const missing = requiredSignerRoles.filter((r) => !roles.has(r));
       if (missing.length > 0) {
         anomalies.push({
           idx: e.idx,
@@ -462,6 +489,26 @@ function checkMeetingChain(
       }
     } else if (e.kind === 'meeting.recommendation_drafted') {
       // Gate 3: cross-chain anchor hash match (TM-fold-3 / T-ML42).
+      //
+      // Mental model (M2.1 S5 F-L4 close-out comment):
+      //   The recommendations route emits TWO chain rows inside a
+      //   single transaction when a recommendation is drafted in a
+      //   meeting:
+      //     - `recommendation.drafted` — the 1.9-native event
+      //       carrying the rec's `recommendationId`. Its `thisHash` is
+      //       captured by the route handler.
+      //     - `meeting.recommendation_drafted` — this cross-chain
+      //       anchor, whose payload carries the SAME `recommendationId`
+      //       AND `recommendationCreatedEventHash` set to the prior
+      //       row's `thisHash`.
+      //   The recommendation row itself FKs back at the
+      //   `recommendation.drafted` row's audit_idx — NOT this anchor.
+      //   That asymmetry is intentional (the recommendation is the
+      //   primary; the meeting linkage is the secondary). Gate 3
+      //   verifies the secondary's claimed hash matches the primary's
+      //   actual `thisHash`. Both rows live in the same transaction
+      //   so an atomicity violation rolls both back together —
+      //   there's no orphan anchor surface to defend against here.
       const recId = e.payload?.recommendationId;
       const claimedHash = e.payload?.recommendationCreatedEventHash;
       if (typeof recId !== 'string' || typeof claimedHash !== 'string') {
@@ -501,7 +548,7 @@ function checkMeetingChain(
   return { ok: false, anomalies, checked: meetingEvents.length };
 }
 
-export const _internals = { checkMeetingChain };
+export const _internals = { checkMeetingChain, readRequiredSignerRolesFromEnv };
 
 /**
  * Fetch the audit_log rows in idx-ASC order, optionally bounded by
@@ -680,6 +727,7 @@ async function main(): Promise<void> {
         payload: r.payload,
         this_hash: r.this_hash,
       })),
+      { requiredSignerRoles: readRequiredSignerRolesFromEnv() },
     );
     if (!meetingsCheck.ok) {
       if (quiet) {

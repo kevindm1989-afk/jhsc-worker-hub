@@ -44,6 +44,7 @@ import { cn } from '@/lib/utils';
 import { AttendanceSheet, ATTENDANCE_ROLE_LABELS } from '@/components/meetings/attendance-sheet';
 import { QuorumChip } from '@/components/meetings/quorum-chip';
 import { humaniseSectionType, SectionNotesSheet } from '@/components/meetings/section-notes-sheet';
+import { CitationRef } from '@/legal/citation-ref';
 import {
   MeetingApiError,
   meetingsApi,
@@ -634,6 +635,12 @@ function SectionAccordion(props: SectionAccordionProps): JSX.Element {
   const isMutable = status === 'scheduled' || status === 'in_progress' || status === 'adjourned';
   const isCoChairOnly = section.visibility === 'co_chair_only';
 
+  // M2.1 S5 F-P1 close-out: render the body unconditionally + hide via
+  // CSS so the print stylesheet (apps/web/src/index.css `@media print`)
+  // can flip every section's body open. The `data-section-accordion-body`
+  // attribute is the canonical print-target hook. The collapsed
+  // body is `hidden` (display: none) on screen via the conditional
+  // class so screen-mode behaviour matches the pre-S5 collapse.
   return (
     <div
       className={cn('rounded-md border bg-card', expanded ? 'border-primary/40' : 'border-border')}
@@ -643,6 +650,7 @@ function SectionAccordion(props: SectionAccordionProps): JSX.Element {
         type="button"
         onClick={onToggle}
         aria-expanded={expanded}
+        data-section-accordion-toggle=""
         className="flex w-full items-center justify-between gap-2 px-3 py-3 text-left focus:outline-none focus-visible:ring-2 focus-visible:ring-ring"
       >
         <div className="min-w-0 flex-1">
@@ -686,54 +694,73 @@ function SectionAccordion(props: SectionAccordionProps): JSX.Element {
         </div>
       </button>
 
-      {expanded ? (
-        <div className="border-t border-border px-3 py-3">
-          {section.sectionType === 'roll_call_quorum' ? (
-            <div className="mb-3">
-              <QuorumChip
-                attendance={attendance.map((a) => ({
-                  role: a.role,
-                  presentStatus: a.presentStatus,
-                }))}
-                jurisdiction={jurisdiction}
-              />
-            </div>
-          ) : null}
+      <div
+        data-section-accordion-body=""
+        className={cn('border-t border-border px-3 py-3', expanded ? '' : 'hidden')}
+      >
+        {section.sectionType === 'roll_call_quorum' ? (
+          <div className="mb-3">
+            <QuorumChip
+              attendance={attendance.map((a) => ({
+                role: a.role,
+                presentStatus: a.presentStatus,
+              }))}
+              jurisdiction={jurisdiction}
+            />
+            {attendance.length === 0 ? (
+              <div
+                className="mt-2 rounded-md border border-amber-200 bg-amber-50 p-2 text-[11px] text-amber-900"
+                role="status"
+                aria-live="polite"
+                data-testid="roll-call-no-attendees"
+              >
+                No attendees recorded yet — tap <strong>Add</strong> on the Attendance card to
+                capture each member as they call out. Quorum cannot compute without members.
+              </div>
+            ) : null}
+          </div>
+        ) : null}
 
-          {isCoChairOnly ? (
-            <div className="rounded-md border border-zinc-200 bg-zinc-50 p-3 text-xs text-zinc-700">
-              In-camera notes for co-chair-only sections land in a future milestone (TM-fold-2
-              forward seam). This section is read-only in 2.1.
-            </div>
-          ) : (
-            <div className="text-xs text-muted-foreground">
-              {section.notesEnvelopeCt
-                ? 'Notes are encrypted at rest. Open the notes sheet to revise.'
-                : 'No notes captured for this section yet.'}
-            </div>
-          )}
+        {section.sectionType === 'recommendations' ? (
+          <div className="mb-2 text-[11px] text-muted-foreground">
+            Notice of Recommendation under <CitationRef statute="OHSA" citation="s.9(20)" /> /{' '}
+            <CitationRef statute="CLC" citation="s.135(5)" />.
+          </div>
+        ) : null}
 
-          {isMutable && !isCoChairOnly ? (
-            <div className="mt-3 flex flex-wrap gap-2" data-print="hide">
-              {!section.startedAt ? (
-                <Button size="sm" variant="outline" onClick={onStart}>
-                  <Play className="h-3.5 w-3.5" strokeWidth={2} aria-hidden="true" />
-                  Start section
-                </Button>
-              ) : !section.endedAt ? (
-                <Button size="sm" variant="outline" onClick={onEnd}>
-                  <Square className="h-3.5 w-3.5" strokeWidth={2} aria-hidden="true" />
-                  End section
-                </Button>
-              ) : null}
-              <Button size="sm" variant="outline" onClick={onEditNotes}>
-                <StickyNote className="h-3.5 w-3.5" strokeWidth={2} aria-hidden="true" />
-                {section.notesEnvelopeCt ? 'Edit notes' : 'Add notes'}
+        {isCoChairOnly ? (
+          <div className="rounded-md border border-zinc-200 bg-zinc-50 p-3 text-xs text-zinc-700">
+            In-camera notes for co-chair-only sections land in a future milestone (TM-fold-2 forward
+            seam). This section is read-only in 2.1.
+          </div>
+        ) : (
+          <div className="text-xs text-muted-foreground">
+            {section.notesEnvelopeCt
+              ? 'Notes are encrypted at rest. Open the notes sheet to revise.'
+              : 'No notes captured for this section yet.'}
+          </div>
+        )}
+
+        {isMutable && !isCoChairOnly ? (
+          <div className="mt-3 flex flex-wrap gap-2" data-print="hide">
+            {!section.startedAt ? (
+              <Button size="sm" variant="outline" onClick={onStart}>
+                <Play className="h-3.5 w-3.5" strokeWidth={2} aria-hidden="true" />
+                Start section
               </Button>
-            </div>
-          ) : null}
-        </div>
-      ) : null}
+            ) : !section.endedAt ? (
+              <Button size="sm" variant="outline" onClick={onEnd}>
+                <Square className="h-3.5 w-3.5" strokeWidth={2} aria-hidden="true" />
+                End section
+              </Button>
+            ) : null}
+            <Button size="sm" variant="outline" onClick={onEditNotes}>
+              <StickyNote className="h-3.5 w-3.5" strokeWidth={2} aria-hidden="true" />
+              {section.notesEnvelopeCt ? 'Edit notes' : 'Add notes'}
+            </Button>
+          </div>
+        ) : null}
+      </div>
     </div>
   );
 }

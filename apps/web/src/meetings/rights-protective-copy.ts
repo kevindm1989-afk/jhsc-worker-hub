@@ -47,7 +47,15 @@ export const MEETING_RIGHTS_COPY = {
   /** Returned by getStaleManagementSignatureHint() when the
    * management-side signatures have been pending for 30 days or
    * more. Surfaces the s.50 / s.147 reprisal pathway WITHOUT
-   * prescribing action. */
+   * prescribing action.
+   *
+   * NOTE (M2.1 S5 F-P2): the verbatim string is preserved as the
+   * snapshot-guard contract. The view renders this hint via
+   * `StaleManagementSignatureHint` (see meeting-finalization-view)
+   * which splits the prose around the statute references so each
+   * cite is a tap-and-hold-able <CitationRef />. The lint guards in
+   * `meetings-rights-protective-copy.test.ts` continue to operate on
+   * this canonical string. */
   staleManagementSignatureHint:
     'Management signatures pending. If you believe management is delaying sign-off in response to a refusal, complaint, or recommendation you raised, consider whether s.50 (OHSA) or s.147 (CLC Part II) reprisal protections apply. The decision is yours; this is informational only.',
 

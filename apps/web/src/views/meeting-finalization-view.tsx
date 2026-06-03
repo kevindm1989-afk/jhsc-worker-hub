@@ -53,6 +53,7 @@ import {
   type MeetingSignature,
 } from '@/meetings/api';
 import { sealMeetingField, WorkplaceKeyMissingError } from '@/meetings/crypto';
+import { CitationRef } from '@/legal/citation-ref';
 import {
   MEETING_RIGHTS_COPY,
   shouldSurfaceStaleManagementHint,
@@ -265,7 +266,17 @@ function Inner({ id }: { id: string }): JSX.Element {
             <AlertTriangle className="h-3.5 w-3.5" strokeWidth={2} aria-hidden="true" />
             Informational
           </div>
-          {MEETING_RIGHTS_COPY.staleManagementSignatureHint}
+          {/* M2.1 S5 F-P2 close-out: the most rights-load-bearing
+           * citation in the meeting surface — the rep contemplating
+           * a reprisal claim needs tap-and-hold access to the
+           * corpus clause. The verbatim string remains the snapshot
+           * contract; the JSX below splits the prose around the
+           * statute references so each is a <CitationRef />. */}
+          Management signatures pending. If you believe management is delaying sign-off in response
+          to a refusal, complaint, or recommendation you raised, consider whether{' '}
+          <CitationRef statute="OHSA" citation="s.50" /> or{' '}
+          <CitationRef statute="CLC" citation="s.147" /> reprisal protections apply. The decision is
+          yours; this is informational only.
         </div>
       ) : null}
 

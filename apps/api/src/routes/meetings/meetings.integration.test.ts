@@ -379,7 +379,10 @@ describe.skipIf(SKIP)('POST /api/meetings/:id/finalize — 4-signature gate (T-M
       if (method !== 'in_app_passkey') {
         body.evidenceEnvelopeCt = ENC_B64;
         body.evidenceEnvelopeDekCt = DEK_B64;
-        body.evidenceStorageKey = 'tigris/key/' + role;
+        // M2.1 S5 F-L1 close-out: use the canonical Tigris key format
+        // (evidence/<uuid>/blob) — the pre-S5 'tigris/key/<role>' shape
+        // would now be rejected by the route's Zod regex.
+        body.evidenceStorageKey = `evidence/${crypto.randomUUID()}/blob`;
       }
       return app.request(`/api/meetings/${meeting.id}/signatures`, {
         method: 'POST',
@@ -417,8 +420,333 @@ describe.skipIf(SKIP)('POST /api/meetings/:id/finalize — 4-signature gate (T-M
     // Chain integrity end-to-end.
     const v = await verify(getDb());
     expect(v.ok).toBe(true);
+
+    // M2.1 S5 F-S3 close-out: assert the emitted `meeting.finalized`
+    // payload is PI-free and structurally complete. A regression that
+    // silently leaked names or dropped signatureIds would not be caught
+    // by the route's 200 status alone.
+    const finalizedRows = (await getDb().execute(sql`
+      SELECT payload FROM audit_log WHERE kind = 'meeting.finalized'
+      ORDER BY idx DESC LIMIT 1
+    `)) as unknown as Array<{
+      payload: {
+        meetingId: string;
+        finalizedAt: string;
+        signatureIds: string[];
+        kind?: string;
+      };
+    }>;
+    expect(finalizedRows).toHaveLength(1);
+    const finalizedPayload = finalizedRows[0]!.payload;
+    expect(finalizedPayload.meetingId).toBe(meeting.id);
+    expect(typeof finalizedPayload.finalizedAt).toBe('string');
+    expect(finalizedPayload.signatureIds).toHaveLength(4);
+    for (const sigId of finalizedPayload.signatureIds) {
+      expect(sigId).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/);
+    }
+    // PI-clean: payload JSON must not contain any name fields, raw
+    // ciphertext markers, or signer name plaintext.
+    const finalizedJson = JSON.stringify(finalizedPayload);
+    expect(finalizedJson).not.toMatch(/Worker Co-Chair|ciphertext_envelope_demo|signerName/i);
+    expect(finalizedPayload).not.toHaveProperty('signerDisplayName');
+    expect(finalizedPayload).not.toHaveProperty('signerNames');
   });
 });
+
+// ---------------------------------------------------------------------------
+// M2.1 S5 F-S1 — signature route status gate (post-adjournment only)
+// ---------------------------------------------------------------------------
+
+describe.skipIf(SKIP)('POST /api/meetings/:id/signatures — status gate (M2.1 S5 F-S1)', () => {
+  async function signWorkerCoChair(cookie: string, meetingId: string): Promise<Response> {
+    return app.request(`/api/meetings/${meetingId}/signatures`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-requested-with': 'jhsc-web', cookie },
+      body: JSON.stringify({
+        signerRole: 'worker_co_chair',
+        signedMethod: 'in_app_passkey',
+        signerDisplayNameCt: ENC_B64,
+        signerDisplayNameDekCt: DEK_B64,
+      }),
+    });
+  }
+
+  it('rejects scheduled with 422 MEETING_NOT_ADJOURNED', async () => {
+    const { cookie } = await loginWithStepUp();
+    const meeting = await createMeeting(cookie);
+    // status is `scheduled` straight after create.
+    const res = await signWorkerCoChair(cookie, meeting.id);
+    expect(res.status).toBe(422);
+    const body = (await res.json()) as { error: string; currentStatus: string };
+    expect(body.error).toBe('MEETING_NOT_ADJOURNED');
+    expect(body.currentStatus).toBe('scheduled');
+  });
+
+  it('rejects in_progress with 422 MEETING_NOT_ADJOURNED', async () => {
+    const { cookie } = await loginWithStepUp();
+    const meeting = await createMeeting(cookie);
+    await app.request(`/api/meetings/${meeting.id}/start`, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        'x-requested-with': 'jhsc-web',
+        'if-match': '"1"',
+        cookie,
+      },
+      body: '{}',
+    });
+    const res = await signWorkerCoChair(cookie, meeting.id);
+    expect(res.status).toBe(422);
+    const body = (await res.json()) as { error: string; currentStatus: string };
+    expect(body.error).toBe('MEETING_NOT_ADJOURNED');
+    expect(body.currentStatus).toBe('in_progress');
+  });
+
+  it('accepts pending_finalization with 201', async () => {
+    const { cookie } = await loginWithStepUp();
+    const meeting = await createMeeting(cookie);
+    await app.request(`/api/meetings/${meeting.id}/start`, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        'x-requested-with': 'jhsc-web',
+        'if-match': '"1"',
+        cookie,
+      },
+      body: '{}',
+    });
+    await app.request(`/api/meetings/${meeting.id}/adjourn`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-requested-with': 'jhsc-web', cookie },
+      body: '{}',
+    });
+    const res = await signWorkerCoChair(cookie, meeting.id);
+    expect(res.status).toBe(201);
+  });
+
+  it('rejects finalized with 422 (already finalized — no further signatures)', async () => {
+    const { cookie } = await loginWithStepUp();
+    const meeting = await createMeeting(cookie);
+    await app.request(`/api/meetings/${meeting.id}/start`, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        'x-requested-with': 'jhsc-web',
+        'if-match': '"1"',
+        cookie,
+      },
+      body: '{}',
+    });
+    await app.request(`/api/meetings/${meeting.id}/adjourn`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-requested-with': 'jhsc-web', cookie },
+      body: '{}',
+    });
+    // Land all four sigs + finalize.
+    const signRole = async (role: string, method: string): Promise<void> => {
+      const body: Record<string, unknown> = {
+        signerRole: role,
+        signedMethod: method,
+        signerDisplayNameCt: ENC_B64,
+        signerDisplayNameDekCt: DEK_B64,
+      };
+      if (method !== 'in_app_passkey') {
+        body.evidenceEnvelopeCt = ENC_B64;
+        body.evidenceEnvelopeDekCt = DEK_B64;
+        body.evidenceStorageKey = `evidence/${crypto.randomUUID()}/blob`;
+      }
+      const r = await app.request(`/api/meetings/${meeting.id}/signatures`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', 'x-requested-with': 'jhsc-web', cookie },
+        body: JSON.stringify(body),
+      });
+      expect(r.status).toBe(201);
+    };
+    await signRole('worker_co_chair', 'in_app_passkey');
+    await signRole('mgmt_co_chair', 'paper_attestation');
+    await signRole('mgmt_external_1', 'paper_attestation');
+    await signRole('mgmt_external_2', 'paper_attestation');
+    const f = await app.request(`/api/meetings/${meeting.id}/finalize`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-requested-with': 'jhsc-web', cookie },
+      body: '{}',
+    });
+    expect(f.status).toBe(200);
+    // Now try to record a 5th signature — should fail with 422.
+    const res = await app.request(`/api/meetings/${meeting.id}/signatures`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-requested-with': 'jhsc-web', cookie },
+      body: JSON.stringify({
+        signerRole: 'mgmt_external_2',
+        signedMethod: 'paper_attestation',
+        signerDisplayNameCt: ENC_B64,
+        signerDisplayNameDekCt: DEK_B64,
+        evidenceEnvelopeCt: ENC_B64,
+        evidenceEnvelopeDekCt: DEK_B64,
+        evidenceStorageKey: `evidence/${crypto.randomUUID()}/blob`,
+      }),
+    });
+    expect(res.status).toBe(422);
+    const body = (await res.json()) as { error: string; currentStatus: string };
+    expect(body.error).toBe('MEETING_NOT_ADJOURNED');
+    expect(body.currentStatus).toBe('finalized');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// M2.1 S5 F-L1 — signature route rejects pending: synthetic storage keys
+// ---------------------------------------------------------------------------
+
+describe.skipIf(SKIP)(
+  'POST /api/meetings/:id/signatures — Tigris key format (M2.1 S5 F-L1)',
+  () => {
+    it('rejects a pending:<uuid> synthetic key with 400 invalid_body', async () => {
+      const { cookie } = await loginWithStepUp();
+      const meeting = await createMeeting(cookie);
+      await app.request(`/api/meetings/${meeting.id}/start`, {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/json',
+          'x-requested-with': 'jhsc-web',
+          'if-match': '"1"',
+          cookie,
+        },
+        body: '{}',
+      });
+      await app.request(`/api/meetings/${meeting.id}/adjourn`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', 'x-requested-with': 'jhsc-web', cookie },
+        body: '{}',
+      });
+      const res = await app.request(`/api/meetings/${meeting.id}/signatures`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', 'x-requested-with': 'jhsc-web', cookie },
+        body: JSON.stringify({
+          signerRole: 'mgmt_co_chair',
+          signedMethod: 'paper_attestation',
+          signerDisplayNameCt: ENC_B64,
+          signerDisplayNameDekCt: DEK_B64,
+          evidenceEnvelopeCt: ENC_B64,
+          evidenceEnvelopeDekCt: DEK_B64,
+          evidenceStorageKey: `pending:${crypto.randomUUID()}`,
+        }),
+      });
+      expect(res.status).toBe(400);
+      const body = (await res.json()) as { error: string };
+      expect(body.error).toBe('invalid_body');
+    });
+
+    it('accepts a properly-formatted evidence/<uuid>/blob key with 201', async () => {
+      const { cookie } = await loginWithStepUp();
+      const meeting = await createMeeting(cookie);
+      await app.request(`/api/meetings/${meeting.id}/start`, {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/json',
+          'x-requested-with': 'jhsc-web',
+          'if-match': '"1"',
+          cookie,
+        },
+        body: '{}',
+      });
+      await app.request(`/api/meetings/${meeting.id}/adjourn`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', 'x-requested-with': 'jhsc-web', cookie },
+        body: '{}',
+      });
+      const res = await app.request(`/api/meetings/${meeting.id}/signatures`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', 'x-requested-with': 'jhsc-web', cookie },
+        body: JSON.stringify({
+          signerRole: 'mgmt_co_chair',
+          signedMethod: 'paper_attestation',
+          signerDisplayNameCt: ENC_B64,
+          signerDisplayNameDekCt: DEK_B64,
+          evidenceEnvelopeCt: ENC_B64,
+          evidenceEnvelopeDekCt: DEK_B64,
+          evidenceStorageKey: `evidence/${crypto.randomUUID()}/blob`,
+        }),
+      });
+      expect(res.status).toBe(201);
+    });
+  },
+);
+
+// ---------------------------------------------------------------------------
+// M2.1 S5 F-L2 — signing_key_id consistency across signatures
+// ---------------------------------------------------------------------------
+
+describe.skipIf(SKIP)(
+  'POST /api/meetings/:id/signatures — signing_key_id consistency (M2.1 S5 F-L2)',
+  () => {
+    it('rejects a 2nd signature signed under a rotated key with 422 SIGNING_KEY_REBOUND', async () => {
+      const { cookie } = await loginWithStepUp();
+      const meeting = await createMeeting(cookie);
+      await app.request(`/api/meetings/${meeting.id}/start`, {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/json',
+          'x-requested-with': 'jhsc-web',
+          'if-match': '"1"',
+          cookie,
+        },
+        body: '{}',
+      });
+      await app.request(`/api/meetings/${meeting.id}/adjourn`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', 'x-requested-with': 'jhsc-web', cookie },
+        body: '{}',
+      });
+
+      // First signature lands under the active key.
+      const r1 = await app.request(`/api/meetings/${meeting.id}/signatures`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', 'x-requested-with': 'jhsc-web', cookie },
+        body: JSON.stringify({
+          signerRole: 'worker_co_chair',
+          signedMethod: 'in_app_passkey',
+          signerDisplayNameCt: ENC_B64,
+          signerDisplayNameDekCt: DEK_B64,
+        }),
+      });
+      expect(r1.status).toBe(201);
+
+      // Simulate a key rotation: retire the active key and seed a fresh
+      // one. The next signature will pull the new key as `active` and
+      // the route's F-L2 guard should reject the cross-key write.
+      const db = getDb();
+      await db.execute(sql`
+        UPDATE workplace_signing_keys SET retired_at = now()
+        WHERE retired_at IS NULL
+      `);
+      _invalidateWorkplaceSigningKeyCache();
+      await db.transaction(async (tx) => {
+        await ensureWorkplaceSigningKey(tx);
+      });
+
+      const r2 = await app.request(`/api/meetings/${meeting.id}/signatures`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', 'x-requested-with': 'jhsc-web', cookie },
+        body: JSON.stringify({
+          signerRole: 'mgmt_co_chair',
+          signedMethod: 'paper_attestation',
+          signerDisplayNameCt: ENC_B64,
+          signerDisplayNameDekCt: DEK_B64,
+          evidenceEnvelopeCt: ENC_B64,
+          evidenceEnvelopeDekCt: DEK_B64,
+          evidenceStorageKey: `evidence/${crypto.randomUUID()}/blob`,
+        }),
+      });
+      expect(r2.status).toBe(422);
+      const body = (await r2.json()) as { error: string };
+      expect(body.error).toBe('SIGNING_KEY_REBOUND');
+    });
+  },
+);
+
+// ---------------------------------------------------------------------------
+// M2.1 S5 M-3 (F-L5) — meeting.inspection_reviewed audit kind
+// ---------------------------------------------------------------------------
 
 describe.skipIf(SKIP)('POST /api/meetings/:id/adjourn — idempotent snapshot promotion', () => {
   it('re-adjourn does not duplicate finalized snapshot rows (partial UNIQUE backstop)', async () => {

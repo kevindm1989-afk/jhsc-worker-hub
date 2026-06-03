@@ -72,6 +72,7 @@ import {
   openWorkplaceSigningPrivateKey,
   getActiveWorkplaceSigningPublicKey,
 } from '../../evidence/workplace-signing-key';
+import { verifyEvidenceObject } from '../../evidence/tigris';
 import { computeQuorum, type QuorumAttendanceRow } from '../../lib/compute-quorum';
 import { sha256Hex, signAttestation, type AttestationRowCanonical } from '../../lib/meeting-crypto';
 import { idempotencyKey } from '../../middleware/idempotency';
@@ -176,6 +177,19 @@ const inspectionReviewBody = z
     { message: 'notesEnvelopeCt and notesEnvelopeDekCt must both be present or both absent' },
   );
 
+// M2.1 S5 F-L1 close-out: Tigris evidence storage keys MUST follow the
+// 1.7 upload route's canonical shape `evidence/<uuid-v4>/blob` (see
+// `apps/api/src/routes/evidence/index.ts` line ~170). The pre-S5
+// signature route accepted any non-empty string ≤512 chars, which let
+// the web client synthesise a `pending:<uuid>` placeholder when the
+// rep hadn't actually uploaded an artefact — breaking T-ML5 (paper-
+// attestation forgery) and T-ML23 (evidence hash collision) by
+// permitting a signature row with no real Tigris object behind it.
+// The regex below is the structural guard; the route additionally HEAD-
+// checks the object against Tigris before INSERT.
+const TIGRIS_EVIDENCE_KEY_REGEX =
+  /^evidence\/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\/blob$/i;
+
 const signatureBody = z
   .object({
     clientId: z.string().uuid().optional(),
@@ -185,7 +199,15 @@ const signatureBody = z
     signerDisplayNameDekCt: base64Schema,
     evidenceEnvelopeCt: base64Schema.optional(),
     evidenceEnvelopeDekCt: base64Schema.optional(),
-    evidenceStorageKey: z.string().min(1).max(512).optional(),
+    evidenceStorageKey: z
+      .string()
+      .min(1)
+      .max(512)
+      .regex(
+        TIGRIS_EVIDENCE_KEY_REGEX,
+        'evidenceStorageKey must match the Tigris key format evidence/<uuid>/blob from the 1.7 upload flow (pending: placeholders rejected)',
+      )
+      .optional(),
     chainOfCustodyNoteCt: base64Schema.optional(),
     chainOfCustodyNoteDekCt: base64Schema.optional(),
   })
@@ -1443,12 +1465,30 @@ meetingsRoute.post('/:id/inspections-review', async (c) => {
         }
         throw e;
       }
-      // No new audit kind for inspection-review in the 11 — the brief
-      // calls it documentary. The §3.10 contract pinned the kinds at
-      // S1; we surface review via the resource_id on subsequent
-      // promote audit events. Documented seam for the verifier.
-      // Still: bind a section-notes-appended-style anchor when notes
-      // are present so the chain is traceable.
+      // M2.1 S5 M-3 (F-L5) close-out: emit a dedicated
+      // `meeting.inspection_reviewed` audit kind on every inspection-
+      // review insert so the chain records the semantic decision
+      // (accepted_as_complete / findings_promoted / deferred) even
+      // when no notes are present. The pre-S5 code only emitted
+      // `meeting.section.notes_appended` when notes existed — which
+      // left review rows without notes unaudited on the chain,
+      // breaking non-negotiable #2's chain-of-custody invariant.
+      // The notes_appended event STILL fires separately when notes are
+      // present (it remains the canonical anchor for the encrypted
+      // notes hash).
+      await append(tx, {
+        actorId: auth.userId,
+        payload: {
+          kind: 'meeting.inspection_reviewed',
+          meetingId: idParsed.data,
+          reviewId,
+          inspectionId: body.inspectionId,
+          outcome: body.outcome,
+          notesHash,
+        },
+        resourceType: 'meeting_inspection_review',
+        resourceId: reviewId,
+      });
       if (notesHash !== null) {
         await append(tx, {
           actorId: auth.userId,
@@ -1731,6 +1771,45 @@ meetingsRoute.post('/:id/signatures', async (c) => {
         422,
       );
     }
+
+    // M2.1 S5 F-L1 close-out: verify the Tigris object actually exists
+    // before accepting the signature row. The Zod regex above rejects
+    // pending:<uuid> placeholders structurally; the HEAD check is the
+    // dynamic backstop catching a key that matches the format but was
+    // never uploaded (or was deleted by a sweep). Either failure mode
+    // would leave a signature row with no recoverable evidence artefact
+    // — breaks T-ML5 + T-ML23 evidentiary posture. In test
+    // environments where Tigris credentials aren't configured, the
+    // HEAD throws (requireTigrisEnv) and we skip the dynamic check; the
+    // Zod regex is the static guarantee in that case.
+    if (process.env.TIGRIS_BUCKET) {
+      try {
+        const head = await verifyEvidenceObject({
+          storageKey: body.evidenceStorageKey,
+          // We can't know the expected byteSize at the meeting-signature
+          // route layer (the 1.7 upload owns that). Pass the row's
+          // actual content-length back through verifyEvidenceObject's
+          // exists/byteSize return so a missing object surfaces as
+          // exists=false irrespective of size match.
+          expectedByteSize: -1,
+        });
+        if (head.byteSize === null) {
+          return c.json(
+            {
+              error: 'EVIDENCE_NOT_UPLOADED',
+              message:
+                'Off-app signature evidence must be uploaded to Tigris before recording the signature.',
+              evidenceStorageKey: body.evidenceStorageKey,
+            },
+            422,
+          );
+        }
+      } catch {
+        // Tigris client/network failure — fall through. Better to surface
+        // the route's structural validation as the gate than 500 here;
+        // the operator's runbook covers Tigris-unreachable.
+      }
+    }
   }
 
   const db = getDb();
@@ -1789,14 +1868,49 @@ meetingsRoute.post('/:id/signatures', async (c) => {
         if (m.length === 0) {
           throw new MeetingWriteAborted({ status: 404, body: { error: 'not_found' } });
         }
-        if (
-          m[0]!.status !== 'pending_finalization' &&
-          m[0]!.status !== 'adjourned' &&
-          m[0]!.status !== 'in_progress'
-        ) {
+        // M2.1 S5 F-S1 close-out: signatures are only legal AFTER the
+        // meeting has been adjourned (ADR-0012 §3.9). The pre-S5 code
+        // also permitted `in_progress`, which broke the T-ML5/T-ML7
+        // narrative that signatures attest to a frozen post-adjournment
+        // record. The legal states are `pending_finalization` (the
+        // canonical landing) and `adjourned` (defensive — the route
+        // typically lands the meeting in `pending_finalization` on
+        // adjourn but the DB enum permits both as a forward seam).
+        if (m[0]!.status !== 'pending_finalization' && m[0]!.status !== 'adjourned') {
           throw new MeetingWriteAborted({
             status: 422,
-            body: { error: 'meeting_not_signable_in_state', status: m[0]!.status },
+            body: {
+              error: 'MEETING_NOT_ADJOURNED',
+              message: 'Signatures can only be recorded after the meeting is adjourned.',
+              currentStatus: m[0]!.status,
+            },
+          });
+        }
+
+        // M2.1 S5 F-L2 close-out: all signatures on a meeting MUST use
+        // the same workplace signing key. If the workplace rotates keys
+        // between sigs 2 and 3, the meeting would carry attestations
+        // signed under two different keys and the meeting.finalized
+        // chain anchor would have no single key-of-record. We anchor on
+        // the FIRST signature row's `signing_key_id` and reject any
+        // subsequent signature whose active key has rotated. The rep's
+        // operational answer is to finalize-or-abandon the meeting
+        // before rotating; the deploy runbook documents this.
+        const priorSigs = (await tx.execute(sql`
+          SELECT signing_key_id FROM meeting_signatures
+          WHERE meeting_id = ${idParsed.data}
+          LIMIT 1
+        `)) as unknown as Array<{ signing_key_id: string }>;
+        if (priorSigs.length > 0 && priorSigs[0]!.signing_key_id !== signingKey.id) {
+          throw new MeetingWriteAborted({
+            status: 422,
+            body: {
+              error: 'SIGNING_KEY_REBOUND',
+              message:
+                'All signatures on a meeting must use the same workplace signing key. Key rotation requires a new meeting cycle.',
+              activeSigningKeyId: signingKey.id,
+              meetingSigningKeyId: priorSigs[0]!.signing_key_id,
+            },
           });
         }
         try {

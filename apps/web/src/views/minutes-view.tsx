@@ -13,7 +13,7 @@
 // Empty state cites the statutory anchor (OHSA s.9 / CLC s.135) so the
 // rep knows where the affordance comes from. No marketing flourishes.
 
-import { useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Link, useSearchParams } from 'react-router-dom';
 import {
   CalendarClock,
@@ -22,10 +22,12 @@ import {
   Hourglass,
   Pause,
   Plus,
+  RefreshCw,
   ScrollText,
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { cn } from '@/lib/utils';
+import { CitationRef } from '@/legal/citation-ref';
 import { MeetingApiError, meetingsApi, type MeetingListItem } from '@/meetings/api';
 import { meetingStatus, type MeetingStatus } from '@jhsc/shared-types';
 
@@ -79,7 +81,7 @@ export function MinutesView(): JSX.Element {
             Minutes
           </h1>
           <p className="mt-1 text-sm text-muted-foreground">
-            JHSC meetings and the 21-day s.9(21) clock.
+            JHSC meetings and the 21-day <CitationRef statute="OHSA" citation="s.9(21)" /> clock.
           </p>
         </div>
         <Button asChild size="sm" className="hidden h-9 md:inline-flex" data-print="hide">
@@ -167,26 +169,59 @@ function StatusFilterChips({
 function MeetingListInner({ statusFilter }: { statusFilter: MeetingStatus | null }): JSX.Element {
   const [items, setItems] = useState<ReadonlyArray<MeetingListItem> | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [refreshing, setRefreshing] = useState(false);
 
-  useEffect(() => {
-    let cancelled = false;
-    meetingsApi
-      .list({ status: statusFilter ?? undefined })
-      .then((r) => {
-        if (!cancelled) setItems(r.items);
-      })
-      .catch((e: unknown) => {
-        if (cancelled) return;
+  const fetchList = useCallback(
+    async (showSkeleton: boolean): Promise<void> => {
+      if (showSkeleton) setItems(null);
+      try {
+        const r = await meetingsApi.list({ status: statusFilter ?? undefined });
+        setItems(r.items);
+        setError(null);
+      } catch (e: unknown) {
         if (e instanceof MeetingApiError) {
           setError(`Could not load meetings (HTTP ${e.status}).`);
         } else {
           setError(e instanceof Error ? e.message : String(e));
         }
-      });
+      }
+    },
+    [statusFilter],
+  );
+
+  useEffect(() => {
+    let cancelled = false;
+    void (async () => {
+      if (cancelled) return;
+      await fetchList(true);
+    })();
     return () => {
       cancelled = true;
     };
-  }, [statusFilter]);
+  }, [fetchList]);
+
+  // M2.1 S5 F-P3 close-out: minimal pull-to-refresh on the /minutes
+  // list. Per CLAUDE.md mobile-primary patterns. No shared PullToRefresh
+  // primitive exists in the codebase yet (only a touchstart comment in
+  // sync-panel) so we ship the minimal touch-listener implementation
+  // here; a future refactor can extract a `<PullToRefresh>` wrapper
+  // when a 2nd consumer lands. The Vibration API call is the
+  // "haptic feedback" the spec calls for; safe-noop where unsupported.
+  const { containerRef, pulling, armed } = usePullToRefresh(async () => {
+    setRefreshing(true);
+    try {
+      if (typeof navigator !== 'undefined' && 'vibrate' in navigator) {
+        try {
+          navigator.vibrate(8);
+        } catch {
+          // ignore haptic failure
+        }
+      }
+      await fetchList(false);
+    } finally {
+      setRefreshing(false);
+    }
+  });
 
   if (error) {
     return (
@@ -200,14 +235,97 @@ function MeetingListInner({ statusFilter }: { statusFilter: MeetingStatus | null
     return <MeetingEmptyState filtersApplied={statusFilter !== null} />;
   }
   return (
-    <ul className="mt-4 space-y-2" data-testid="meetings-list">
-      {items.map((m) => (
-        <li key={m.id}>
-          <MeetingCard meeting={m} />
-        </li>
-      ))}
-    </ul>
+    <div ref={containerRef} data-testid="meetings-list-container">
+      {pulling ? (
+        <div
+          className="flex items-center justify-center py-2 text-xs text-muted-foreground"
+          role="status"
+          aria-live="polite"
+        >
+          <RefreshCw
+            className={cn('h-3.5 w-3.5', refreshing ? 'animate-spin' : '')}
+            strokeWidth={2}
+            aria-hidden="true"
+          />
+          <span className="ml-1">
+            {refreshing ? 'Refreshing…' : armed ? 'Release to refresh' : 'Pull to refresh'}
+          </span>
+        </div>
+      ) : null}
+      <ul className="mt-4 space-y-2" data-testid="meetings-list">
+        {items.map((m) => (
+          <li key={m.id}>
+            <MeetingCard meeting={m} />
+          </li>
+        ))}
+      </ul>
+    </div>
   );
+}
+
+// ---------------------------------------------------------------------------
+// Pull-to-refresh hook (M2.1 S5 F-P3)
+// ---------------------------------------------------------------------------
+//
+// Minimal touch-event-driven pull-to-refresh. Fires `onRefresh` when the
+// rep pulls down >= REFRESH_THRESHOLD_PX while scrolled to the top of
+// the container. The hook returns:
+//   - containerRef: attach to the scroll container.
+//   - pulling: true while the gesture is active (renders the chrome).
+//   - armed: true once the threshold is crossed (UI flips copy).
+
+const REFRESH_THRESHOLD_PX = 60;
+
+function usePullToRefresh(onRefresh: () => Promise<void>): {
+  containerRef: React.RefObject<HTMLDivElement>;
+  pulling: boolean;
+  armed: boolean;
+} {
+  const containerRef = useRef<HTMLDivElement | null>(null);
+  const [pulling, setPulling] = useState(false);
+  const [armed, setArmed] = useState(false);
+  const startYRef = useRef<number | null>(null);
+
+  useEffect(() => {
+    const el = containerRef.current;
+    if (!el) return;
+    const onTouchStart = (e: TouchEvent): void => {
+      // Only arm the gesture when the page is scrolled to the very top.
+      if (window.scrollY > 0) return;
+      startYRef.current = e.touches[0]?.clientY ?? null;
+    };
+    const onTouchMove = (e: TouchEvent): void => {
+      if (startYRef.current === null) return;
+      const delta = (e.touches[0]?.clientY ?? 0) - startYRef.current;
+      if (delta <= 0) return;
+      if (!pulling) setPulling(true);
+      setArmed(delta >= REFRESH_THRESHOLD_PX);
+    };
+    const onTouchEnd = (): void => {
+      if (armed) {
+        void onRefresh().finally(() => {
+          setPulling(false);
+          setArmed(false);
+        });
+      } else {
+        setPulling(false);
+        setArmed(false);
+      }
+      startYRef.current = null;
+    };
+    el.addEventListener('touchstart', onTouchStart, { passive: true });
+    el.addEventListener('touchmove', onTouchMove, { passive: true });
+    el.addEventListener('touchend', onTouchEnd);
+    el.addEventListener('touchcancel', onTouchEnd);
+    return () => {
+      el.removeEventListener('touchstart', onTouchStart);
+      el.removeEventListener('touchmove', onTouchMove);
+      el.removeEventListener('touchend', onTouchEnd);
+      el.removeEventListener('touchcancel', onTouchEnd);
+    };
+  }, [onRefresh, pulling, armed]);
+
+  return { containerRef, pulling, armed };
 }
 
 function MeetingCard({ meeting }: { meeting: MeetingListItem }): JSX.Element {
@@ -304,9 +422,15 @@ function MeetingEmptyState({ filtersApplied }: { filtersApplied: boolean }): JSX
         {filtersApplied ? 'No meetings match the current filter.' : 'No meetings yet.'}
       </div>
       <p className="max-w-sm text-sm text-muted-foreground">
-        {filtersApplied
-          ? 'Clear the filter or start a new meeting.'
-          : 'Start your first meeting to begin tracking action items, attendance, and recommendations under OHSA s.9 / CLC s.135.'}
+        {filtersApplied ? (
+          'Clear the filter or start a new meeting.'
+        ) : (
+          <>
+            Start your first meeting to begin tracking action items, attendance, and recommendations
+            under <CitationRef statute="OHSA" citation="s.9" /> /{' '}
+            <CitationRef statute="CLC" citation="s.135" />.
+          </>
+        )}
       </p>
       <div className="mt-4 flex flex-wrap items-center justify-center gap-2">
         <Button asChild size="sm" className="h-9">

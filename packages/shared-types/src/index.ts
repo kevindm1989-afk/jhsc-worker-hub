@@ -13,6 +13,7 @@ import type {
   MeetingAttendanceParty,
   MeetingAttendanceRole,
   MeetingPresentStatus,
+  MeetingReviewOutcome,
   MeetingSectionType,
   MeetingSectionVisibility,
   MeetingSignedMethod,
@@ -153,6 +154,7 @@ export type AuditEventKind =
   | 'meeting.section.ended'
   | 'meeting.section.notes_appended'
   | 'meeting.attendance.recorded'
+  | 'meeting.inspection_reviewed'
   | 'meeting.adjourned'
   | 'meeting.signed'
   | 'meeting.finalized'
@@ -820,6 +822,24 @@ export type AuditPayload =
       readonly party: MeetingAttendanceParty;
       readonly presentStatus: MeetingPresentStatus;
       readonly nameHash: string;
+    }
+  | {
+      // M2.1 S5 F-L5 close-out: dedicated audit kind for inspection
+      // review rows. Previously the route emitted only
+      // `meeting.section.notes_appended` (and ONLY when notes were
+      // present) which left review rows without notes unaudited on
+      // the chain — breaking non-negotiable #2 chain-of-custody.
+      // The kind carries the inspection outcome (accepted_as_complete
+      // / findings_promoted / deferred) so the chain records the
+      // semantic decision; notesHash optional and surfaces only when
+      // the rep also wrote notes (separate `notes_appended` event
+      // still fires in that case).
+      readonly kind: 'meeting.inspection_reviewed';
+      readonly meetingId: string;
+      readonly reviewId: string;
+      readonly inspectionId: string;
+      readonly outcome: MeetingReviewOutcome;
+      readonly notesHash: string | null;
     }
   | {
       // The adjournment metrics blob is the ONE chain payload that
