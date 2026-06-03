@@ -14,6 +14,11 @@ export function hasDb(): boolean {
 
 const TABLES_TO_TRUNCATE = [
   'sync_idempotency',
+  // 1.11 (ADR-0010) — excel_import_items references excel_imports, which
+  // references audit_log + users; truncate the per-row table first so
+  // the CASCADE on excel_imports's FKs has nothing to do.
+  'excel_import_items',
+  'excel_imports',
   'recommendation_action_item_links',
   'recommendation_responses',
   'recommendation_citations',

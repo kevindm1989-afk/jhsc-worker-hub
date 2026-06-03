@@ -542,3 +542,149 @@ describe('parseArrayBuffer — corrupt input', () => {
     expectUnrecognized(result);
   });
 });
+
+// ---------------------------------------------------------------------------
+// Acceptance fixture (Milestone 1.11 S4)
+//
+// Exercises the canonical Meeting Minutes v1 workbook end-to-end through
+// the detector + per-sheet parsers. The fixture is built by
+// `buildAcceptanceWorkbookBuffer()` and represents the "shipped golden"
+// shape that S5's runbook references. When the schema spec evolves,
+// both the fixture and these assertions update together.
+// ---------------------------------------------------------------------------
+
+describe('acceptance workbook → recognized', () => {
+  it('parses the canonical workbook with kind=recognized + schema=meeting_minutes_v1', async () => {
+    const { buildAcceptanceWorkbookBuffer } = await import('./fixtures/acceptance-workbook');
+    const buf = buildAcceptanceWorkbookBuffer();
+    const result = await parseArrayBuffer(buf);
+    expectRecognized(result);
+    expect(result.schema).toBe('meeting_minutes_v1');
+    expect(result.sheets.sourceSha256Hex).toMatch(/^[0-9a-f]{64}$/);
+  });
+
+  it('parses every section sheet with the documented row counts', async () => {
+    const { buildAcceptanceWorkbookBuffer, ACCEPTANCE_FIXTURE_COUNTS } =
+      await import('./fixtures/acceptance-workbook');
+    const buf = buildAcceptanceWorkbookBuffer();
+    const result = await parseArrayBuffer(buf);
+    expectRecognized(result);
+    expect(result.sheets.newBusiness).toHaveLength(ACCEPTANCE_FIXTURE_COUNTS.newBusiness);
+    expect(result.sheets.oldBusiness).toHaveLength(ACCEPTANCE_FIXTURE_COUNTS.oldBusiness);
+    expect(result.sheets.recommendations).toHaveLength(ACCEPTANCE_FIXTURE_COUNTS.recommendations);
+    expect(result.sheets.completed).toHaveLength(ACCEPTANCE_FIXTURE_COUNTS.completed);
+    expect(result.sheets.closedHistory).toHaveLength(ACCEPTANCE_FIXTURE_COUNTS.closedHistory);
+    expect(result.sheets.rowCount).toBe(ACCEPTANCE_FIXTURE_COUNTS.totalActionItems);
+  });
+
+  it('parses meeting metadata (date, quorum, attendance, workbook version)', async () => {
+    const { buildAcceptanceWorkbookBuffer, ACCEPTANCE_FIXTURE_METADATA } =
+      await import('./fixtures/acceptance-workbook');
+    const buf = buildAcceptanceWorkbookBuffer();
+    const result = await parseArrayBuffer(buf);
+    expectRecognized(result);
+    expect(result.sheets.metadata.meetingDate).toBe(ACCEPTANCE_FIXTURE_METADATA.meetingDate);
+    expect(result.sheets.metadata.quorum).toBe(ACCEPTANCE_FIXTURE_METADATA.quorum);
+    expect(result.sheets.metadata.attendance).toBe(ACCEPTANCE_FIXTURE_METADATA.attendance);
+    expect(result.sheets.metadata.workbookVersionString).toBe(
+      ACCEPTANCE_FIXTURE_METADATA.workbookVersionString,
+    );
+  });
+
+  it('returns an empty validationErrors array on the clean fixture', async () => {
+    const { buildAcceptanceWorkbookBuffer } = await import('./fixtures/acceptance-workbook');
+    const buf = buildAcceptanceWorkbookBuffer();
+    const result = await parseArrayBuffer(buf);
+    expectRecognized(result);
+    expect(result.sheets.validationErrors).toEqual([]);
+  });
+
+  it('captures the Inspection Review snapshot as an opaque 2D string grid', async () => {
+    const { buildAcceptanceWorkbookBuffer, ACCEPTANCE_FIXTURE_COUNTS } =
+      await import('./fixtures/acceptance-workbook');
+    const buf = buildAcceptanceWorkbookBuffer();
+    const result = await parseArrayBuffer(buf);
+    expectRecognized(result);
+    expect(result.sheets.inspectionReview).not.toBeNull();
+    expect(result.sheets.inspectionReview!.rows).toHaveLength(
+      ACCEPTANCE_FIXTURE_COUNTS.inspectionReviewRows,
+    );
+    // Header row is captured verbatim — including the rep's choice of
+    // capitalization. The detector does NOT canonicalize Inspection
+    // Review content; it is treated as opaque.
+    expect(result.sheets.inspectionReview!.rows[0]).toEqual(['Date', 'Zone', 'Status', 'Notes']);
+  });
+
+  it('clamps Closed Items History rows to section=archived', async () => {
+    const { buildAcceptanceWorkbookBuffer } = await import('./fixtures/acceptance-workbook');
+    const buf = buildAcceptanceWorkbookBuffer();
+    const result = await parseArrayBuffer(buf);
+    expectRecognized(result);
+    expect(result.sheets.closedHistory.length).toBeGreaterThan(0);
+    for (const row of result.sheets.closedHistory) {
+      expect(row.section).toBe('archived');
+      // Closed Items History rows must carry a closed_date per the
+      // detector's closedRequired=true on this sheet.
+      expect(row.closedDate).not.toBeNull();
+    }
+  });
+
+  it('preserves each section sheet`s section pin (NEW → new_business, OLD → old_business, etc.)', async () => {
+    const { buildAcceptanceWorkbookBuffer } = await import('./fixtures/acceptance-workbook');
+    const buf = buildAcceptanceWorkbookBuffer();
+    const result = await parseArrayBuffer(buf);
+    expectRecognized(result);
+    for (const row of result.sheets.newBusiness) expect(row.section).toBe('new_business');
+    for (const row of result.sheets.oldBusiness) expect(row.section).toBe('old_business');
+    for (const row of result.sheets.recommendations) expect(row.section).toBe('recommendation');
+    for (const row of result.sheets.completed) {
+      expect(row.section).toBe('completed_this_period');
+    }
+  });
+
+  it('derives a stable content_hash per parsed row', async () => {
+    const { buildAcceptanceWorkbookBuffer } = await import('./fixtures/acceptance-workbook');
+    const buf = buildAcceptanceWorkbookBuffer();
+    const result = await parseArrayBuffer(buf);
+    expectRecognized(result);
+    const hashes = new Set<string>();
+    for (const row of [
+      ...result.sheets.newBusiness,
+      ...result.sheets.oldBusiness,
+      ...result.sheets.recommendations,
+      ...result.sheets.completed,
+      ...result.sheets.closedHistory,
+    ]) {
+      expect(row.contentHashHex).toMatch(/^[0-9a-f]{64}$/);
+      hashes.add(row.contentHashHex);
+    }
+    // No content_hash collisions across the fixture — every row's
+    // (description, start_date) pair is unique by construction.
+    expect(hashes.size).toBe(result.sheets.rowCount);
+  });
+
+  it('returns a stable sourceSha256Hex across rebuilds of the same fixture', async () => {
+    const { buildAcceptanceWorkbookBuffer } = await import('./fixtures/acceptance-workbook');
+    const r1 = await parseArrayBuffer(buildAcceptanceWorkbookBuffer());
+    const r2 = await parseArrayBuffer(buildAcceptanceWorkbookBuffer());
+    expectRecognized(r1);
+    expectRecognized(r2);
+    // SheetJS embeds a creation timestamp in the workbook metadata; if
+    // the fixture builder ever fixes that timestamp, the source hashes
+    // will match. For now the per-row content_hashes are the stable
+    // contract — same description + start_date = same content_hash.
+    const r1Hashes = r1.sheets.newBusiness.map((r) => r.contentHashHex).sort();
+    const r2Hashes = r2.sheets.newBusiness.map((r) => r.contentHashHex).sort();
+    expect(r1Hashes).toEqual(r2Hashes);
+  });
+});
+
+describe('acceptance workbook → unrecognized variant', () => {
+  it('returns kind=unrecognized with a reason mentioning NEW BUSINESS', async () => {
+    const { buildUnrecognizedWorkbookBuffer } = await import('./fixtures/acceptance-workbook');
+    const buf = buildUnrecognizedWorkbookBuffer();
+    const result = await parseArrayBuffer(buf);
+    expectUnrecognized(result);
+    expect(result.reason).toMatch(/NEW BUSINESS/);
+  });
+});

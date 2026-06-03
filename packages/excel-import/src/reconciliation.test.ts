@@ -366,3 +366,132 @@ describe('reconcile — purity', () => {
     expect(JSON.stringify(existing)).toBe(before);
   });
 });
+
+// ---------------------------------------------------------------------------
+// Acceptance fixture — end-to-end reconciler coverage (Milestone 1.11 S4)
+//
+// Feeds the canonical Meeting Minutes v1 workbook (built via
+// buildAcceptanceWorkbookBuffer + parseArrayBuffer) through the
+// reconciler against three different "existing pool" shapes:
+//
+//   1. empty pool → every parsed row classifies as 'create'.
+//   2. pool already contains the OLD BUSINESS rows with identical
+//      fields → those classify as 'skip' (no field drift).
+//   3. pool already contains the OLD BUSINESS rows with a different
+//      section (cross-section transition) → those classify as 'update'
+//      and the diff lists `section`.
+// ---------------------------------------------------------------------------
+
+import { parseArrayBuffer } from './parser.worker';
+import type { ExistingActionItemView as ExistingActionItemViewType } from './schema';
+
+describe('acceptance fixture → reconcile', () => {
+  async function loadParsedSheets() {
+    const { buildAcceptanceWorkbookBuffer } = await import('./fixtures/acceptance-workbook');
+    const buf = buildAcceptanceWorkbookBuffer();
+    const result = await parseArrayBuffer(buf);
+    if (result.kind !== 'recognized') {
+      throw new Error(`fixture failed to parse: ${result.reason}`);
+    }
+    return result.sheets;
+  }
+
+  it('empty existing pool → every parsed row classifies as create', async () => {
+    const sheets = await loadParsedSheets();
+    const plan = reconcile(sheets, [], 'import-acceptance-empty-pool');
+    expect(plan.decisions).toHaveLength(sheets.rowCount);
+    for (const d of plan.decisions) expect(d.decisionKind).toBe('create');
+    expect(plan.summary.createCount).toBe(sheets.rowCount);
+    expect(plan.summary.updateCount).toBe(0);
+    expect(plan.summary.skipCount).toBe(0);
+    expect(plan.summary.conflictCount).toBe(0);
+  });
+
+  it('pool contains the OLD BUSINESS rows with identical fields → those rows classify as skip', async () => {
+    const sheets = await loadParsedSheets();
+    const existing: Array<ExistingActionItemViewType> = sheets.oldBusiness.map((row) => ({
+      id: `existing-${row.contentHashHex.slice(0, 8)}`,
+      contentHashHex: row.contentHashHex,
+      section: row.section,
+      status: row.status,
+      risk: row.risk,
+      startDate: row.startDate,
+      targetDate: row.targetDate,
+      closedDate: row.closedDate,
+      tags: row.tags,
+      version: 1,
+      editedSinceLastImport: false,
+    }));
+    const plan = reconcile(sheets, existing, 'import-acceptance-skip-pool');
+
+    // Each OLD BUSINESS row should classify as skip.
+    const skipDecisions = plan.decisions.filter((d) => d.decisionKind === 'skip');
+    expect(skipDecisions.length).toBe(sheets.oldBusiness.length);
+    for (const d of skipDecisions) {
+      expect(d.existingActionItemId).not.toBeNull();
+      expect(d.diff).toEqual([]);
+    }
+    // The non-OLD-BUSINESS rows all classify as create (no matching
+    // content_hash in the pool).
+    expect(plan.summary.skipCount).toBe(sheets.oldBusiness.length);
+    expect(plan.summary.createCount).toBe(sheets.rowCount - sheets.oldBusiness.length);
+    expect(plan.summary.conflictCount).toBe(0);
+  });
+
+  it('pool contains the OLD BUSINESS rows with status drift → classify as update with the drifted fields in diff', async () => {
+    const sheets = await loadParsedSheets();
+    const existing: Array<ExistingActionItemViewType> = sheets.oldBusiness.map((row) => ({
+      id: `existing-${row.contentHashHex.slice(0, 8)}`,
+      contentHashHex: row.contentHashHex,
+      section: row.section,
+      // Force a status drift so the diff is non-empty.
+      status: row.status === 'Closed' ? 'Not Started' : 'Closed',
+      risk: row.risk,
+      startDate: row.startDate,
+      targetDate: row.targetDate,
+      closedDate: row.closedDate,
+      tags: row.tags,
+      version: 1,
+      editedSinceLastImport: false,
+    }));
+    const plan = reconcile(sheets, existing, 'import-acceptance-update-pool');
+    const updateDecisions = plan.decisions.filter((d) => d.decisionKind === 'update');
+    expect(updateDecisions.length).toBe(sheets.oldBusiness.length);
+    for (const d of updateDecisions) {
+      const statusDiff = d.diff.find((field) => field.field === 'status');
+      expect(statusDiff).toBeDefined();
+    }
+    expect(plan.summary.updateCount).toBe(sheets.oldBusiness.length);
+  });
+
+  it('cross-section transition: existing OLD BUSINESS rows pinned to new_business → diff lists section', async () => {
+    const sheets = await loadParsedSheets();
+    // Build the existing pool with the OLD BUSINESS content_hashes but
+    // section='new_business'. The parsed rows are pinned to
+    // section='old_business' by the parser; the reconciler should
+    // surface the section transition in the diff.
+    const existing: Array<ExistingActionItemViewType> = sheets.oldBusiness.map((row) => ({
+      id: `existing-${row.contentHashHex.slice(0, 8)}`,
+      contentHashHex: row.contentHashHex,
+      section: 'new_business',
+      status: row.status,
+      risk: row.risk,
+      startDate: row.startDate,
+      targetDate: row.targetDate,
+      closedDate: row.closedDate,
+      tags: row.tags,
+      version: 1,
+      editedSinceLastImport: false,
+    }));
+    const plan = reconcile(sheets, existing, 'import-acceptance-section-transition');
+    const transitions = plan.decisions
+      .filter((d) => d.decisionKind === 'update')
+      .filter((d) => d.diff.some((f) => f.field === 'section'));
+    expect(transitions.length).toBe(sheets.oldBusiness.length);
+    for (const d of transitions) {
+      const sectionDiff = d.diff.find((f) => f.field === 'section')!;
+      expect(sectionDiff.current).toBe('new_business');
+      expect(sectionDiff.incoming).toBe('old_business');
+    }
+  });
+});
