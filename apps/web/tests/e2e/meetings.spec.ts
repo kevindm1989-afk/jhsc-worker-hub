@@ -400,7 +400,7 @@ test.describe('meeting lifecycle — create → attend → note → adjourn → 
     await page.goto(`/meetings/${stubs.meetingDetail.id}/adjourn`);
     await expect(page.getByRole('heading', { name: /Adjourn meeting/ })).toBeVisible();
     await page.getByTestId('meeting-adjourn-confirm').click();
-    await expect(page.getByText('Meeting adjourned')).toBeVisible();
+    await expect(page.getByRole('heading', { name: 'Meeting adjourned' })).toBeVisible();
     await expect(page.getByTestId('adjournment-metrics')).toBeVisible();
 
     // 9. Navigate to the finalization view + sign worker_co_chair.
