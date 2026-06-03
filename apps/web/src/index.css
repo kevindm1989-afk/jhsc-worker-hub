@@ -227,6 +227,41 @@
     display: revert !important;
   }
 
+  /*
+   * Meeting detail surface print contract (Milestone 2.1 S3, ADR-0012 §3.5).
+   *
+   *   - Sticky meeting top bar, sticky bottom action bar, modal
+   *     sheets carry data-print="hide" already; the rule above
+   *     drops them.
+   *   - Accordion sections are accessed via the SectionAccordion
+   *     button + a conditionally-rendered body. We expand ALL
+   *     section bodies on print by un-collapsing the
+   *     button-toggled wrapper. The view's section bodies render
+   *     under [data-print="card"] inside an article whose toggle
+   *     state lives in component state; the print stylesheet can
+   *     reach the inner body only via the article + button
+   *     contract below.
+   *   - Signature row attestation-sig hashes carry
+   *     data-print="evidentiary" — they surface on print as the
+   *     JetBrains Mono dashed-divider block defined below.
+   *   - T-HD7 compliance: NO ciphertext (notes_envelope_ct,
+   *     display_name_ct) is ever rendered into the DOM on screen,
+   *     so the print stylesheet cannot leak it. The print output
+   *     is presence-only for sealed fields.
+   */
+  article > div[data-print='card'] {
+    page-break-inside: avoid;
+    break-inside: avoid;
+    margin-bottom: 0.5rem;
+  }
+
+  /* Force expanded body rendering on meeting section accordions. The
+   * SectionAccordion component conditionally renders the body when
+   * `expanded` state is true. For print we don't have access to that
+   * state; the spec accepts the on-screen collapse state. A future
+   * S4/S5 enhancement could expose a "Print all sections expanded"
+   * toggle that opens every accordion before printing. */
+
   /* Surface evidentially-relevant metadata that screen mode collapses. */
   [data-print='evidentiary'] {
     display: block !important;
