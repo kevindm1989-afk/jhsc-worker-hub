@@ -32,7 +32,9 @@ afterEach(async () => {
 
 describe('JhscOfflineDb schema', () => {
   it('exports a stable schema version', () => {
-    expect(DEXIE_SCHEMA_VERSION).toBe(2);
+    // M2.2 S3 (ADR-0013 §3.8) — bumped to v3 to add the two new
+    // read-only caches (action_item_closures + meeting_live_metrics).
+    expect(DEXIE_SCHEMA_VERSION).toBe(3);
   });
 
   it('exports the canonical singleton db name', () => {
@@ -76,6 +78,10 @@ describe('JhscOfflineDb schema', () => {
       'meeting_signatures',
       'meeting_action_item_state',
       'meeting_templates',
+      // Milestone 2.2 S3 (ADR-0013 §3.8) — closure attestation
+      // mirror + live-metrics offline cache.
+      'action_item_closures',
+      'meeting_live_metrics',
     ];
     for (const name of expected) {
       expect(names).toContain(name);

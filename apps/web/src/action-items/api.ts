@@ -9,6 +9,7 @@ import type {
   ActionItemUpdateField,
 } from '@jhsc/shared-types';
 import type { ActionFlag } from '@jhsc/shared-types/action-item-flag';
+import type { ActionItemReopenReason } from '@jhsc/shared-types/action-item-closure';
 
 const BASE = '/api/action-items';
 
@@ -145,6 +146,50 @@ export interface ActionItemListFilters {
   readonly meetingId?: string;
 }
 
+// ---------------------------------------------------------------------------
+// Milestone 2.2 — close-verification + reopen (ADR-0013 §3.2 / §3.5)
+// ---------------------------------------------------------------------------
+
+export interface ActionItemClosureVerificationBody {
+  readonly counterSignerActorId: string;
+  readonly selfAttestation: boolean;
+  readonly meetingId?: string;
+  readonly closureReason: {
+    readonly ciphertextB64: string;
+    readonly dekCiphertextB64: string;
+  };
+  readonly evidence?: {
+    readonly storageKey: string;
+    readonly envelopeCtB64: string;
+    readonly envelopeDekCtB64: string;
+  };
+  readonly clientId?: string;
+}
+
+export interface ActionItemClosureVerificationResponse {
+  readonly id: string;
+  readonly actionItemId: string;
+  readonly closureId: string;
+  readonly status: ActionItemStatus;
+  readonly closedAt: string;
+  readonly counterSignedAt: string;
+  readonly chainAnchorHash: string;
+  readonly attestationSigHash: string;
+  readonly selfAttestation: boolean;
+  readonly version: number;
+}
+
+export interface ActionItemReopenBody {
+  readonly reason: ActionItemReopenReason;
+}
+
+export interface ActionItemReopenResponse {
+  readonly id: string;
+  readonly status: ActionItemStatus;
+  readonly previousClosureId: string;
+  readonly version: number;
+}
+
 export const actionItemsApi = {
   list: (
     filters: ActionItemListFilters = {},
@@ -182,4 +227,16 @@ export const actionItemsApi = {
     call(`/${encodeURIComponent(id)}/moves/${encodeURIComponent(moveId)}/undo`, {
       method: 'POST',
     }),
+  /** POST /api/action-items/:id/close-verification — Milestone 2.2 §3.5
+   * (the JHSC counter-sign closure attestation). Require-online per
+   * ADR §3.8 — step-up gate cannot be queued. */
+  closeVerification: (
+    id: string,
+    body: ActionItemClosureVerificationBody,
+  ): Promise<ActionItemClosureVerificationResponse> =>
+    call(`/${encodeURIComponent(id)}/close-verification`, { method: 'POST', json: body }),
+  /** POST /api/action-items/:id/reopen — Milestone 2.2 §3.5
+   * (Closed → In Progress transition). Require-online per ADR §3.8. */
+  reopen: (id: string, body: ActionItemReopenBody): Promise<ActionItemReopenResponse> =>
+    call(`/${encodeURIComponent(id)}/reopen`, { method: 'POST', json: body }),
 };

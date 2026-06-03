@@ -319,6 +319,33 @@ export interface SectionEndResponse {
 }
 
 // ---------------------------------------------------------------------------
+// Milestone 2.2 — live metrics + per-meeting action items (ADR-0013 §3.2)
+// ---------------------------------------------------------------------------
+
+/** Shape mirrors apps/api/src/lib/compute-meeting-live-metrics.ts
+ * `MeetingLiveMetrics` + the route's added `asOf` ISO string. The
+ * dashboard chip-bar consumes this verbatim. */
+export interface MeetingLiveMetricsResponse {
+  readonly meetingId: string;
+  readonly durationSeconds: number;
+  readonly itemsRaised: number;
+  readonly itemsClosed: number;
+  readonly recommendationsDrafted: number;
+  readonly inspectionsReviewed: number;
+  readonly quorumCompliance: {
+    readonly metAtCallToOrder: boolean;
+    readonly currentlyMet: boolean;
+    readonly ruleCitation: string;
+  };
+  readonly closureVerifications: {
+    readonly total: number;
+    readonly selfAttestation: number;
+    readonly peerVerified: number;
+  };
+  readonly asOf: string;
+}
+
+// ---------------------------------------------------------------------------
 // Public surface
 // ---------------------------------------------------------------------------
 
@@ -397,4 +424,8 @@ export const meetingsApi = {
 
   finalize: (id: string): Promise<FinalizeResponse> =>
     call(`${BASE}/${encodeURIComponent(id)}/finalize`, { method: 'POST', json: {} }),
+
+  /** GET /api/meetings/:id/metrics — Milestone 2.2 §3.4 live dashboard. */
+  metrics: (id: string): Promise<MeetingLiveMetricsResponse> =>
+    call(`${BASE}/${encodeURIComponent(id)}/metrics`),
 };

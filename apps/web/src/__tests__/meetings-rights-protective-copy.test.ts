@@ -26,6 +26,12 @@ describe('MEETING_RIGHTS_COPY — rights-protective string snapshot (T-ML20 guar
     expect(MEETING_RIGHTS_COPY).toMatchInlineSnapshot(`
       {
         "adjournmentBanner": "Meeting adjourned. The action items raised, closed, and moved during this meeting are now live in the operational record. Minutes finalization (the four counter-signatures) is the formal sign-off that produces the canonical PDF; the action items themselves do not wait on finalization.",
+        "closureOfflineHint": "Closure verification requires a network connection. The action item will stay open until you are back online.",
+        "closureReasonPlaceholder": "What was done to verify closure?",
+        "closureSelfAttestationBanner": "You are both the closer and the counter-signer because no other in-app worker co-chair is available. This is recorded in the chain so a future reviewer can see the single-rep constraint.",
+        "closureSubmitCta": "Record closure verification",
+        "closureSuccessHeading": "Closure verified",
+        "closureVerificationBanner": "Closure verification is your evidence that this item was addressed. The chain anchor makes it tamper-evident for a future MLITSD review.",
         "emailAttestationCta": "Record email attestation",
         "finalizationHeader": "Action items from this meeting are LIVE — you can act on them now. The signatures below are the formal sign-off, not a gate on your operational work.",
         "finalizationSubheading": "Record signatures to finalize minutes. The Worker Co-Chair signs in-app via passkey step-up; the other signers sign off-app (paper or email) and you record the evidence here.",
@@ -33,9 +39,14 @@ describe('MEETING_RIGHTS_COPY — rights-protective string snapshot (T-ML20 guar
         "finalizeWaitingHint": "The finalize button activates once all four signatures are recorded. Until then, the action items keep running on their own clock.",
         "inAppSignatureCta": "Sign with passkey",
         "inProgressBanner": "Meeting in progress. Tap a section to expand it; section notes and attendance are saved as you work.",
+        "liveMetricsLegend": "Live aggregates from this meeting. Counts only — no per-rep attribution.",
         "paperAttestationCta": "Record paper attestation",
         "paperAttestationDescription": "Record what you received: a scanned paper signature, an email reply, or a signed PDF. Attach the file as evidence and add a chain-of-custody note describing how it was obtained.",
         "pendingSignatureLabel": "Pending",
+        "reopenDialogDescription": "Reopening is a normal operational move. The previous closure verification stays in the chain as historical evidence.",
+        "reopenDialogTitle": "Reopen action item",
+        "reopenSubmitCta": "Reopen",
+        "reopenSuccessMessage": "Reopened. The previous closure verification is preserved in the chain.",
         "scheduledBanner": "Meeting scheduled. Start the meeting when the co-chair calls it to order.",
         "staleManagementSignatureHint": "Management signatures pending. If you believe management is delaying sign-off in response to a refusal, complaint, or recommendation you raised, consider whether s.50 (OHSA) or s.147 (CLC Part II) reprisal protections apply. The decision is yours; this is informational only.",
       }
@@ -57,6 +68,36 @@ describe('MEETING_RIGHTS_COPY — rights-protective string snapshot (T-ML20 guar
     expect(all).not.toMatch(/refuses to/);
     expect(all).not.toMatch(/wait for management/);
     expect(all).not.toMatch(/your changes will be lost/);
+    // M2.2 T-IM26 / T-IM25 mitigations — closure surface must never
+    // adopt adversarial or shame framing.
+    expect(all).not.toMatch(/justify the closure/);
+    expect(all).not.toMatch(/are you sure/);
+    expect(all).not.toMatch(/approve closure/);
+  });
+
+  it('M2.2 closure surface uses evidence framing — not gatekeeping', () => {
+    // T-IM25 — counter-sign is verification, never a gate on operational
+    // work. The banner foregrounds the chain-anchor + evidentiary value.
+    expect(MEETING_RIGHTS_COPY.closureVerificationBanner).toMatch(/evidence/i);
+    expect(MEETING_RIGHTS_COPY.closureVerificationBanner).toMatch(/tamper-evident/i);
+    expect(MEETING_RIGHTS_COPY.closureVerificationBanner).not.toMatch(/approve/i);
+    expect(MEETING_RIGHTS_COPY.closureVerificationBanner).not.toMatch(/sign off/i);
+    // T-IM26 — closure reason placeholder is descriptive, not adversarial.
+    expect(MEETING_RIGHTS_COPY.closureReasonPlaceholder).toMatch(/what was done/i);
+    expect(MEETING_RIGHTS_COPY.closureReasonPlaceholder).not.toMatch(/justify/i);
+    // T-IM23 — offline hint surfaces the recovery affordance neutrally.
+    expect(MEETING_RIGHTS_COPY.closureOfflineHint).toMatch(/network connection/i);
+    expect(MEETING_RIGHTS_COPY.closureOfflineHint).not.toMatch(/lost/i);
+    // S0 Q2 — selfAttestation banner records the constraint honestly,
+    // no judgment.
+    expect(MEETING_RIGHTS_COPY.closureSelfAttestationBanner).toMatch(/single-rep constraint/i);
+    expect(MEETING_RIGHTS_COPY.closureSelfAttestationBanner).not.toMatch(/violation/i);
+    // Reopen copy is operationally neutral, not destructive framing.
+    expect(MEETING_RIGHTS_COPY.reopenDialogDescription).toMatch(/normal operational/i);
+    expect(MEETING_RIGHTS_COPY.reopenDialogDescription).toMatch(/preserved|stays/i);
+    // T-IM27 — metrics legend foregrounds aggregate-only posture.
+    expect(MEETING_RIGHTS_COPY.liveMetricsLegend).toMatch(/aggregate|counts only/i);
+    expect(MEETING_RIGHTS_COPY.liveMetricsLegend).toMatch(/no per-rep/i);
   });
 });
 

@@ -871,6 +871,35 @@ function entityKindToTable(kind: SyncEntityKind): string | null {
   }
 }
 
+// ---------------------------------------------------------------------------
+// Milestone 2.2 (ADR-0013 §3.8) — require-online routes
+// ---------------------------------------------------------------------------
+//
+// The close-verification + reopen + read-only metrics routes are NOT
+// queueable through this worker:
+//
+//   POST /api/action-items/:id/close-verification   — require-online
+//                                                     (step-up + Ed25519
+//                                                     attestation cannot
+//                                                     be produced
+//                                                     offline; ADR §3.8
+//                                                     T-IM23)
+//   POST /api/action-items/:id/reopen               — require-online
+//                                                     (step-up gated)
+//   GET  /api/meetings/:id/metrics                  — best-effort
+//                                                     (Dexie cache
+//                                                     fallback in the
+//                                                     live-metrics-panel
+//                                                     component)
+//
+// The closure / reopen call surfaces go through `requireOnline()` in
+// `typed-client.ts` and throw `NetworkRequiredError` when offline. The
+// closure-verification view surfaces the rights-protective offline
+// hint (T-IM23 mitigation). PATCH /api/action-items/:id (status +
+// other field changes) DOES queue through this worker via the
+// existing `action_item` entity kind — the cross-anchor emit
+// happens server-side when the queue drains.
+
 // Export internal constants for tests.
 export const _internal = {
   BATCH_SIZE,
