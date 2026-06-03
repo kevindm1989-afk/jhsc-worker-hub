@@ -457,7 +457,11 @@ function SearchHitRow({
   return (
     <article className="rounded-md border border-border bg-background p-3">
       <header className="mb-1 flex items-start justify-between gap-3">
-        <button type="button" onClick={() => onOpenStatute(hit.statuteCode)} className="text-left">
+        <button
+          type="button"
+          onClick={() => onOpenStatute(hit.statuteCode)}
+          className="rounded-sm text-left focus:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+        >
           <div className="text-sm font-medium text-foreground hover:underline">
             {hit.statuteCode} {hit.citation}
           </div>

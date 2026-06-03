@@ -430,6 +430,7 @@ function BackLink(): JSX.Element {
   return (
     <Link
       to="/excel-imports"
+      data-print="hide"
       className="mb-3 inline-flex items-center text-xs text-primary hover:underline focus:outline-none focus:ring-2 focus:ring-ring"
     >
       <ChevronLeft className="h-3.5 w-3.5" strokeWidth={2} aria-hidden="true" />

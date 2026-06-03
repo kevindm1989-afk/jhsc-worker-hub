@@ -129,6 +129,7 @@ function HazardDetailInner({ id }: { id: string }): JSX.Element {
     <div className="mx-auto max-w-3xl px-4 py-4 md:px-6 md:py-6">
       <Link
         to="/hazards"
+        data-print="hide"
         className="mb-3 inline-flex items-center text-xs text-primary hover:underline focus:outline-none focus:ring-2 focus:ring-ring"
       >
         <ChevronLeft className="h-3.5 w-3.5" strokeWidth={2} aria-hidden="true" />
@@ -177,12 +178,14 @@ function HazardDetailInner({ id }: { id: string }): JSX.Element {
         ) : null}
       </section>
 
-      <TransitionPanel
-        currentStatus={hazard.status}
-        allowedTransitions={hazard.allowedTransitions}
-        pendingTransition={pendingTransition}
-        onApply={applyTransition}
-      />
+      <div data-print="hide">
+        <TransitionPanel
+          currentStatus={hazard.status}
+          allowedTransitions={hazard.allowedTransitions}
+          pendingTransition={pendingTransition}
+          onApply={applyTransition}
+        />
+      </div>
 
       {error ? (
         <div
@@ -194,7 +197,9 @@ function HazardDetailInner({ id }: { id: string }): JSX.Element {
         </div>
       ) : null}
 
-      <ReporterRevealPanel hazardId={hazard.id} />
+      <div data-print="hide">
+        <ReporterRevealPanel hazardId={hazard.id} />
+      </div>
 
       <section
         aria-labelledby="hazard-evidence-heading"
@@ -212,12 +217,12 @@ function HazardDetailInner({ id }: { id: string }): JSX.Element {
       <HistoryPanel history={hazard.history} />
       <CaptureFab linkedType="hazard" linkedId={hazard.id} />
 
-      <div className="mt-6 text-xs text-muted-foreground">
+      <div className="mt-6 text-xs text-muted-foreground" data-print="evidentiary">
         Every status change is anchored in the audit chain — the audit row index appears next to
         each transition.
       </div>
 
-      <div className="mt-4">
+      <div className="mt-4" data-print="hide">
         <Button variant="ghost" size="sm" onClick={() => navigate('/hazards')}>
           Done
         </Button>

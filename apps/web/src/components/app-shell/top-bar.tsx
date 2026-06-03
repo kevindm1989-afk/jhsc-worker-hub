@@ -47,13 +47,16 @@ export function TopBar(): JSX.Element {
 }
 
 // Non-functional in Milestone 1.1. Renders chrome only; clicking is a no-op.
+//
+// Mobile touch target: 44px (h-11) per CLAUDE.md mobile-primary patterns.
+// Desktop collapses to h-9 so the top bar stays at its 56px height.
 function SearchButton(): JSX.Element {
   return (
     <button
       type="button"
       aria-label="Search"
       title="Search — not yet implemented"
-      className="flex h-9 items-center gap-2 rounded-md border border-border bg-card px-3 text-sm text-muted-foreground transition-colors hover:border-border hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background"
+      className="flex h-11 items-center gap-2 rounded-md border border-border bg-card px-3 text-sm text-muted-foreground transition-colors hover:border-border hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background md:h-9"
     >
       <Search className="h-4 w-4" strokeWidth={2} aria-hidden="true" />
       <span className="hidden md:inline">Search or jump to…</span>
@@ -65,13 +68,16 @@ function SearchButton(): JSX.Element {
 }
 
 // Non-functional in Milestone 1.1. Web Push lands in 1.10.
+//
+// Mobile touch target: 44px (h-11 w-11) per CLAUDE.md mobile-primary
+// patterns. Desktop collapses to h-9 w-9.
 function NotificationsButton(): JSX.Element {
   return (
     <button
       type="button"
       aria-label="Notifications"
       title="Notifications — not yet implemented"
-      className="relative flex h-9 w-9 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background"
+      className="relative flex h-11 w-11 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background md:h-9 md:w-9"
     >
       <Bell className="h-[18px] w-[18px]" strokeWidth={2} aria-hidden="true" />
       <span

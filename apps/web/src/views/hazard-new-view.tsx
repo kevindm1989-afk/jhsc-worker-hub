@@ -9,7 +9,7 @@
 // the workplace KEK before writing. Server is the encryption boundary --
 // the browser does NOT hold the KEK in 1.5.
 
-import { useState } from 'react';
+import React, { useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import { ChevronLeft, Lock } from 'lucide-react';
 import { Button } from '@/components/ui/button';
@@ -291,19 +291,45 @@ function Field({
   hint?: string;
   children: React.ReactNode;
 }): JSX.Element {
+  // Wire hint/error to the labelled input via aria-describedby so screen
+  // readers announce both the descriptive hint AND validation errors per
+  // CLAUDE.md WCAG Phase 1 ("Form errors announced to screen readers").
+  // The input itself is rendered by the caller; we clone children to inject
+  // the linking attribute.
+  const errorId = error ? `${id}-error` : undefined;
+  const hintId = hint ? `${id}-hint` : undefined;
+  const describedBy = [errorId, hintId].filter(Boolean).join(' ') || undefined;
+  const child = children as React.ReactElement<{
+    'aria-describedby'?: string;
+    'aria-required'?: boolean;
+  }> | null;
+  const wired =
+    child && React.isValidElement(child)
+      ? React.cloneElement(child, {
+          'aria-describedby': describedBy,
+          'aria-required': required || undefined,
+        })
+      : children;
   return (
     <div>
       <label htmlFor={id} className="mb-1 block text-sm font-medium text-foreground">
         {label}
         {required ? <span className="ml-0.5 text-status-rejected">*</span> : null}
       </label>
-      {children}
+      {wired}
       {error ? (
-        <div role="alert" aria-live="polite" className="mt-1 text-xs text-status-rejected">
+        <div
+          id={errorId}
+          role="alert"
+          aria-live="polite"
+          className="mt-1 text-xs text-status-rejected"
+        >
           {error}
         </div>
       ) : hint ? (
-        <div className="mt-1 text-xs text-muted-foreground">{hint}</div>
+        <div id={hintId} className="mt-1 text-xs text-muted-foreground">
+          {hint}
+        </div>
       ) : null}
     </div>
   );

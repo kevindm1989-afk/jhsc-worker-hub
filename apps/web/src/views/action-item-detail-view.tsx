@@ -132,6 +132,7 @@ function DetailInner({ id }: { id: string }): JSX.Element {
     <div className="mx-auto max-w-3xl px-4 py-4 md:px-6 md:py-6">
       <Link
         to="/action-items"
+        data-print="hide"
         className="mb-3 inline-flex items-center text-xs text-primary hover:underline focus:outline-none focus:ring-2 focus:ring-ring"
       >
         <ChevronLeft className="h-3.5 w-3.5" strokeWidth={2} aria-hidden="true" />
@@ -206,12 +207,14 @@ function DetailInner({ id }: { id: string }): JSX.Element {
         ) : null}
       </section>
 
-      <MovePanel
-        currentSection={item.section}
-        allowedTransitions={item.allowedTransitions}
-        pendingMove={pendingMove}
-        onApply={applyMove}
-      />
+      <div data-print="hide">
+        <MovePanel
+          currentSection={item.section}
+          allowedTransitions={item.allowedTransitions}
+          pendingMove={pendingMove}
+          onApply={applyMove}
+        />
+      </div>
 
       {error ? (
         <div
@@ -239,12 +242,12 @@ function DetailInner({ id }: { id: string }): JSX.Element {
       <HistoryPanel history={item.history} onUndo={applyUndo} pendingUndo={pendingUndo} />
       <CaptureFab linkedType="action_item" linkedId={item.id} />
 
-      <div className="mt-6 text-xs text-muted-foreground">
+      <div className="mt-6 text-xs text-muted-foreground" data-print="evidentiary">
         Every section move is anchored in the audit chain — the audit row index appears next to each
         entry.
       </div>
 
-      <div className="mt-4">
+      <div className="mt-4" data-print="hide">
         <Button variant="ghost" size="sm" onClick={() => navigate('/action-items')}>
           Done
         </Button>
