@@ -1,0 +1,6 @@
+# Excel-import fuzz failure dumps land here at runtime.
+#
+# Contents of this directory (except this .gitkeep marker) are gitignored
+# per the root .gitignore (per S5 F-S1). The fuzz harness writes
+# adversarial bytes + meta files for failing cases; those blobs MUST NOT
+# be committed.

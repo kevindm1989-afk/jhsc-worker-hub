@@ -270,7 +270,7 @@ Verify with `git grep -E "MASTER_KEY=|TIGRIS_SECRET|ANTHROPIC_API_KEY=|VAPID_PRI
 ### 4.1 Run migrations
 
 ```bash
-DATABASE_URL='<production-connection-string>' pnpm --filter @jhsc/api drizzle:migrate
+DATABASE_URL='<production-connection-string>' pnpm --filter @jhsc/api db:migrate
 ```
 
 The migration order is `migrations/0000_auth_baseline.sql` through `migrations/0010_excel_import.sql` (per ADR-0011 §3.9). Drizzle runs them in lexicographic order.
@@ -317,8 +317,11 @@ Each deploy targets the YYZ region. Watch the deploy output for the image-pull +
 ### 4.6 Smoke-test the health endpoint
 
 ```bash
-curl -sf https://jhsc-worker-hub-api.fly.dev/api/health
+curl -sf https://jhsc-worker-hub-api.fly.dev/health
 # Expected: {"status":"ok","service":"api"}
+# NOTE (S5 F-R-NEW-1): the API mounts health at /health (apps/api/src/index.ts:23
+# + apps/api/fly.toml health-check path). Earlier drafts of this runbook said
+# /api/health which would 404 against a healthy deploy.
 
 curl -sf https://jhsc-worker-hub-ai-proxy.fly.dev/health
 # Expected: a similar shape (the ai-proxy idles but its health endpoint responds).

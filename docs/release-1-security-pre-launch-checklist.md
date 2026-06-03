@@ -241,7 +241,9 @@ signing_key_id column on audit_log schema (gap-1)` appears.
       domain, or the Tigris bucket endpoint. Zero requests to
       analytics, CDN-fetch-on-load, or third-party telemetry.
 - [ ] **5.3 CSP header present on every API response.**
-      `curl -sI https://api.<staging-host>/api/health | grep -i content-security-policy`.
+      `curl -sI https://api.<staging-host>/health | grep -i content-security-policy`
+      (the API mounts health at `/health`, not `/api/health` —
+      apps/api/src/index.ts:23; per S5 F-R-NEW-1).
       **Pass criterion:** header is present with the strict policy from
       `apps/api/src/middleware/security.ts` (`default-src 'none'`,
       `frame-ancestors 'none'`, etc.).

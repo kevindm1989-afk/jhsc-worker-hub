@@ -130,19 +130,63 @@ The post-Release-1 backlog includes "convert corpus to a lazy
 generator" if future telemetry shows memory pressure. The current eager
 shape is documented in `fuzz-corpus.ts: generateCorpus`.
 
+## Finding F-8 — Failure-dump directory is gitignored (S5 F-S1)
+
+**Status:** Resolved in S5 fix bundle.
+
+The harness writes adversarial-byte samples + meta files to
+`packages/excel-import/test/fuzz/failures/` on failing cases via
+`dumpFailure()` (truncated to 4 KB per case). Some scenarios embed
+prototype-pollution payloads, bidi spoofing strings, and corrupted-xlsx
+bytes; a developer iterating locally could inadvertently `git add`
+those blobs (or, worse, real-workbook bytes if they substituted a
+local input). Per CLAUDE.md non-negotiable #4 (privacy-by-default,
+minimize collection) and SECURITY §2.12 T-HD18 (harness as backstop on
+the 1.11 attack surface), those blobs must not flow into the
+repository.
+
+**Resolution:** the repo `.gitignore` now lists
+`packages/excel-import/test/fuzz/failures/` with a `.gitkeep`
+exception so the directory structure persists for the harness's
+runtime `mkdirSync` but no failure artifact (synthetic or
+locally-substituted) lands in git. See S5 review F-S1.
+
+## Finding F-9 — Per-case prototype-pollution check is content-equal (S5 F-S5)
+
+**Status:** Resolved in S5 fix bundle.
+
+The previous per-case prototype-pollution assertion compared
+`live.length !== objectProtoSnapshot.length`. A clever
+delete-then-add attack of equal cardinality would have passed the
+per-case check; only the `afterAll` suite-level `toEqual` on sorted
+names caught the asymmetric mutation — but at that point the failure
+was non-attributable to a single case id (so reproducing required a
+binary search, made worse by the F-8 failure-dump posture).
+
+**Resolution:** the per-case branch now also asserts the sorted
+own-name list matches AND a known-dangerous-keys spot-check
+(`toString`, `valueOf`, `hasOwnProperty`, `constructor`) catches
+replace-and-restore attacks that preserve the property-name set but
+mutate the bound function. The per-case snapshot now covers
+`Object.prototype`, `Array.prototype`, `Function.prototype`,
+`Map.prototype`, `Set.prototype`, `String.prototype`. See S5 review
+F-S5.
+
 ## Summary
 
-| Finding | Status           | Resolution                                                           |
-| ------- | ---------------- | -------------------------------------------------------------------- |
-| F-1     | Documented       | Parser uses `DetectionResult`; harness adapts (no refactor)          |
-| F-2     | Documented       | Zero-filled buffer is equivalent for cap enforcement                 |
-| F-3     | Documented bound | Snapshot-name check; value-mutation deferred to backlog              |
-| F-4     | Documented       | SheetJS refusing to encode is itself fail-closed                     |
-| F-5     | Intentional      | Malformed-xlsx outcome is `either`; no-throw is load-bearing         |
-| F-6     | Documented bound | 30s wall-time per ADR; engine-level instrumentation deferred         |
-| F-7     | Documented bound | Eager corpus materialization fits CI budget; lazy generator deferred |
+| Finding | Status                | Resolution                                                                                   |
+| ------- | --------------------- | -------------------------------------------------------------------------------------------- |
+| F-1     | Documented            | Parser uses `DetectionResult`; harness adapts (no refactor)                                  |
+| F-2     | Documented            | Zero-filled buffer is equivalent for cap enforcement                                         |
+| F-3     | Documented bound      | Snapshot-name check; value-mutation deferred to backlog                                      |
+| F-4     | Documented            | SheetJS refusing to encode is itself fail-closed                                             |
+| F-5     | Intentional           | Malformed-xlsx outcome is `either`; no-throw is load-bearing                                 |
+| F-6     | Documented bound      | 30s wall-time per ADR; engine-level instrumentation deferred                                 |
+| F-7     | Documented bound      | Eager corpus materialization fits CI budget; lazy generator deferred                         |
+| F-8     | Resolved in S5 bundle | `failures/` directory gitignored; `.gitkeep` preserves the run-time path                     |
+| F-9     | Resolved in S5 bundle | Per-case proto check covers Object/Array/Function/Map/Set/String + known-dangerous-keys spot |
 
-None of F-1..F-7 represent a parser bug. All are documentation of the
+None of F-1..F-9 represent a parser bug. All are documentation of the
 harness's posture against the ADR-0011 §3.5 specification. Genuine
 parser bugs surfaced during harness construction (if any) land in a
 separate `docs/audits/` finding with a fix commit; this document is

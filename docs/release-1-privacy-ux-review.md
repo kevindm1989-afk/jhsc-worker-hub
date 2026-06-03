@@ -1,0 +1,74 @@
+# M1.12 Privacy + UX Review
+
+Reviewer: independent S5 (privacy/UX)
+Reviewed commits: 630b3df, 64d0605, 87c5341, 0eb4c17, ac5ce65
+Scope: §A WCAG completeness, §B print stylesheet, §C mobile Playwright divergence, §D privacy non-negotiables
+
+## Findings
+
+### CRITICAL (release-blocker)
+
+_None._ The five slices land cleanly against the non-negotiables. Findings below are S5-bundle work; they do not block deploy by themselves but several are mobile-primary-baseline regressions that should be addressed before the rep depends on the deployed build.
+
+### HIGH (fix-in-S5-bundle)
+
+- **F-P1: Four shipped views are absent from the WCAG per-view audit table.**
+  - **Where:** `docs/release-1-wcag-audit.md` Summary table (lines 73–112), `apps/web/src/app.tsx` lines 24, 25, 54, 55, 82.
+  - **What:** The audit table walks 8 feature surfaces but omits the four standalone routed views: `MinutesView` (`/minutes` — the canonical landing route per `app.tsx:54`), `MoreView` (`/more` — the secondary-nav surface), `LegalView` (`/legal` — corpus search + browse, ~489 LOC), and `RecommendationEditView` (`/recommendations/:id/edit`, ~247 LOC). The audit's "Action items (1.6) — Minutes board" entry maps to `action-items-view.tsx`, NOT to the actual `/minutes` route which is a separate file (`minutes-view.tsx`).
+  - **Why it matters:** Per T-HD1 ("audit-list frozen against the 1.11 close-out view inventory; a view that lands between this audit and the milestone merge requires a re-walk before S5 sign-off"), every shipped view must be audited. The S5 mandate explicitly enumerates `minutes-view`, `more-view`, `legal-view`, `recommendation-edit-view` as expected surfaces. Their omission means we are signing off on accessibility without walking them.
+  - **Fix:** Append four rows to the audit summary table + a Findings subsection per view. Spot-check from this review: `more-view.tsx:112` uses `h-9 w-9` icon container (decorative — `aria-hidden`, but the surrounding button doesn't enforce a 44pt outer hit target on mobile; the row's `p-3.5` padding likely meets it but unmeasured); `minutes-view.tsx:37,47` ships `h-9` (36px) `<Button>` primaries on mobile (below 44pt); `legal-view.tsx:122` ships `h-9` Search submit on mobile; `legal-view.tsx:119` ships `text-sm` (14px) on the search `<input type="search">` → iOS Safari auto-zoom on focus.
+
+- **F-P2: 44pt touch-target rule has systemic regressions across views the S1 fix bundle did not touch.**
+  - **Where:** Every shipped view that uses `<Button size="sm" className="h-9">` or `h-7 px-2 text-xs` as a primary or secondary action. Sample sites: `apps/web/src/views/hazards-view.tsx:44,218,278`; `action-items-view.tsx:51,195,288`; `action-item-detail-view.tsx:413`; `inspections-view.tsx:48,51,256,262`; `inspection-detail-view.tsx:657,927,931,941`; `templates-view.tsx:66,161,168,238`; `recommendations-view.tsx:55,266`; `excel-imports-view.tsx:43,246`; `minutes-view.tsx:37,47`; `legal-view.tsx:122`; `new-recommendation-view.tsx:709,719`. The shadcn `<Button>` primitive itself (`apps/web/src/components/ui/button.tsx:22,25`) defaults to `h-9` for `default` and `icon` sizes.
+  - **What:** The S1 fix bundle addressed exactly four surfaces (step-up modal Cancel, top-bar Search/Notifications, theme toggle, citation-picker open-statute button). Every other surface that calls the canonical `<Button size="sm">` ships at 36px, and the inline `h-7 px-2 text-xs` ghost buttons on inspection-detail / action-item-detail / new-recommendation row controls ship at 28px. CLAUDE.md "Mobile-Primary Patterns": **"Touch targets ≥ 44pt."** WCAG 2.5.5 baseline.
+  - **Why it matters:** The audit reports 10 MUST-FIX as a complete set — but the rule is structural to the design system, not site-specific. A rep on a 393px viewport tapping list-page primaries (the most-used affordances in the app) gets 36px targets across nearly every screen, including the operational hub. The S1 audit categorization is hiding the systemic version as resolved-by-instance.
+  - **Fix:** Two options. (a) S5-bundle: bump `<Button size="sm">` (or add a new `mobile-sm` size) to `h-11 md:h-9` so every consumer gets the responsive collapse for free. (b) Document the pattern that the four new-form views already use (`className="h-10 md:h-9"`, e.g. `hazard-new-view.tsx:263,266`) and audit-roll it into the shadcn primitive defaults. Re-categorize this finding as MUST-FIX in the audit doc with a system-wide fix-spec.
+
+- **F-P3: iOS Safari auto-zoom regression on form inputs is functionally a mobile-flow break, not a soft SHOULD-FIX.**
+  - **Where:** `apps/web/src/views/hazard-new-view.tsx:340` (`fieldInputClass` ships `text-sm`); same pattern in `action-item-new-view.tsx`, `new-inspection-view.tsx`, `new-template-view.tsx`; `new-recommendation-view.tsx:442,472`; `legal-view.tsx:119`; the `mobile-forms.spec.ts` soft-asserts at the floor of the iPhone 15 Pro project.
+  - **What:** Inputs render at `text-sm` (14px). iOS Safari auto-zooms any `<input>` / `<textarea>` whose computed `font-size` is <16px on focus, then does NOT auto-zoom-out on blur — the rep ends up at a >100% zoom on a sticky-bottom form mid-create.
+  - **Why it matters:** CLAUDE.md non-negotiable #9 ("Every feature designed for 390px phone first") + Mobile-Primary Patterns ("Sticky bottom primary action on mobile forms"). The zoom-and-rebound makes sticky-bottom unreachable on iPhone — a regression against the audit's verified-clean form views. S3 correctly flagged this; categorizing it as a "soft" assertion against CI underplays the rep-facing impact.
+  - **Fix:** Replace `text-sm` with `text-base md:text-sm` on every input/textarea/select in the four create forms + `legal-view.tsx` + `new-recommendation-view.tsx`. Flip the `expect.soft` to `expect` in `mobile-forms.spec.ts`. Records as MUST-FIX in the WCAG audit follow-on.
+
+### MEDIUM (document or defer)
+
+- **F-P4: `Field` helper points `aria-describedby` at the hint id even when the hint element is not rendered in the error state.**
+  - **Where:** `apps/web/src/views/hazard-new-view.tsx:299–333` (mirror copies in `action-item-new-view.tsx`, `new-inspection-view.tsx`).
+  - **What:** The helper computes `describedBy = [errorId, hintId].filter(Boolean).join(' ')` and injects both ids into `aria-describedby`. But the DOM renders error OR hint via an `else if`: when error is present, the hint `<div id="${id}-hint">` is not in the DOM, so the input references a non-existent id. Screen readers' behavior on a dangling `aria-describedby` target is implementation-defined (NVDA: silent skip; VoiceOver: occasionally announces the label twice). The `role="alert" aria-live="polite"` on the error div is the load-bearing announcement — that part works.
+  - **Why it matters:** The audit calls out "the pattern actually announces errors properly" as the test. In practice it does, via aria-live, but the dangling-id is a static-audit smell and an a11y-test false positive risk. Not a release blocker.
+  - **Fix:** Compute `describedBy` from the rendered branch: when error, point only at `errorId`; when hint, point only at `hintId`. One-liner per Field helper.
+
+- **F-P5: `data-print="hide"` / `data-print="evidentiary"` attribute scheme is not documented where a future dev will find it.**
+  - **Where:** The scheme is documented in the index.css comment block (`apps/web/src/index.css:124–149`) and the WCAG audit doc, but NOT in `CLAUDE.md` UI/Design Conventions, NOT in `ARCHITECTURE.md §8`. Future Release 2.x view authors writing a new printable surface will not naturally find the convention.
+  - **What:** A doc gap, not a code gap.
+  - **Why it matters:** CLAUDE.md "Print stylesheet for every printable view — evidence-grade output" is a quality bar item. A new view that prints sensitive panel chrome (back-links, action buttons, dialogs) because the dev didn't know about the `data-print="hide"` convention is a privacy regression risk — non-negotiable #4 (privacy-by-default).
+  - **Fix:** Append a "Print conventions" subsection to CLAUDE.md UI/Design Conventions naming both attributes + the canonical pattern.
+
+- **F-P6: No-early-upload network tracker is scoped to two endpoint paths only.**
+  - **Where:** `apps/web/tests/e2e/mobile-capture-flow.spec.ts:91–97`.
+  - **What:** The tracker filters by `url.includes('/api/evidence') || url.includes('/api/uploads')`. A regression that introduces a new staging endpoint (e.g., `/api/capture-staging`, `/api/draft-uploads`, presigned PUT against Tigris directly) would slip past the assertion and pass falsely.
+  - **Why it matters:** The whole point of the assertion is to enforce CLAUDE.md "Camera roll never touched" + Excel-import-style client-side-only handling for evidence. A path-narrowed allowlist inverts the security posture — it should be a deny-by-default that flags any POST/PUT with a `multipart/form-data` or `application/octet-stream` body before the user hits Save.
+  - **Fix:** Restructure the tracker to capture all POST/PUT requests; assert the count is zero across `/api/*` and any Tigris/S3 hostname; explicitly allowlist non-upload calls (the session/auth/status pings) by content-type rather than URL prefix.
+
+### LOW
+
+- **F-P7: Bottom-tab-bar lock divergence from bootstrap brief is the right reality, but lacks a CLAUDE.md note.** S3's mobile gaps doc records it. The shipped 5-tab set (Minutes / Hazards / Inspections / Recommendations / More) verified in `apps/web/src/lib/tabs.ts:34–74` matches `bottom-tab-bar.tsx:15` (5-column grid). Capture FAB is entity-scoped (correctly). No design-system rule violated. Suggest a one-line note in ARCHITECTURE.md §3 documenting why Action Items has no top-level tab (it's inside the Minutes module's operational hub framing). Optional.
+
+- **F-P8: Step-up modal structural focus-trap is deferred to R2.** Audit acknowledges this as a Phase-1 baseline mitigation via auto-focus + overlay + focus rings. Acceptable per ADR-0011 fix-bundle posture. Note: at single-tenant scale a Tab-out-of-modal exposure is bounded to the rep's own browser session, but a screen-reader user can technically focus the page-behind-modal. Document explicit "lands in R2 packages/ui focus-trap primitive" pointer in the security checklist's Section C if not already there.
+
+- **F-P9: GPS coordinates fixture in `mobile-capture-flow.spec.ts:46` uses Toronto (43.6532, -79.3832).** Per non-negotiable #1 this is a city centroid, not a real-person or workplace identifier — and Toronto IS the documented Fly region (`yyz`) per ADR-0011 §3.9 + the deploy runbook. Not a violation. Spec authors should treat the comment as fixture-only; flagged here so a future reviewer doesn't worry.
+
+## Verified (no finding)
+
+- **#3 No third-party data flows.** `git diff 630b3df..ac5ce65 -- '**/package.json'` shows zero new runtime deps; the only change is a `test:fuzz` script in `packages/excel-import/package.json`. No analytics SDK introduced. axe-core was scoped out of S1 per the audit doc; no telemetry surface added.
+- **#1 No specific names in source.** Searched all S1–S4 changed files for "Local 175", real-people patterns, employer-name patterns. The only "Toronto" references are the Fly region (`yyz`) and the IANA tz string in env-var docs — both legitimate per the env-driven `config/workplace.ts` pattern. No leaked identifiers.
+- **#10 Restrained legal-grade aesthetic.** No marketing flourishes (hero, gradient, testimonial), no union iconography (fist, banner) introduced. The only "banner" references are `NetworkRequiredBanner` (status surface, correct usage). Print stylesheet uses Source Serif 4 + monochrome — fully legal-grade.
+- **#7 Rights-protective UI.** Reviewed copy strings in the S1 view fixes (focus-ring class additions, `data-print` attributes, Field helper labels). No copy added that discourages OHSA s.43 / s.50 or CLC s.128/s.147 exercise. The audit doc itself explicitly checks this per ADR-0011 §3.1 + Compliance check #7.
+- **Print stylesheet T-HD7 (no display:none → display:block on encrypted fields).** Verified by inspection of `apps/web/src/index.css:152–259`: the print rules either hide (`display: none !important` for chrome + `data-print="hide"`) or surface evidentiary metadata (`display: block !important` for `data-print="evidentiary"`). No selector un-hides a screen-hidden element. The print spec at `print-stylesheet.spec.ts:131–153` explicitly asserts the negative case via a probe.
+- **Print stylesheet Source Serif 4 typography.** `index.css:160` ships `'"Source Serif 4 Variable"', '"Source Serif 4"', Georgia, serif` — matches CLAUDE.md typography rule for "generated long-form documents." Falls back to Georgia (system serif) if the variable font isn't loaded; spec asserts substring match at `print-stylesheet.spec.ts:84`.
+- **Print stylesheet light-mode forcing.** `index.css:165–172` overrides every dark-mode CSS variable to white-on-black under `@media print`; the `[data-theme='dark']` selector still matches under print emulation so the rep printing in dark mode gets evidentiary monochrome output.
+- **Print stylesheet page-break coverage.** `index.css:201–209` covers `article, section, .print-card, [data-print="card"], ul > li, ol > li` — broad enough to catch the canonical card-list pattern used across hazard/action-item/inspection/recommendation/excel-import detail views.
+- **Bottom tab bar shipped lock matches S3's assertion.** `apps/web/src/lib/tabs.ts:34–74` defines exactly Minutes / Hazards / Inspections / Recommendations / More; `bottom-tab-bar.tsx:15` renders a 5-column grid. Capture FAB is entity-scoped per `apps/web/src/evidence/components.tsx`. S3's divergence note is correct.
+- **prefers-reduced-motion is respected.** No `framer-motion` code is actually imported in `apps/web/src` despite being in the CLAUDE.md tech stack (deferred). All animations are CSS-driven (`animate-pulse` etc.), gated by the global reduced-motion reset at `index.css:112–121`. The audit claim is moot but technically clean.
+- **Status badge color-pairing.** Spot-checked three random sites: `excel-imports-view.tsx:188–209` pairs each color chip with text content (`+N new`, `~N upd`, `!N conflict`) and wraps the row in `aria-label`; `excel-import-detail-view.tsx:470–491` ships status maps with `{ label, chip }` pairs (label always rendered); `hazards-view.tsx` per the audit pairs the severity dot with `role="img" aria-label`. No color-alone violations found in the spot-check.
+- **Top-bar + theme-toggle + step-up + citation-picker 44pt fixes.** Verified at `top-bar.tsx:59,80` (`h-11 ... md:h-9`), step-up Cancel at `step-up-modal.tsx`, citation-picker open-statute at `citation-ref.tsx:181` (`h-9` Submit — note: this is the picker's Search submit button, not the row open-statute fix which IS resolved per the audit's line-460 reference). Audit accurate on the four it tracked.

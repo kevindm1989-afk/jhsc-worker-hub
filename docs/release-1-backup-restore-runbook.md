@@ -260,7 +260,7 @@ The Neon branch carries the production schema as of the snapshot
 moment. If any migrations have shipped since the snapshot, run them:
 
 ```bash
-DATABASE_URL=<branch-connection-string> pnpm --filter @jhsc/api drizzle:migrate
+DATABASE_URL=<branch-connection-string> pnpm --filter @jhsc/api db:migrate
 ```
 
 **Pass criterion:** migrations complete cleanly; the migration
@@ -333,7 +333,7 @@ fly deploy --app jhsc-worker-hub-api-drill --config apps/api/fly.toml
 Wait for the deploy to settle. Hit the health endpoint:
 
 ```bash
-curl -sf https://jhsc-worker-hub-api-drill.fly.dev/api/health
+curl -sf https://jhsc-worker-hub-api-drill.fly.dev/health
 ```
 
 **Pass criterion:** `{"status":"ok","service":"api"}`.
