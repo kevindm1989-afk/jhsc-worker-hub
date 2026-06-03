@@ -335,6 +335,11 @@ DATABASE_URL='<production-connection-string>' bun apps/api/scripts/audit-log-ver
 
 **Pass criterion:** exit 0; report's `rowCount` is 2 (genesis + backfill anchor); `gaps: []`; `payloadShapeMismatches: []`.
 
+For the full JSON-report schema (every field a consumer can rely on)
+see `docs/release-1-audit-verify-report-schema.md`. Add `--report=json`
+to the invocation to produce the machine-readable form; the runbook's
+canonical shape is documented there.
+
 ---
 
 ## 5. Rep enrollment
@@ -541,6 +546,12 @@ The following items surfaced during the runbook survey and are flagged for resol
 - **GAP:** `apps/web/Dockerfile` does not exist — see §2.1. Must be created (or the alternative-serving path adopted) before the web app deploys.
 - **GAP:** `apps/api/scripts/generate-kek.ts` does not exist — see §2.5. Use the `node -e` one-liner from `.env.example` until the script lands.
 - **GAP:** `lifecycle-30d.json` fixture not in tree — see §2.3. Author inline per AWS S3 lifecycle schema at provision time.
-- **GAP:** `docs/runbooks/auth.md` §7 (tamper response) is referenced from the audit-log-verify script output and from §3.6 of the backup-restore runbook. Confirm §7 exists in the runbook before relying on it during an incident; if not, author it as part of the deploy preparation.
+<!-- S5 M-4 + S5 F-S9 + release-readiness GAP-5 triage: the previous
+     "auth.md §7 referenced unsurveyed" entry was a false alarm. The
+     section exists in `docs/runbooks/auth.md` at line 289 (heading
+     `## 7. Audit-chain tamper response (Milestone 1.3+)`). Removed
+     from the GAP list so a rep walking the runbook does not waste
+     time on a non-issue. -->
+- **Closed (S5 false-alarm triage):** `docs/runbooks/auth.md` §7 (tamper response) exists at line 289 of the auth runbook; no gap. The previous entry here flagged it for survey but verification confirmed the section is present. Removed.
 
 Each gap is documented so it does not paper over; the rep addresses each before the production deploy or accepts the gap as documented divergence on the security checklist.

@@ -335,9 +335,13 @@ function Field({
   // Wire hint/error to the labelled input via aria-describedby so screen
   // readers announce both the descriptive hint AND validation errors per
   // CLAUDE.md WCAG Phase 1 ("Form errors announced to screen readers").
+  //
+  // Per S5 M-3: describedby points at the rendered branch only — error
+  // takes precedence (matches the DOM if/else if below). Avoids a
+  // dangling describedby target when only one of {error, hint} renders.
   const errorId = error ? `${id}-error` : undefined;
   const hintId = hint ? `${id}-hint` : undefined;
-  const describedBy = [errorId, hintId].filter(Boolean).join(' ') || undefined;
+  const describedBy = error ? errorId : hintId;
   const child = children as React.ReactElement<{
     'aria-describedby'?: string;
     'aria-required'?: boolean;

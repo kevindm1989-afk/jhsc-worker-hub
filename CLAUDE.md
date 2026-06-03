@@ -205,6 +205,7 @@ See `ARCHITECTURE.md §8` for the full design system. Quick rules:
 - **Loading = skeleton screens.** No full-page spinners.
 - **Destructive actions confirm** with explicit consequence text.
 - **Print stylesheet** for every printable view — evidence-grade output.
+- **Print attribute convention.** Mark screen-only chrome (back-links, action buttons, capture FAB, dialogs, status-transition affordances) with `data-print="hide"` so the `@media print` block (`apps/web/src/index.css`) excludes it from the printed page. Mark evidentiary metadata that must surface in print but is normally muted on screen (chain-anchor explanations, audit row indices, document hashes) with `data-print="evidentiary"` so the same block surfaces it with bordered divider + JetBrains Mono. This convention is the canonical way to author a new printable view — see `docs/release-1-wcag-audit.md` §"Print stylesheet verification" for the canonical pattern.
 
 ### Mobile-Primary Patterns
 

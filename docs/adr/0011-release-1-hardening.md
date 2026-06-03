@@ -259,7 +259,7 @@ The specs run in CI as part of the existing `e2e` job (no new job; the `pnpm --f
 
 The runbook documents the `fly.toml` per machine, the env var inventory, and the deploy command (`fly deploy --app jhsc-api` etc.).
 
-**Neon Postgres production provisioning.** A new Neon project + a `production` branch + a single role for the API + a read-only role for the audit-verify cron. The migration run order is 0001..0010 in sequence (the existing `migrations/*.sql` files + the Drizzle Kit migration tooling). The runbook documents the migration command + the post-migration verification (the genesis row at idx=0 + the backfill anchor at idx=1 per ADR-0002).
+**Neon Postgres production provisioning.** A new Neon project + a `production` branch + a single role for the API + a read-only role for the audit-verify cron. The migration run order is 0000..0010 in sequence — 11 migrations total, starting at `0000_auth_baseline.sql` and ending at `0010_excel_import.sql` (per S5 M-6 / F-R6 correction; the previous "0001..0010" wording was off by one). The runbook documents the migration command + the post-migration verification (the genesis row at idx=0 + the backfill anchor at idx=1 per ADR-0002).
 
 **Tigris bucket provisioning.** Two buckets — `evidence-prod` and `exports-prod` — with SSE-AES256 enabled + versioning enabled + a lifecycle policy that retains versions for 30 days (matching the 1.11 reverse window). The bucket-creation command + the IAM credentials provisioning (the Tigris-generated access key + secret) + the credential storage in Fly Secrets are documented.
 
@@ -405,3 +405,39 @@ The following items are user-authorized deferrals to post-Release-1 hardening mi
 - [ ] **Release 2 absorbs:** the meeting module's native lifecycle (replaces the Excel-file workflow); reprisal, accommodation, refusal, critical injury, calendar surfaces; the meeting-module's offline support (extends the 1.10 sync queue to the meeting flows); the PIPEDA P9 redaction tables (evidence / inspection_finding / recommendation); the post-Release-1 hardening items that did not land before R2 starts.
 - [ ] **Release 3 absorbs:** E2EE messaging surface (libsignal-protocol-typescript); AI-assisted Adversarial Lens (Anthropic via the ai-proxy machine — opt-in per non-negotiable #3); AI-assisted reconciliation for Excel imports.
 - [ ] `.context/decisions.md` entry referencing this ADR.
+
+## Post-Release-1 Backlog Ratchet
+
+This section was appended in S5. The user authorized **ROADMAP scope
+only** for 1.12; four HIGH findings from the S5 release-readiness
+review were re-triaged as scope expansion and are deferred to the
+post-Release-1 hardening backlog (not fixed in 1.12). The six LOW
+prior-ADR forward-seam items the release-readiness reviewer surfaced
+are also captured here so a future maintainer can pick each one up
+without rediscovery.
+
+### Deferred from S5 (originally tagged HIGH, re-triaged as scope expansion)
+
+- **F-R3 — Audit-log full-dataset fixture + generator script.** ADR-0011 §3.7 promised `apps/api/test/fixtures/audit-log-full-dataset.sql` (synthetic ≥1000-row chain covering every kind from 1.2–1.11) + `apps/api/scripts/generate-audit-fixture.ts` (developer-side tool that walks the production chain anonymized to regenerate the fixture). S2 shipped in-test synthetic fixtures inside `audit-log-verify.test.ts` instead. The in-test coverage is functionally similar but does NOT run `--full` against a chain that mirrors the production-shape across every kind. **Lands in:** post-Release-1 hardening milestone — first slice of the post-Release-1 sweep, before the forward-defense flags land. **Mitigation in the interim:** documented in `release-1-audit-verify-gaps.md`; the in-test synthetic chains cover the structural surfaces the runbook depends on.
+
+- **F-R4 — pg-boss worker shell provisioning.** ADR-0011 §3.9 said the deploy provisions `boss.schema_create` + the empty worker process so post-Release-1 sweeps drop in cleanly. The shipped deploy runbook §2 + §3 + §4 do NOT provision either. **Lands in:** post-Release-1 hardening, alongside the `sync_idempotency` TTL sweep job (which is the first job that needs the worker). The runbook for that milestone authors the `boss.schema_create` migration + the worker Fly Machine command together.
+
+- **F-R5 — Recommendation public-verification page.** ADR-0008 §3 forward seam: "1.12 ships a public verification page" for recipients of a signed recommendation PDF to verify against the rep's audit chain without rep involvement. Neither shipped in 1.12 nor previously enumerated in the backlog. **Lands in:** post-Release-1 hardening (low priority for single-tenant scale; the rep's audit chain IS the trust anchor, and the rep can produce a `audit-log-verify --full` report on request). Surface design + JWS verification flow design is the bulk of the work.
+
+- **F-R6 — `apps/api/scripts/backup-restore-smoke.ts`.** ADR-0011 §3.10 S4 deliverable list named this script; the file is not in the tree. The backup-restore runbook §3 walks the drill manually and reaches §3.6's `audit-log-verify --full` step, so the smoke-test script's absence is mitigated by the explicit manual procedure. **Lands in:** post-Release-1 hardening, alongside the `audit-log-verify` forward-defense flags (the script is a thin wrapper around `audit-log-verify --full` plus the per-table row-count + workplace-public-key fingerprint check enumerated in ADR-0011 §3.6).
+
+### Prior-ADR forward seams surfaced by S5 release-readiness review (LOW priority backlog-ratchet)
+
+- **Workplace env var canonical name.** ADR-0011 §3.9 text uses `WORKPLACE_NAME` in one place; the code-canonical name (in `config/workplace.ts` + the deploy runbook §3) is `WORKPLACE_DISPLAY_NAME`. A reader of ADR-0011 might set the wrong variable. **Lands in:** post-Release-1 cleanup commit alongside the env-var CI lint that ADR-0011's S4 follow-up calls for. Until the lint lands, this section is the canonical pointer that the code wins (`WORKPLACE_DISPLAY_NAME`). (Source: F-R7.)
+
+- **WCAG audit doc path canonicalization.** ADR-0011 §3.1 specifies `docs/audits/release-1-wcag-audit.md`; S1 shipped it at `docs/release-1-wcag-audit.md` (root of docs/, not docs/audits/). Cross-references in the checklist follow the as-shipped path so no rep is blocked. **Lands in:** post-Release-1 cleanup — either relocate the doc to `docs/audits/` OR amend ADR-0011 §3.1 to reflect the as-shipped path. (Source: F-R8.)
+
+- **Service-worker rotation procedure.** ADR-0009 §"Out of scope" forward seam: revoke stale SW on KEK rotation. Not in the 1.12 backlog. Will become load-bearing the day KEK rotation lands; until then the SW is keyed against the workplace public key that never rotates. **Lands in:** post-Release-1 hardening (alongside KEK rotation script). (Source: F-R13.)
+
+- **Dead-letter Prometheus metric.** ADR-0009 §"Out of scope" forward seam: operational signal (Prometheus or equivalent) for the dead-letter queue depth. Not in 1.12 backlog. Operability degradation if the rep cannot see when sync is silently dead-lettering. **Lands in:** post-Release-1 hardening (alongside the pg-boss worker shell). (Source: F-R14.)
+
+- **Excel-import forward seams (four).** ADR-0010 §"Out of scope" enumerates: (a) automated content_hash dedup detection across imports, (b) source-filename PII detector, (c) reverse-window admin UI for the co-chair past 30 days, (d) `.xls` (binary 97-2003) fallback parser. None enumerated in the 1.12 ADR backlog list. **Lands in:** post-Release-1 hardening. The reverse-window admin UI is the most operationally relevant — the rep needs a way past day 30 today and has only the operator script. (Source: F-R15.)
+
+- **`inspection_finding_redactions` table Release-vs-1.12 scope.** ADR-0011 §"Out of scope" lumps this into "Evidence / inspection_finding / recommendation redaction tables — lands in Release 2." Adequate but coarse; the rep should know it's a Release 2 item (alongside the meeting module's P9 surface), not a post-Release-1-hardening item. Above list is now explicit. (Source: F-R16.)
+
+- **pg-boss-backed cross-process export rate limiter.** ADR-0008 §3 forward seam: cross-process export rate limiter via pg-boss. At single-tenant scale the in-memory rate limiter holds; the deferral should still be explicit so a future PR doesn't re-discover it. **Lands in:** post-Release-1 hardening, alongside pg-boss worker shell + dead-letter metric. (Source: F-R12.)

@@ -557,9 +557,14 @@ Per T-S4 + T-X31:
 
 ## 12. Report format
 
-Findings export to `docs/audits/release-1-pentest-findings.md` (NEW
-file at first scan; appended to on subsequent scans). Each finding
-is a row in the following shape:
+Findings export to `docs/audits/release-1-pentest-findings.md`. Per
+S5 M-7: this file does NOT exist in the tree today; the first
+post-deploy scan CREATES it (the operator authors the file using the
+shape below), and every subsequent scan APPENDS a new date-stamped
+scan header. The `docs/audits/` directory exists; the per-scan file
+is incremental.
+
+Each finding is a row in the following shape:
 
 ```
 ### Finding F-<scan-date>-<seq> — <one-line title>

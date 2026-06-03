@@ -296,9 +296,15 @@ function Field({
   // CLAUDE.md WCAG Phase 1 ("Form errors announced to screen readers").
   // The input itself is rendered by the caller; we clone children to inject
   // the linking attribute.
+  //
+  // Per S5 M-3: the rendered DOM only contains one of {error, hint} — error
+  // takes precedence (the if/else if below). Pointing aria-describedby at
+  // BOTH ids when only one element is rendered leaves a dangling target;
+  // screen-reader behavior on a dangling describedby is implementation-
+  // defined. We now wire describedby to ONLY the rendered branch's id.
   const errorId = error ? `${id}-error` : undefined;
   const hintId = hint ? `${id}-hint` : undefined;
-  const describedBy = [errorId, hintId].filter(Boolean).join(' ') || undefined;
+  const describedBy = error ? errorId : hintId;
   const child = children as React.ReactElement<{
     'aria-describedby'?: string;
     'aria-required'?: boolean;

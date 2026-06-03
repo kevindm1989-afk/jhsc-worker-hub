@@ -234,9 +234,19 @@ focus-visible:ring-ring focus-visible:ring-offset-2` to each.
   WCAG 3.3.1 (Error Identification) + 3.3.2 (Labels or Instructions).
   **Fix:** `Field` helper now generates `${id}-hint` + `${id}-error`
   ids, `React.cloneElement`s the input child to inject
-  `aria-describedby` pointing at both (filtered), and surfaces
-  `aria-required` from the `required` prop. Pattern lifted from R2
-  best-practice; applied here as the cheapest WCAG fix.
+  `aria-describedby` and surfaces `aria-required` from the `required`
+  prop. Pattern lifted from R2 best-practice; applied here as the
+  cheapest WCAG fix.
+
+  **Per S5 M-3:** describedby now points at the rendered branch only.
+  The Field helper renders error OR hint via an if/else if (error
+  takes precedence); pointing describedby at BOTH ids when only one
+  element is in the DOM leaves a dangling target. Screen-reader
+  behavior on a dangling describedby is implementation-defined (NVDA:
+  silent skip; VoiceOver: occasionally announces the label twice).
+  The fix collapses the wiring to `describedBy = error ? errorId :
+hintId` — applied to hazard-new, action-item-new, and new-inspection
+  Field helpers (the three sites that share the pattern).
 
 ### Action items (1.6) — Minutes board / list (`apps/web/src/views/action-items-view.tsx`)
 
