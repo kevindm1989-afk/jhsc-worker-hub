@@ -24,13 +24,25 @@
 // never leaves the device.
 
 import { expect, test, type Page, type Route } from '@playwright/test';
+import sodium from 'libsodium-wrappers';
 
 const FAKE_UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
-// Minimal X25519 public key (32 bytes of zeros) — libsodium will
-// happily seal against it; the server-side decrypt path would never
-// run in this spec. Real workplace keys are seeded by first-run.
-const FAKE_WORKPLACE_PUBLIC_KEY_B64 = 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=';
+// Deterministic VALID X25519 public key for the fake workplace.
+// `crypto_box_seal` calls `crypto_scalarmult` internally and
+// REJECTS low-order points (the all-zeros 32-byte key is one); a
+// zero key surfaced as a `WorkplaceKeyMissingError` swallow at the
+// submit handler and no POST ever reached the route stub. We derive
+// a real keypair at spec startup so the seal path can succeed —
+// the corresponding private key is discarded (the server-side
+// decrypt path is never exercised in this spec).
+let FAKE_WORKPLACE_PUBLIC_KEY_B64 = '';
+
+test.beforeAll(async () => {
+  await sodium.ready;
+  const kp = sodium.crypto_box_keypair();
+  FAKE_WORKPLACE_PUBLIC_KEY_B64 = sodium.to_base64(kp.publicKey, sodium.base64_variants.ORIGINAL);
+});
 
 interface Stubs {
   meetingDetail: ReturnType<typeof makeMeetingDetail>;
