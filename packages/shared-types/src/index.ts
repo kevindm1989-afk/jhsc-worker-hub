@@ -21,6 +21,10 @@ import type {
   MeetingSnapshotKind,
 } from './meeting';
 
+// Re-export action-item closure enums + Zod schemas (2.2, ADR-0013).
+export * from './action-item-closure';
+import type { ActionItemReopenReason } from './action-item-closure';
+
 // ---------------------------------------------------------------------------
 // Result<T, E> — fallible operations
 // ---------------------------------------------------------------------------
@@ -168,6 +172,26 @@ export type AuditEventKind =
   // have a corresponding `audit.meeting_template.seeded` upstream in
   // the chain for the same jurisdiction.
   | 'audit.meeting_template.seeded'
+  // In-meeting action item management (Milestone 2.2, ADR-0013 §3.3).
+  // PI-clean per T-AC9 — IDs + counts + hashes + enum values only.
+  //   - action_item.closure_verified: the JHSC counter-sign closure
+  //     attestation anchor (parallel to meeting.signed).
+  //   - action_item.reopened: a Closed item flipped back to a non-
+  //     Closed status; payload carries an enum reopen reason
+  //     (rep_decision | jhsc_review | mgmt_appeal) — never narrative.
+  //   - action_item.status_changed: routine status PATCH anchor;
+  //     emitted whenever status changes (independent of meeting
+  //     context). The cross-anchor for meeting context is the
+  //     `meeting.action_item_status_changed` kind below.
+  //   - meeting.action_item_status_changed: TM-fold-3-pattern cross-
+  //     chain anchor; emitted when a status change happens INSIDE an
+  //     in_progress meeting. Carries the action_item.status_changed
+  //     event hash so the verifier can compose the two chains
+  //     (mirrors meeting.recommendation_drafted from M2.1).
+  | 'action_item.closure_verified'
+  | 'action_item.reopened'
+  | 'action_item.status_changed'
+  | 'meeting.action_item_status_changed'
   | AuthEventKind;
 
 // ---------------------------------------------------------------------------
@@ -874,10 +898,17 @@ export type AuditPayload =
       readonly attestationSigHash: string;
     }
   | {
+      // M2.2 TM-fold-5 (T-IM33) extension: closureVerificationCount is
+      // an additive optional field. Existing finalized events have
+      // closureVerificationCount: undefined (treated as 0 by the
+      // verifier extension); new events emitted post-2.2 carry the
+      // count of closure-verified items for the meeting so the
+      // audit-verify --check-meetings gate can cross-reference.
       readonly kind: 'meeting.finalized';
       readonly meetingId: string;
       readonly finalizedAt: string;
       readonly signatureIds: ReadonlyArray<string>;
+      readonly closureVerificationCount?: number;
     }
   | {
       // Assignee name is NEVER in the payload. nameHash is the sha256
@@ -903,6 +934,72 @@ export type AuditPayload =
       readonly recommendationId: string;
       readonly sectionId: string;
       readonly recommendationCreatedEventHash: string;
+    }
+  // ---------------------------------------------------------------------
+  // In-meeting action item management (Milestone 2.2, ADR-0013 §3.3)
+  //
+  // Closure verification + reopen + status-change anchors. PI-clean per
+  // T-AC9 — IDs + enums + hashes + counts only. Free-text rationales
+  // (closure reasons, reopen reasons in the future) NEVER enter the
+  // payload — only their hashes or enum codes.
+  //
+  // The cross-anchor pattern (meeting.action_item_status_changed)
+  // mirrors meeting.recommendation_drafted from M2.1 TM-fold-3 —
+  // emitted alongside the per-item action_item.status_changed event
+  // when the change happens inside an in_progress meeting.
+  // ---------------------------------------------------------------------
+  | {
+      // The JHSC counter-sign closure attestation anchor. evidenceHash
+      // is null when no evidence blob is attached. attestationSigHash
+      // is the sha256 of the TM-fold-5 Ed25519 detached signature
+      // bytes (mirrors meeting.signed).
+      readonly kind: 'action_item.closure_verified';
+      readonly actionItemId: string;
+      readonly closureId: string;
+      readonly meetingId: string | null;
+      readonly closerActorId: string;
+      readonly counterSignerActorId: string;
+      readonly selfAttestation: boolean;
+      readonly signingKeyId: string;
+      readonly evidenceHash: string | null;
+      readonly attestationSigHash: string;
+    }
+  | {
+      // Closed → non-Closed transition. Carries the prior closure row
+      // id (the chain links forward to the closure attestation that
+      // is being superseded operationally) + an ENUM reopen reason
+      // (no narrative; never PI).
+      readonly kind: 'action_item.reopened';
+      readonly actionItemId: string;
+      readonly previousClosureId: string;
+      readonly reopenedAt: string;
+      readonly reopenedByActorId: string;
+      readonly reason: ActionItemReopenReason;
+    }
+  | {
+      // Per-item status-change anchor. Fires for any status change
+      // including in-meeting and out-of-meeting paths. meetingId is
+      // null when the change happens outside a meeting context.
+      readonly kind: 'action_item.status_changed';
+      readonly actionItemId: string;
+      readonly fromStatus: ActionItemStatus;
+      readonly toStatus: ActionItemStatus;
+      readonly changedAt: string;
+      readonly changedByActorId: string;
+      readonly meetingId: string | null;
+    }
+  | {
+      // Cross-chain anchor — fired when the underlying status change
+      // happens INSIDE an in_progress meeting. Carries the per-item
+      // event's hash so the verifier can compose the two chains
+      // (mirrors meeting.recommendation_drafted from M2.1 TM-fold-3).
+      readonly kind: 'meeting.action_item_status_changed';
+      readonly meetingId: string;
+      readonly actionItemId: string;
+      readonly fromStatus: ActionItemStatus;
+      readonly toStatus: ActionItemStatus;
+      readonly changedAt: string;
+      readonly statusChangedEventHash: string;
     }
   | {
       // S4 administrative anchor — emitted by the seed-meeting-template

@@ -461,6 +461,15 @@ export const actionItems = pgTable(
     // this item was FIRST raised in. NULL for items imported from Excel
     // or raised outside a meeting. Set at create time; never changes.
     firstRaisedMeetingId: uuid('first_raised_meeting_id'),
+    // 2.2 (ADR-0013 TM-fold-1 / T-IM3 / T-IM4 / T-IM32): FK to the
+    // closure-verification row. NULLABLE; the DB CHECK in migration
+    // 0012 enforces (status = 'Closed') = (closure_verification_id IS
+    // NOT NULL). Closing without counter-sign is structurally
+    // impossible — defense in depth against route bypass.
+    // FK target (actionItemClosures) is declared further down; we use
+    // a plain uuid column here to avoid the circular type per the same
+    // pattern as meetings.currentSectionId.
+    closureVerificationId: uuid('closure_verification_id'),
     sourceType: text('source_type'),
     sourceId: uuid('source_id'),
     sourceExcelHash: bytea('source_excel_hash'),
@@ -488,6 +497,13 @@ export const actionItems = pgTable(
     firstRaisedMeetingIdx: index('action_items_first_raised_meeting_idx').on(
       t.firstRaisedMeetingId,
     ),
+    // 2.2 (ADR-0013 TM-fold-1): the bi-directional invariant
+    // `(status = 'Closed') = (closure_verification_id IS NOT NULL)`
+    // is enforced by the DB CHECK constraint in migration 0012
+    // (action_items_closed_requires_verification_check). Drizzle's
+    // check() helper doesn't capture the bi-directional shape
+    // cleanly, so the CHECK lives in raw SQL and the schema-shape
+    // intent is documented here for reviewers.
   }),
 );
 
@@ -1517,6 +1533,101 @@ export const meetingActionItemState = pgTable(
       t.meetingId,
       t.snapshotKind,
     ),
+    // 2.2 (ADR-0013 TM-fold-2 / T-IM7 / T-IM11): partial UNIQUE that
+    // dedupes idempotent retries landing the same (status, section)
+    // for a given (meeting, action_item) live snapshot. Created by
+    // migration 0012 (meeting_action_item_state_live_dedupe_unique).
+    // Only semantically-distinct state combinations accumulate new
+    // live rows; the M2.1 finalized partial UNIQUE stays as-is.
+    liveDedupeUnique: uniqueIndex('meeting_action_item_state_live_dedupe_unique')
+      .on(t.meetingId, t.actionItemId, t.snapshotStatus, t.snapshotSection)
+      .where(sql`${t.snapshotKind} = 'live'`),
+  }),
+);
+
+// ---------------------------------------------------------------------------
+// action_item_closures (2.2, ADR-0013 §3.1 + TM-folds 1 + 5)
+// ---------------------------------------------------------------------------
+//
+// JHSC counter-sign closure attestation row. Parallel in shape to
+// meeting_signatures (M2.1) but scoped to a single action item's
+// closure. Append-only — re-opening writes a NEW row on the next
+// closure (the prior row stays in place as historical evidence).
+//
+// TM-fold-5: signing_key_id + attestation_signed_ct (64-byte Ed25519
+// sig over canonical row JSON) defend the row at the workplace-key
+// layer in addition to chain anchoring. The CHECK constraints
+// (evidence_triple + actors_shape + attestation_sig_length) all live
+// in migration 0012; the Drizzle column definitions below carry the
+// same shape so generate-vs-migrate diffs stay clean.
+
+export const actionItemClosures = pgTable(
+  'action_item_closures',
+  {
+    id: uuid('id')
+      .primaryKey()
+      .default(sql`gen_random_uuid()`),
+    actionItemId: uuid('action_item_id')
+      .notNull()
+      .references(() => actionItems.id, { onDelete: 'cascade', onUpdate: 'restrict' }),
+    closedByActorId: uuid('closed_by_actor_id')
+      .notNull()
+      .references(() => users.id, { onDelete: 'restrict', onUpdate: 'restrict' }),
+    closedAt: timestamp('closed_at', { withTimezone: true })
+      .notNull()
+      .default(sql`now()`),
+    counterSignedByActorId: uuid('counter_signed_by_actor_id')
+      .notNull()
+      .references(() => users.id, { onDelete: 'restrict', onUpdate: 'restrict' }),
+    counterSignedAt: timestamp('counter_signed_at', { withTimezone: true })
+      .notNull()
+      .default(sql`now()`),
+    // Envelope-encrypted closure rationale. Plaintext is NEVER in
+    // the chain payload (T-AC9); the payload carries only the
+    // SHA-256 hash of the ciphertext bytes.
+    closureReasonEnvelopeCt: bytea('closure_reason_envelope_ct').notNull(),
+    closureReasonEnvelopeDekCt: bytea('closure_reason_envelope_dek_ct').notNull(),
+    // Optional Tigris evidence. pair-NULL CHECK in migration 0012.
+    evidenceStorageKey: text('evidence_storage_key'),
+    evidenceEnvelopeCt: bytea('evidence_envelope_ct'),
+    evidenceEnvelopeDekCt: bytea('evidence_envelope_dek_ct'),
+    // Single-rep edge case per ADR §3.5. When TRUE, the closer +
+    // counter-signer ARE the same user; the chain payload's
+    // selfAttestation flag records the distinction. CHECK in 0012
+    // enforces the closer-vs-counter-signer relationship flips with
+    // this flag.
+    selfAttestation: boolean('self_attestation').notNull().default(false),
+    // Meeting in which the closure was verified. NULLABLE per ADR §3.5
+    // — closure can happen outside a meeting context.
+    meetingId: uuid('meeting_id').references(() => meetings.id, {
+      onDelete: 'set null',
+      onUpdate: 'restrict',
+    }),
+    // TM-fold-5 (T-IM33): workplace signing key the attestation was
+    // produced under. FK so key rotations are queryable.
+    signingKeyId: uuid('signing_key_id')
+      .notNull()
+      .references(() => workplaceSigningKeys.id, {
+        onDelete: 'restrict',
+        onUpdate: 'restrict',
+      }),
+    // TM-fold-5 (T-IM33): 64-byte Ed25519 detached signature over
+    // SHA-256 of the canonical row JSON. Length CHECK in 0012.
+    attestationSignedCt: bytea('attestation_signed_ct').notNull(),
+    version: integer('version').notNull().default(1),
+    createdAt: timestamp('created_at', { withTimezone: true })
+      .notNull()
+      .default(sql`now()`),
+  },
+  (t) => ({
+    actionItemUnique: uniqueIndex('action_item_closures_action_item_unique').on(t.actionItemId),
+    meetingIdx: index('action_item_closures_meeting_idx')
+      .on(t.meetingId)
+      .where(sql`${t.meetingId} IS NOT NULL`),
+    closedByActorIdx: index('action_item_closures_closed_by_actor_idx').on(t.closedByActorId),
+    counterSignedByActorIdx: index('action_item_closures_counter_signed_by_actor_idx').on(
+      t.counterSignedByActorId,
+    ),
   }),
 );
 
@@ -1566,6 +1677,7 @@ export const schema = {
   meetingInspectionReview,
   meetingSignatures,
   meetingActionItemState,
+  actionItemClosures,
   loginAttemptOutcome,
   authEventKind,
   webauthnPurpose,
