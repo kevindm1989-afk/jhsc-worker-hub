@@ -131,14 +131,13 @@ test.describe('@mobile form reachability', () => {
       const minFont = Math.min(...fontSizes);
       // The iOS Safari auto-zoom threshold is exactly 16px. Tailwind
       // `text-sm` is 14px (problem); `text-base` is 16px (OK).
-      // TODO(1.12-S3 gap): inputs using Tailwind `text-sm` (14px) on
-      // mobile trigger iOS Safari auto-zoom. Documented in
-      // docs/release-1-mobile-test-gaps.md as a SHOULD-FIX —
-      // mechanical fix is `text-base md:text-sm` on every input.
-      // Until the production fix lands, this assertion records the
-      // current state rather than failing the build; we soft-assert
-      // via `expect.soft`.
-      expect.soft(minFont).toBeGreaterThanOrEqual(16);
+      //
+      // Per S5 F-P3: the four create forms + legal-view search +
+      // new-recommendation body now use `text-base md:text-sm` on
+      // every input/textarea. The previous soft-assert turned into a
+      // hard assert so a regression fails CI rather than silently
+      // re-introducing the iOS auto-zoom break.
+      expect(minFont).toBeGreaterThanOrEqual(16);
     });
   }
 });

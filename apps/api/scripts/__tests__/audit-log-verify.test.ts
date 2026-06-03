@@ -427,6 +427,10 @@ describe('verifyChainFull — idx gap (deleted row)', () => {
     expect(report.counts.gaps).toBeGreaterThanOrEqual(1);
     const d = report.divergences.find((x) => x.kind === 'idx_gap');
     expect(d).toBeDefined();
+    if (d && d.kind === 'idx_gap') {
+      // Mid-walk gaps are real deletions, not window boundaries.
+      expect(d.windowBoundary).toBe(false);
+    }
   });
 
   it('does NOT flag a leading gap when --since narrows the window', () => {
@@ -443,6 +447,46 @@ describe('verifyChainFull — idx gap (deleted row)', () => {
     });
     expect(report.ok).toBe(true);
     expect(report.counts.gaps).toBe(0);
+    // No idx_gap divergence at all — the windowed leading edge is
+    // silent (not even an informational `windowBoundary: true` row).
+    expect(report.divergences.find((x) => x.kind === 'idx_gap')).toBeUndefined();
+  });
+
+  it('flags an unbounded walk whose chain does not start at genesis (per S5 F-S2)', () => {
+    const rows = cleanChain();
+    // The chain has rows 0..2; drop row 0. With NO window specified
+    // (operator did a full walk, not --since=...), the missing
+    // genesis row IS a real divergence — someone deleted it.
+    const leadingGap: AuditRow[] = [rows[1] as AuditRow, rows[2] as AuditRow];
+    const report = verifyChainFull({
+      rows: leadingGap,
+      window: { sinceIso: null, fromIdx: null, toIdx: null },
+    });
+    expect(report.ok).toBe(false);
+    const d = report.divergences.find((x) => x.kind === 'idx_gap');
+    expect(d).toBeDefined();
+    if (d && d.kind === 'idx_gap') {
+      expect(d.previousIdx).toBeNull();
+      // The disambiguator: this is NOT a window boundary, it is a
+      // real leading-edge gap (the genesis row is missing).
+      expect(d.windowBoundary).toBe(false);
+    }
+  });
+
+  it('JSON report exposes the windowBoundary field per F-S2', () => {
+    const rows = cleanChain();
+    const leadingGap: AuditRow[] = [rows[1] as AuditRow, rows[2] as AuditRow];
+    const report = verifyChainFull({
+      rows: leadingGap,
+      window: { sinceIso: null, fromIdx: null, toIdx: null },
+    });
+    const json = renderJsonReport(report);
+    const parsed = JSON.parse(json) as {
+      divergences: ReadonlyArray<{ kind: string; windowBoundary?: boolean }>;
+    };
+    const gap = parsed.divergences.find((x) => x.kind === 'idx_gap');
+    expect(gap).toBeDefined();
+    expect(gap?.windowBoundary).toBe(false);
   });
 });
 

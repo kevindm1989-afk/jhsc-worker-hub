@@ -78,21 +78,64 @@ test.describe('@mobile capture-to-record signature flow', () => {
   });
 
   test('no image bytes are uploaded before the rep hits Save', async ({ page }) => {
-    // Track every outbound network request so we can prove the no-
-    // early-upload invariant. The capture-view's draft state lives
-    // in Dexie + state hooks; the upload fires when the rep submits.
-    const outboundFileRequests: string[] = [];
+    // Per S5 F-S4 + F-P6: the previous tracker was a URL-prefix
+    // allowlist (`/api/evidence` OR `/api/uploads`). That inverts the
+    // security posture — a regression that introduced a new staging
+    // endpoint (`/api/capture-staging`, presigned Tigris PUT, etc.)
+    // would slip past silently. The structurally correct posture is
+    // DENY-BY-DEFAULT: track ALL POST/PUT requests during the capture
+    // flow; fail if ANY of them carries an image-shaped body before
+    // the rep hits Save. The narrow exceptions (session/auth/status
+    // pings) are content-type-allowlisted, not URL-allowlisted.
+
+    interface OutboundProbe {
+      readonly method: string;
+      readonly url: string;
+      readonly contentType: string | null;
+      readonly bodySize: number;
+    }
+    const outboundUploads: OutboundProbe[] = [];
+
+    // Content-types that are NOT image uploads and are acceptable
+    // pre-Save (session pings, auth status, telemetry-free state
+    // sync). We explicitly enumerate these instead of an open
+    // allowlist of URL prefixes.
+    const ALLOWED_BODY_TYPES = [
+      'application/json',
+      'text/plain',
+      'application/x-www-form-urlencoded',
+      '', // GET-like POSTs with no body sometimes have no content-type.
+    ];
+    // Image / binary content-types that, if a body of one of these
+    // types fires before Save, prove the no-early-upload invariant
+    // was violated.
+    const FORBIDDEN_BODY_TYPES = ['image/', 'multipart/form-data', 'application/octet-stream'];
+
     page.on('request', (req) => {
       const method = req.method();
-      const url = req.url();
-      // Image uploads in 1.7 hit /api/evidence with method=POST and
-      // a multipart or application/octet-stream body. We capture any
-      // POST against the evidence endpoint as evidence of an upload.
-      if (
-        (method === 'POST' || method === 'PUT') &&
-        (url.includes('/api/evidence') || url.includes('/api/uploads'))
-      ) {
-        outboundFileRequests.push(`${method} ${url}`);
+      if (method !== 'POST' && method !== 'PUT') return;
+      const headers = req.headers();
+      const contentType = (headers['content-type'] ?? '').toLowerCase();
+      const body = req.postData();
+      const bodySize = body ? Buffer.byteLength(body) : 0;
+
+      const looksLikeImage = FORBIDDEN_BODY_TYPES.some((t) => contentType.includes(t));
+      const isExplicitlyAllowed = ALLOWED_BODY_TYPES.some(
+        (t) => contentType === t || (t.length > 0 && contentType.startsWith(t)),
+      );
+
+      // Deny by default: anything that is NOT a known-allowed JSON
+      // ping AND is larger than the auth-session beacon threshold
+      // gets flagged. The TINY_PNG_BYTES fixture is 67 bytes; the
+      // threshold of 512 bytes is comfortably above session-beacon
+      // payloads (typically <200 bytes) and below any real photo.
+      if (looksLikeImage || (!isExplicitlyAllowed && bodySize > 512)) {
+        outboundUploads.push({
+          method,
+          url: req.url(),
+          contentType: contentType || null,
+          bodySize,
+        });
       }
     });
 
@@ -102,16 +145,17 @@ test.describe('@mobile capture-to-record signature flow', () => {
     // Find a file input in the capture form. role=button + name=
     // "Choose file" is the fallback; the canonical surface is the
     // input[type=file] that capture-view renders. If no file input
-    // is reachable (gap in the test fixture), we document it and
-    // bail without falsely passing.
+    // is reachable (gap in the test fixture), the spec previously
+    // early-returned to a vacuous pass (per S5 F-S4 critique). Per
+    // F-S4 we now FIXME-skip rather than false-pass.
     const fileInput = page.locator('input[type="file"]');
     const fileInputCount = await fileInput.count();
     if (fileInputCount === 0) {
-      // TODO(1.12-S3 gap): /capture lacks a stable file-input
-      // selector for the no-camera fallback path. Documented in
-      // docs/release-1-mobile-test-gaps.md. The spec asserts the
-      // headline invariant (no early upload) via the request tracker.
-      expect(outboundFileRequests).toHaveLength(0);
+      // The headline invariant ("no image bytes upload before Save")
+      // requires actually setting an image into the form to prove it.
+      // Without a file input we cannot prove the negative; flag rather
+      // than false-pass. Documented in docs/release-1-mobile-test-gaps.md.
+      test.fixme(true, 'capture-view does not expose a stable file input selector');
       return;
     }
 
@@ -121,10 +165,13 @@ test.describe('@mobile capture-to-record signature flow', () => {
       buffer: TINY_PNG_BYTES,
     });
 
-    // CLAUDE.md "Camera roll never touched" — after the file is
-    // chosen, no upload should have fired yet. The rep must
+    // CLAUDE.md "Camera roll never touched" + Excel-import-style
+    // client-side-only handling. After the file is chosen, NO image-
+    // shaped body of ANY kind should have fired anywhere — not to
+    // /api/evidence, not to /api/uploads, not to a presigned Tigris
+    // URL, not to a future /api/capture-staging. The rep must
     // explicitly hit a Save / Submit affordance.
-    expect(outboundFileRequests).toHaveLength(0);
+    expect(outboundUploads).toEqual([]);
   });
 
   test('hazard draft is materialized into the local list (Dexie path)', async ({ page }) => {

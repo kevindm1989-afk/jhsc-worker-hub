@@ -108,6 +108,44 @@ test.describe('@mobile bottom tab bar', () => {
     await expect(page.getByRole('heading', { name: 'Minutes', level: 1 })).toBeVisible();
   });
 
+  test('shadcn Button size="sm" meets 44pt on mobile (S5 F-P2 regression guard)', async ({
+    page,
+  }) => {
+    // Per S5 F-P2: the shadcn Button primitive's size="sm" defaulted
+    // to h-8 (32px), below the 44pt mobile baseline (CLAUDE.md
+    // mobile-primary + WCAG 2.5.5). The fix bumps the primitive's
+    // responsive floor to h-11 on mobile + collapses to h-8 at md:+.
+    // This test guards against a regression that would re-introduce
+    // the desktop-compact size as the mobile default.
+    //
+    // Strategy: navigate to /minutes (which renders size="sm" primaries
+    // on the empty state — "Start new meeting", "Import Excel"), then
+    // measure their boundingBox heights. The mobile viewport (< 768px)
+    // gets the h-11 floor; we assert >= 44px.
+    await page.goto('/minutes');
+    await expect(page.getByRole('heading', { name: 'Minutes', level: 1 })).toBeVisible();
+
+    // The two empty-state primaries on minutes-view (apps/web/src/
+    // views/minutes-view.tsx) are the canonical size="sm" surface.
+    const startNew = page.getByRole('button', { name: /start new meeting/i });
+    await expect(startNew).toBeVisible();
+    const box = await startNew.boundingBox();
+    expect(box).not.toBeNull();
+    if (box === null) return;
+    // 44pt @ 1x DPR = 44 CSS pixels. The Button primitive now ships
+    // `h-11 md:h-8` for size="sm" — at the iPhone 15 Pro / Pixel 9
+    // viewport width (< 768px), the mobile branch applies.
+    expect(box.height).toBeGreaterThanOrEqual(44);
+
+    // Same assertion on the secondary "Import Excel" button proves the
+    // fix is at the primitive level, not at the call-site level.
+    const importExcel = page.getByRole('button', { name: /import excel/i });
+    const importBox = await importExcel.boundingBox();
+    expect(importBox).not.toBeNull();
+    if (importBox === null) return;
+    expect(importBox.height).toBeGreaterThanOrEqual(44);
+  });
+
   test('Capture FAB is reachable from a hazard detail surface', async ({ page }) => {
     // The Capture FAB is entity-scoped — it lives on hazard /
     // action-item / inspection detail views, not on the tab bar.

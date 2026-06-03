@@ -89,6 +89,25 @@ const SUITE_TIMEOUT_MS = Math.max(60_000, CASES * 100);
 let objectProtoSnapshot: ReadonlyArray<string> = [];
 let arrayProtoSnapshot: ReadonlyArray<string> = [];
 let stringProtoSnapshot: ReadonlyArray<string> = [];
+let functionProtoSnapshot: ReadonlyArray<string> = [];
+let mapProtoSnapshot: ReadonlyArray<string> = [];
+let setProtoSnapshot: ReadonlyArray<string> = [];
+
+// Known-dangerous Object.prototype keys we spot-check on every per-case
+// prototype-pollution run. Catches replace-and-restore attacks that
+// preserve the property-name set but mutate the bound function (e.g.,
+// reassigning `Object.prototype.toString` to leak data). Per S5 F-S5.
+const DANGEROUS_OBJECT_KEYS = [
+  'toString',
+  'valueOf',
+  'hasOwnProperty',
+  'constructor',
+  'isPrototypeOf',
+  'propertyIsEnumerable',
+  'toLocaleString',
+] as const;
+type DangerKey = (typeof DANGEROUS_OBJECT_KEYS)[number];
+const dangerousValueSnapshot = new Map<DangerKey, unknown>();
 
 function snapshotPrototype(p: object): string[] {
   return Object.getOwnPropertyNames(p).slice().sort();
@@ -98,6 +117,12 @@ beforeAll(() => {
   objectProtoSnapshot = snapshotPrototype(Object.prototype);
   arrayProtoSnapshot = snapshotPrototype(Array.prototype);
   stringProtoSnapshot = snapshotPrototype(String.prototype);
+  functionProtoSnapshot = snapshotPrototype(Function.prototype);
+  mapProtoSnapshot = snapshotPrototype(Map.prototype);
+  setProtoSnapshot = snapshotPrototype(Set.prototype);
+  for (const k of DANGEROUS_OBJECT_KEYS) {
+    dangerousValueSnapshot.set(k, (Object.prototype as Record<string, unknown>)[k]);
+  }
   mkdirSync(FAILURE_DIR, { recursive: true });
 });
 
@@ -106,6 +131,9 @@ afterAll(() => {
   expect(snapshotPrototype(Object.prototype)).toEqual(objectProtoSnapshot);
   expect(snapshotPrototype(Array.prototype)).toEqual(arrayProtoSnapshot);
   expect(snapshotPrototype(String.prototype)).toEqual(stringProtoSnapshot);
+  expect(snapshotPrototype(Function.prototype)).toEqual(functionProtoSnapshot);
+  expect(snapshotPrototype(Map.prototype)).toEqual(mapProtoSnapshot);
+  expect(snapshotPrototype(Set.prototype)).toEqual(setProtoSnapshot);
 });
 
 // ---------------------------------------------------------------------------
@@ -289,15 +317,68 @@ describe(`excel-import parser fuzz (seed=0x${SEED.toString(16)}, cases=${CASES})
         }
 
         // (7) Object.prototype not mutated.
-        //   Snapshot check happens per-case for prototype-pollution
-        //   scenario; the all-suite check runs in afterAll().
+        //   Per S5 F-S5: per-case check is now CONTENT-equal across the
+        //   six built-in prototypes (catches equal-cardinality
+        //   delete-then-add attacks) PLUS a value-equality check on a
+        //   known-dangerous Object.prototype key set (catches
+        //   replace-and-restore attacks that preserve the property-name
+        //   set but mutate the bound function). The suite-level
+        //   `afterAll` cross-check is the second backstop.
         if (c.scenario === 'prototype_pollution') {
-          const live = snapshotPrototype(Object.prototype);
-          if (live.length !== objectProtoSnapshot.length) {
-            dumpFailure(c, 'prototype_mutation');
-            throw new Error(
-              `FUZZ FAIL [${c.id}] Object.prototype mutated: before=${objectProtoSnapshot.length} keys, after=${live.length}`,
-            );
+          const liveObject = snapshotPrototype(Object.prototype);
+          const liveArray = snapshotPrototype(Array.prototype);
+          const liveString = snapshotPrototype(String.prototype);
+          const liveFunction = snapshotPrototype(Function.prototype);
+          const liveMap = snapshotPrototype(Map.prototype);
+          const liveSet = snapshotPrototype(Set.prototype);
+
+          const ensureNamesEqual = (
+            live: ReadonlyArray<string>,
+            snapshot: ReadonlyArray<string>,
+            label: string,
+          ): void => {
+            // Length is a fast-fail; the content check that follows
+            // catches equal-cardinality mutations.
+            if (live.length !== snapshot.length) {
+              dumpFailure(c, 'prototype_mutation', `${label}: length drift`);
+              throw new Error(
+                `FUZZ FAIL [${c.id}] ${label} mutated: before=${snapshot.length} keys, after=${live.length}`,
+              );
+            }
+            const liveJoined = live.join(',');
+            const snapJoined = snapshot.join(',');
+            if (liveJoined !== snapJoined) {
+              dumpFailure(
+                c,
+                'prototype_mutation',
+                `${label}: key-set drift before=[${snapJoined}] after=[${liveJoined}]`,
+              );
+              throw new Error(
+                `FUZZ FAIL [${c.id}] ${label} key-set mutated: delete-then-add of equal cardinality detected`,
+              );
+            }
+          };
+
+          ensureNamesEqual(liveObject, objectProtoSnapshot, 'Object.prototype');
+          ensureNamesEqual(liveArray, arrayProtoSnapshot, 'Array.prototype');
+          ensureNamesEqual(liveString, stringProtoSnapshot, 'String.prototype');
+          ensureNamesEqual(liveFunction, functionProtoSnapshot, 'Function.prototype');
+          ensureNamesEqual(liveMap, mapProtoSnapshot, 'Map.prototype');
+          ensureNamesEqual(liveSet, setProtoSnapshot, 'Set.prototype');
+
+          // Value-equality spot-check on the known-dangerous
+          // Object.prototype keys. A `toString`/`valueOf` reassignment
+          // would not change the property-name set but would still be
+          // a successful prototype-pollution attack.
+          for (const k of DANGEROUS_OBJECT_KEYS) {
+            const liveValue = (Object.prototype as Record<string, unknown>)[k];
+            const expected = dangerousValueSnapshot.get(k);
+            if (liveValue !== expected) {
+              dumpFailure(c, 'prototype_mutation', `${k}: value reassigned`);
+              throw new Error(
+                `FUZZ FAIL [${c.id}] Object.prototype.${k} value reassigned: replace-and-restore attack`,
+              );
+            }
           }
         }
       }

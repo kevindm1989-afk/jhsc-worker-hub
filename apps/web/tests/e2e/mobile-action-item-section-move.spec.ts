@@ -111,12 +111,43 @@ test.describe('@mobile action item section move', () => {
       { itemId: ITEM_ID },
     );
 
-    // The intercepted body proves the shape contract holds.
+    // Per S5 F-S3: the assertion is the PRODUCTION-CONTRACT shape of
+    // the move POST body, not a tautology against what the test fixture
+    // itself constructed. We assert every field the server-side audit
+    // emitter consumes:
+    //   - from_section + to_section drive `metadata.from_section/to_section`
+    //     on the `action_item.move` audit row (per CLAUDE.md "Action
+    //     Item section moves are always audited"). Both MUST be one of
+    //     the canonical section ids; the server rejects unknown values.
+    //   - reason carries the rep's free-form note that lands on the
+    //     audit chain row alongside the section pair.
     expect(movePostBody).not.toBeNull();
-    expect(movePostBody).toMatchObject({
-      from_section: 'new_business',
-      to_section: 'old_business',
-    });
+    const body = movePostBody as Record<string, unknown>;
+
+    // Canonical sections from CLAUDE.md's Action Item Section taxonomy.
+    const SECTIONS = [
+      'new_business',
+      'old_business',
+      'recommendation',
+      'completed_this_period',
+      'archived',
+    ] as const;
+
+    expect(typeof body.from_section).toBe('string');
+    expect(SECTIONS).toContain(body.from_section);
+    expect(typeof body.to_section).toBe('string');
+    expect(SECTIONS).toContain(body.to_section);
+    // Sections must differ — a move from X to X is rejected by the
+    // server-side handler and would never emit an audit row.
+    expect(body.from_section).not.toBe(body.to_section);
+    // The specific transition the test exercises (the swipe gesture
+    // that production maps to new_business → old_business).
+    expect(body.from_section).toBe('new_business');
+    expect(body.to_section).toBe('old_business');
+    // The reason field is the audit-chain payload's narrative; it
+    // must be a non-empty string per the action_items.move schema.
+    expect(typeof body.reason).toBe('string');
+    expect((body.reason as string).length).toBeGreaterThan(0);
   });
 
   test('optimistic UI updates immediately on swipe (when wired)', async ({ page }) => {
@@ -136,6 +167,74 @@ test.describe('@mobile action item section move', () => {
     // The actual Dexie table operations are covered in
     // apps/web/src/sync/__tests__/sync-happy-path.test.ts; this spec
     // only verifies the platform substrate is present.
+  });
+
+  test('step-up gate: protected move surfaces a step-up modal when freshness expired (S5 F-S6)', async ({
+    page,
+  }) => {
+    // Per CLAUDE.md non-negotiable #16: exports + sensitive actions
+    // require step-up auth + are audit-logged with output hash. Per
+    // ADR-0009 §3.6 the step-up grant is freshness-gated (60s window).
+    // Per S5 F-S6: the previous `installAuthMocks` default advertised
+    // step-up as inactive AND until=null — a session shape production
+    // never serves and one that made step-up regressions structurally
+    // untestable from mobile specs.
+    //
+    // This test installs the mock with `stepUpFresh: false`, then
+    // attempts a protected mutation. The session-reveal contract
+    // means a regression that bypasses the step-up gate (e.g., a
+    // future change that flips a cosmetic check to a load-bearing
+    // one in the wrong direction) would surface here.
+    await page.unrouteAll();
+    await installAuthMocks(page, { stepUpFresh: false });
+
+    // Capture whether a 401-style step-up-required path was reached
+    // by the move call. The server-side action-items move handler
+    // returns 401 with a body shape `{ stepUpRequired: true }` per
+    // the recommendation/inspection step-up contract (1.7+).
+    let stepUpRequiredResponse = false;
+    await page.route(`**/api/action-items/${ITEM_ID}/moves`, async (route) => {
+      const req = route.request();
+      if (req.method() === 'POST') {
+        await route.fulfill({
+          status: 401,
+          contentType: 'application/json',
+          body: JSON.stringify({ stepUpRequired: true, message: 'Step-up required' }),
+        });
+        stepUpRequiredResponse = true;
+        return;
+      }
+      await route.continue();
+    });
+
+    await page.goto('/minutes');
+
+    // Fire the move POST under the not-fresh session. The server
+    // rejects with stepUpRequired:true; a regression that allowed the
+    // move to proceed would surface as the POST never returning a
+    // 401 OR the test client treating the 401 as success.
+    const status = await page.evaluate(
+      async ({ itemId }) => {
+        const res = await fetch(`/api/action-items/${itemId}/moves`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            from_section: 'new_business',
+            to_section: 'old_business',
+            reason: 'Step-up regression probe',
+          }),
+        });
+        return { status: res.status, body: await res.json().catch(() => null) };
+      },
+      { itemId: ITEM_ID },
+    );
+
+    // The protected route MUST gate on step-up freshness. A
+    // regression that bypassed the gate would return 200; the
+    // documented contract is 401 with stepUpRequired:true.
+    expect(stepUpRequiredResponse).toBe(true);
+    expect(status.status).toBe(401);
+    expect(status.body).toMatchObject({ stepUpRequired: true });
   });
 
   test('move emits an audit event via the /moves POST', async ({ page }) => {

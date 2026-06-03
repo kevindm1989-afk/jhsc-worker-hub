@@ -703,8 +703,10 @@ function Field({
 }
 
 function fieldInputClass(invalid: boolean): string {
+  // Per S5 F-P3: text-base (16px) on mobile prevents iOS Safari auto-
+  // zoom on focus; text-sm (14px) at md+ preserves desktop density.
   return cn(
-    'w-full rounded-md border bg-background px-3 py-2 text-sm text-foreground focus:outline-none focus:ring-2 focus:ring-ring',
+    'w-full rounded-md border bg-background px-3 py-2 text-base text-foreground focus:outline-none focus:ring-2 focus:ring-ring md:text-sm',
     invalid ? 'border-status-rejected' : 'border-input',
   );
 }

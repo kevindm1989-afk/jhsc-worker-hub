@@ -68,7 +68,20 @@ export type FullVerifyDivergence =
       readonly storedHashHex: string;
       readonly recomputedHashHex: string;
     }
-  | { readonly kind: 'idx_gap'; readonly idx: number; readonly previousIdx: number | null }
+  | {
+      readonly kind: 'idx_gap';
+      readonly idx: number;
+      readonly previousIdx: number | null;
+      /** True if this gap is the leading edge of a windowed walk (the
+       *  operator passed `--since` and the chain happens to start at
+       *  idx > 0 inside the window). False if this gap is a real gap
+       *  inside a walk (a row was deleted or never written). Per S5
+       *  F-S2 — the runbook needs to disambiguate "I deliberately
+       *  windowed past the genesis" from "someone deleted the parent
+       *  row I expected to see here". `previousIdx: null` alone is
+       *  ambiguous; this flag is the structural disambiguator. */
+      readonly windowBoundary: boolean;
+    }
   | {
       readonly kind: 'genesis_prev_hash_invalid';
       readonly idx: 0;
@@ -165,7 +178,13 @@ export function verifyChainFull(input: FullVerifyInput): FullVerifyReport {
     //     We do not require contiguity from 0 in the windowed case.
     //   - Subsequent rows: must be exactly prevIdx + 1.
     if (prevIdx !== null && r.idx !== prevIdx + 1) {
-      divergences.push({ kind: 'idx_gap', idx: r.idx, previousIdx: prevIdx });
+      // Mid-walk gap — always a real gap (deletion or never-written).
+      divergences.push({
+        kind: 'idx_gap',
+        idx: r.idx,
+        previousIdx: prevIdx,
+        windowBoundary: false,
+      });
       gaps++;
       // Keep walking — a gap may be a deletion; we want to report
       // every gap, not stop at the first.
@@ -283,15 +302,34 @@ export function verifyChainFull(input: FullVerifyInput): FullVerifyReport {
     prevHash = r.thisHash;
   }
 
-  // Sentinel: if window is unbounded and the first row's idx is not 0,
-  // we have a leading gap (the chain does not start at the genesis
-  // row). This is only a divergence if the operator asked for a full
-  // walk (no `since`). Windowed walks legitimately skip earlier rows.
-  if (window.sinceIso === null && window.fromIdx === null && rows.length > 0) {
+  // Sentinel: if the first row's idx is not 0 we have a "leading gap"
+  // — but its remediation path depends on whether the operator asked
+  // for an unbounded walk or a windowed walk:
+  //
+  //   - Unbounded walk (no `since`, no `fromIdx`) → real divergence;
+  //     the genesis row is missing (a real tamper signal). Emitted
+  //     with `windowBoundary: false`.
+  //   - Windowed walk (`since` OR `fromIdx` set) → expected; the
+  //     window simply does not include earlier rows. Per S5 F-S2, the
+  //     runbook needs the structural disambiguator so a JSON-report
+  //     consumer can tell the two cases apart without cross-
+  //     referencing the `window` field. Emitted with
+  //     `windowBoundary: true` and NOT counted as a divergence.
+  if (rows.length > 0) {
     const firstIdx = (rows[0] as AuditRow).idx;
     if (firstIdx !== 0) {
-      divergences.push({ kind: 'idx_gap', idx: firstIdx, previousIdx: null });
-      gaps++;
+      const isWindowed = window.sinceIso !== null || window.fromIdx !== null;
+      if (!isWindowed) {
+        divergences.push({
+          kind: 'idx_gap',
+          idx: firstIdx,
+          previousIdx: null,
+          windowBoundary: false,
+        });
+        gaps++;
+      }
+      // Windowed case: deliberately do NOT push a divergence. The
+      // operator's --since asked us to skip earlier rows.
     }
   }
 
@@ -454,7 +492,7 @@ function formatDivergence(d: FullVerifyDivergence): string {
     case 'payload_hash_mismatch':
       return `idx=${d.idx} payload_hash_mismatch stored=${d.storedHashHex.slice(0, 16)}... recomputed=${d.recomputedHashHex.slice(0, 16)}...`;
     case 'idx_gap':
-      return `idx=${d.idx} idx_gap previousIdx=${d.previousIdx ?? 'null'}`;
+      return `idx=${d.idx} idx_gap previousIdx=${d.previousIdx ?? 'null'} windowBoundary=${d.windowBoundary}`;
     case 'genesis_prev_hash_invalid':
       return `idx=0 genesis_prev_hash_invalid`;
     case 'payload_shape_mismatch':

@@ -109,12 +109,23 @@ post-deploy 4–6 week real-world-use window per ADR-0011 §3.8 + §3.9).
 | App shell — Bottom tab bar                                              | 0    | 0      | 0        |
 | App shell — Theme toggle (mobile)                                       | 1    | 0      | 0        |
 | App shell — Skip-to-content                                             | 0    | 0      | 0        |
-| **TOTAL**                                                               | 10   | 3      | 4        |
+| Standalone — Minutes view (`/minutes`)                                  | 0    | 0      | 0        |
+| Standalone — More view (`/more`)                                        | 0    | 1      | 0        |
+| Standalone — Legal view (`/legal`)                                      | 0    | 0      | 0        |
+| Standalone — Recommendation edit (`/recommendations/:id/edit`)          | 0    | 0      | 0        |
+| **TOTAL**                                                               | 10   | 4      | 4        |
 
-10 MUST-FIX findings — ALL implemented in this slice. 3 SHOULD-FIX —
-1 implemented (data-print metadata surfacing is the cheap fix); 2
-documented in this audit's "Documented residuals" section. 4
-DOCUMENTED-FOR-V2 — moved to Release 2 with rationale.
+10 MUST-FIX findings — ALL implemented in this slice (per F-P2/F-P3
+the touch-target and iOS-zoom fixes are now structural at the Button
+primitive + per-form input class). 4 SHOULD-FIX — 1 implemented
+(data-print metadata surfacing); 3 documented in this audit's
+"Documented residuals" section. 4 DOCUMENTED-FOR-V2 — moved to
+Release 2 with rationale. The four standalone routes (Minutes, More,
+Legal, RecommendationEdit) were absent from the previous audit table;
+S5 F-P1 added them. After the F-P2 systemic Button-primitive fix +
+F-P3 input-class fix, the previously-localized findings on those
+views collapse into the design-system fix posture (no per-view MUST
+remains).
 
 ## Design-system implications
 
@@ -420,6 +431,78 @@ md:w-9` desktop collapse.
   receives focus on activation. Tested via Tab from a fresh page load —
   the link surfaces visibly with the focus styles, activating jumps
   focus to `<main>`. Verified.
+
+### Standalone — Minutes view (`apps/web/src/views/minutes-view.tsx`)
+
+- No MUST-FIX. The view ships an empty-state pattern with two
+  size="sm" `<Button>` primaries ("Start new meeting", "Import Excel").
+  Both primaries previously rendered at h-9 (36px) — flagged in S5
+  F-P2 — but the systemic fix at the Button primitive
+  (`apps/web/src/components/ui/button.tsx`) now ships size="sm" as
+  `h-11 md:h-8`, so the call-sites collapse into the design-system fix
+  posture (touch-target ≥44pt on mobile, desktop-compact at md:+).
+- The `<h1>` and the empty-state copy use semantic HTML; `<Plus>`
+  and `<Upload>` icons carry `aria-hidden="true"` so screen readers
+  announce the button label only.
+- Regression guard: `apps/web/tests/e2e/mobile-nav.spec.ts` adds an
+  explicit boundingBox-height assertion on this view's primaries
+  (per F-P2 spec).
+
+### Standalone — More view (`apps/web/src/views/more-view.tsx`)
+
+- No MUST-FIX. Eight secondary-nav items rendered as either
+  `<Link>` (active routes) or `<button aria-disabled="true">`
+  (forward-seam items). Both carry the `focus-visible:ring-2`
+  pattern, semantic heading hierarchy (`<h1>`), and the chevron
+  icon carries `aria-hidden="true"`.
+- **SHOULD-FIX (documented, not implemented):** the disabled
+  forward-seam items rely on `aria-disabled` + the `title` attribute
+  to surface the "lands in milestone X" hint. On mobile the title
+  attribute is not surfaced via touch hover; the milestone hint is
+  effectively desktop-only. A Release 2.x refinement would replace
+  the tooltip with a visible "Coming in M2.x" badge. Not a
+  release-blocker because the disabled state IS announced via
+  `aria-disabled`; only the milestone narrative is muted.
+- The inner row uses `h-9 w-9` for the decorative icon container —
+  this is NOT a touch target (the parent `<Link>` / `<button>`
+  carries the click; `p-3.5` padding gives the outer row ~64px tall),
+  so the 44pt rule applies at the outer surface and is met.
+
+### Standalone — Legal view (`apps/web/src/views/legal-view.tsx`)
+
+- No MUST-FIX. The Search form carries `role="search"` + explicit
+  `<label htmlFor="legal-search">` with sr-only display; the input
+  was previously `text-sm` (14px) — flagged in S5 F-P3 — now
+  `text-base md:text-sm` so iOS Safari does not auto-zoom on focus.
+  The Search submit `<Button size="sm" className="h-9">` collapses
+  into the F-P2 systemic primitive fix (size="sm" mobile floor is
+  44pt at the primitive).
+- The StatuteIndex / ClauseDetail / SearchResults panels use
+  `<ul>` semantic lists with `<Link>` items; the MissingCitation
+  fallback is a `<div role="status">` that screen-readers announce.
+- The `<BookOpen>` heading icon carries no aria-label (decorative
+  alongside the `<h1>`); per CLAUDE.md "Semantic HTML before ARIA"
+  the heading is the load-bearing element.
+- The search-results highlight markup uses `<mark>` semantic; no
+  `<span style="background">` color-only hits.
+
+### Standalone — Recommendation edit (`apps/web/src/views/recommendation-edit-view.tsx`)
+
+- No MUST-FIX. The edit-shell delegates the form rendering to the
+  shared `RecommendationForm` primitive (from
+  `new-recommendation-view.tsx`), which is covered under
+  "Recommendations (1.9) — Drafting" — including the F-P3 text-base
+  mobile-input fix.
+- The RevealGate surfaces step-up freshness state to the rep with
+  a clear copy line + a `<Button>` that triggers the reveal flow.
+  Error state announces via `role="alert" aria-live="polite"`. The
+  step-up-required state uses `text-status-pending` paired with the
+  copy "Step-up authentication required. Complete the prompt, then
+  tap Reveal again." — not color-alone.
+- The "not draft" + "not found" + "loading" branches all render
+  semantic copy with no interactive trap.
+- BackLink uses `focus:outline-none focus:ring-2 focus:ring-ring`
+  (correct focus-ring pattern).
 
 ---
 

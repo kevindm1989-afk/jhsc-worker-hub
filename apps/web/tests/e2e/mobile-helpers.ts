@@ -12,10 +12,31 @@ import { expect, type Page, type Locator } from '@playwright/test';
  *  CLAUDE.md mobile-primary). 44pt @ 1x DPR = 44 CSS pixels. */
 export const TOUCH_TARGET_MIN_PX = 44;
 
+/** Options for `installAuthMocks`. */
+export interface AuthMockOptions {
+  /** When `true` (default), the session shape advertises step-up as
+   *  inactive (`{ active: false, until: null }`) so the mobile spec
+   *  exercises chrome without an interactive freshness prompt. When
+   *  `false`, the session reports step-up as required so a spec can
+   *  assert the step-up modal appears before a protected action
+   *  proceeds. Per S5 F-S6 — the default kept step-up freshness
+   *  regressions structurally untestable from mobile specs; the
+   *  toggle re-opens the regression-test surface. */
+  readonly stepUpFresh?: boolean;
+}
+
 /** Install the standard "you are authenticated" + "first-run done"
  *  network mocks. Same shape the existing smoke + print specs use,
- *  duplicated here so the mobile specs are self-contained. */
-export async function installAuthMocks(page: Page): Promise<void> {
+ *  duplicated here so the mobile specs are self-contained.
+ *
+ *  Per S5 F-S6, accepts a `{ stepUpFresh }` flag so a mobile spec can
+ *  exercise the not-fresh path and assert the step-up modal renders
+ *  before a protected action proceeds. CLAUDE.md non-negotiable #16
+ *  (exports require step-up + audit-logged with hash) is the
+ *  load-bearing rule the mobile inventory now covers.
+ */
+export async function installAuthMocks(page: Page, opts: AuthMockOptions = {}): Promise<void> {
+  const stepUpFresh = opts.stepUpFresh ?? true;
   await page.route('**/api/auth/first-run/status', (route) =>
     route.fulfill({
       status: 200,
@@ -31,7 +52,14 @@ export async function installAuthMocks(page: Page): Promise<void> {
         userId: 'mobile-e2e-user',
         displayName: 'Mobile E2E',
         sessionId: 'mobile-e2e-session',
-        stepUp: { active: false, until: null },
+        // When `stepUpFresh` is false the session is structurally
+        // valid but the step-up grant has expired (active: false,
+        // until: null). The protected route must gate on step-up
+        // freshness; a regression that flips the gate off would
+        // surface here.
+        stepUp: stepUpFresh
+          ? { active: true, until: new Date(Date.now() + 60_000).toISOString() }
+          : { active: false, until: null },
       }),
     }),
   );

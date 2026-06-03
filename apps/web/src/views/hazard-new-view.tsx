@@ -336,8 +336,14 @@ function Field({
 }
 
 function fieldInputClass(invalid: boolean): string {
+  // Per S5 F-P3: `text-sm` (14px) below 16px triggers iOS Safari auto-
+  // zoom on focus, then does NOT auto-zoom-out on blur — the rep ends
+  // up at >100% zoom on a sticky-bottom mobile form, breaking the
+  // sticky-bottom invariant. Fix is responsive: text-base (16px) on
+  // mobile, text-sm (14px) on md+ where pointer accuracy is finer
+  // and the desktop dense-input aesthetic remains.
   return cn(
-    'w-full rounded-md border bg-background px-3 py-2 text-sm text-foreground focus:outline-none focus:ring-2 focus:ring-ring',
+    'w-full rounded-md border bg-background px-3 py-2 text-base text-foreground focus:outline-none focus:ring-2 focus:ring-ring md:text-sm',
     invalid ? 'border-status-rejected' : 'border-input',
   );
 }
