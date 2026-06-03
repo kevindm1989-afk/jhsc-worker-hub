@@ -24,6 +24,10 @@
     "./meeting": {
       "types": "./src/meeting.ts",
       "default": "./src/meeting.ts"
+    },
+    "./action-item-closure": {
+      "types": "./src/action-item-closure.ts",
+      "default": "./src/action-item-closure.ts"
     }
   },
   "scripts": {

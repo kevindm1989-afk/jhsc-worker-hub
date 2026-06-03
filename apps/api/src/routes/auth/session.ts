@@ -111,10 +111,20 @@ sessionRoute.get('/session', authMiddleware(), async (c) => {
   // Ed25519 public key is 32 bytes; the verifier runs
   // sodium.crypto_sign_verify_detached(sig, pdfBytes, publicKey).
   const workplaceSigningKey = await getActiveWorkplaceSigningPublicKey(db);
+  // M2.2 S5 F-P1 fix: surface the rep's role(s) so the web client
+  // can gate UI affordances against the actual permission rather
+  // than the stubbed "any authenticated user" check. Per ADR-0001
+  // single-tenant single-rep scope, the in-app rep IS the
+  // worker_co_chair (the sole minutesSignerRole holder until the
+  // 2.5 forward seam introduces a second in-app worker rep). The
+  // role list is currently hardcoded for this scope; a future
+  // user_roles table will source it from a JOIN.
+  const roles: ReadonlyArray<string> = ['worker_co_chair'];
   return c.json({
     userId: auth.userId,
     displayName,
     sessionId: auth.sessionId,
+    roles,
     stepUp: auth.stepUpUntil
       ? { active: true, until: auth.stepUpUntil.toISOString() }
       : { active: false, until: null },

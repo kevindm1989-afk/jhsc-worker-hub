@@ -97,8 +97,19 @@ import type { SyncEntityKind, SyncOperationKind, SyncOperationState } from '@jhs
  * meeting_inspection_review, meeting_action_item_state,
  * meeting_signatures, meeting_templates). The upgrade transformer
  * from v1 → v2 is a no-op (no prior data; the seven tables are
- * created empty). */
-export const DEXIE_SCHEMA_VERSION = 2 as const;
+ * created empty).
+ *
+ * Version 3 (Milestone 2.2, ADR-0013 §3.8 S3) — adds two stores:
+ *   - `action_item_closures` — read-only mirror of the M2.2 closure
+ *     attestation rows so the action-item detail view can render the
+ *     closure metadata offline (closer + counter-signer + chain
+ *     anchor). The close-verification mutation itself is require-
+ *     online per ADR §3.8 — this table is read-only cache only.
+ *   - `meeting_live_metrics` — TTL'd cache of the GET /metrics
+ *     response (per ADR §3.4 offline-best-effort). Keyed by meetingId
+ *     so the offline dashboard can render the most recent snapshot
+ *     with a "Cached from <T>" badge. */
+export const DEXIE_SCHEMA_VERSION = 3 as const;
 
 /** Singleton Dexie database name. The same string lives in the service
  * worker (service-worker.ts) so it can postMessage the foreground when a
@@ -479,6 +490,49 @@ export interface MeetingTemplateRow {
   readonly cachedAt: string;
 }
 
+// ---------------------------------------------------------------------------
+// Milestone 2.2 — read-only caches (no `_sync_`)
+// ---------------------------------------------------------------------------
+
+/** Action item closure attestations (M2.2 §3.5) — read-only mirror.
+ *  The close-verification POST is require-online (step-up gated), so
+ *  there is NO write path through this table — it is hydrated from
+ *  successful server reads and consumed by the action-item detail view
+ *  to render the closure metadata + the chain anchor.
+ *
+ *  Closure-reason plaintext is NEVER cached here — only the closure
+ *  metadata (signers, timestamps, chain anchor hash, signing key id).
+ *  The plaintext stays in JS heap memory for the lifetime of the view
+ *  component only, per the same posture as the reveal endpoints (see
+ *  the db.ts header on the priv-F1 close-out). */
+export interface ActionItemClosureRow {
+  readonly id: string;
+  readonly actionItemId: string;
+  readonly meetingId: string | null;
+  readonly closedByActorId: string;
+  readonly closedAt: string;
+  readonly counterSignerActorId: string;
+  readonly counterSignedAt: string;
+  readonly selfAttestation: boolean;
+  readonly signingKeyId: string;
+  readonly evidenceStorageKey: string | null;
+  readonly chainAnchorHash: string | null;
+  readonly attestationSigHash: string;
+  readonly cachedAt: string;
+}
+
+/** Cached GET /api/meetings/:id/metrics response (M2.2 §3.4 offline
+ *  best-effort). One row per meeting; the metrics endpoint TTL is
+ *  short (the live dashboard polls every 5s) — the cache is the
+ *  offline fallback so the chip-bar can render a "Cached from <T>"
+ *  badge instead of a spinner. Aggregate-only payload per T-IM27 —
+ *  never per-rep attribution. */
+export interface MeetingLiveMetricsCacheRow {
+  readonly meetingId: string;
+  readonly responseJson: string;
+  readonly cachedAt: string;
+}
+
 /** A row in the sync queue — the in-flight work the queue worker drains
  * (ADR §3.2). */
 export interface SyncQueueRow {
@@ -591,6 +645,9 @@ export class JhscOfflineDb extends Dexie {
   meeting_signatures!: Table<MeetingSignatureRow, string>;
   meeting_action_item_state!: Table<MeetingActionItemStateRow, string>;
   meeting_templates!: Table<MeetingTemplateRow, string>;
+  // Milestone 2.2 read-only caches.
+  action_item_closures!: Table<ActionItemClosureRow, string>;
+  meeting_live_metrics!: Table<MeetingLiveMetricsCacheRow, string>;
   // Read-only caches.
   inspection_templates!: Table<InspectionTemplateRow, string>;
   legal_clauses!: Table<LegalClauseRow, string>;
@@ -715,6 +772,24 @@ export class JhscOfflineDb extends Dexie {
       meeting_action_item_state:
         'id, meetingId, actionItemId, snapshotKind, [meetingId+snapshotKind], snapshotAt',
       meeting_templates: 'id, templateCode, versionNumber, [templateCode+versionNumber]',
+    });
+
+    // Schema version 3 (Milestone 2.2, ADR-0013 §3.8 S3) — two new
+    // read-only caches for the closure-verification surface + the
+    // live-metrics offline fallback. No `_sync_` metadata; the
+    // close-verification mutation is require-online so there is no
+    // optimistic-write path through these tables. Forward-only upgrade
+    // (no v2 data to transform).
+    //
+    // Index choices:
+    //   - action_item_closures: actionItemId for the detail-view
+    //     lookup; meetingId for the metrics chip + the meeting
+    //     timeline; cachedAt for TTL purges.
+    //   - meeting_live_metrics: meetingId is the PK (one row per
+    //     meeting); cachedAt for the "Cached from <T>" badge.
+    this.version(3).stores({
+      action_item_closures: 'id, actionItemId, meetingId, cachedAt',
+      meeting_live_metrics: 'meetingId, cachedAt',
     });
   }
 }

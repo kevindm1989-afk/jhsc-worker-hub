@@ -21,6 +21,10 @@ import type {
   MeetingSnapshotKind,
 } from './meeting';
 
+// Re-export action-item closure enums + Zod schemas (2.2, ADR-0013).
+export * from './action-item-closure';
+import type { ActionItemReopenReason } from './action-item-closure';
+
 // ---------------------------------------------------------------------------
 // Result<T, E> — fallible operations
 // ---------------------------------------------------------------------------
@@ -168,6 +172,35 @@ export type AuditEventKind =
   // have a corresponding `audit.meeting_template.seeded` upstream in
   // the chain for the same jurisdiction.
   | 'audit.meeting_template.seeded'
+  // In-meeting action item management (Milestone 2.2, ADR-0013 §3.3).
+  // PI-clean per T-AC9 — IDs + counts + hashes + enum values only.
+  //   - action_item.closure_verified: the JHSC counter-sign closure
+  //     attestation anchor (parallel to meeting.signed).
+  //   - action_item.reopened: a Closed item flipped back to a non-
+  //     Closed status; payload carries an enum reopen reason
+  //     (rep_decision | jhsc_review | mgmt_appeal) — never narrative.
+  //   - action_item.status_changed: routine status PATCH anchor;
+  //     emitted whenever status changes (independent of meeting
+  //     context). The cross-anchor for meeting context is the
+  //     `meeting.action_item_status_changed` kind below.
+  //   - meeting.action_item_status_changed: TM-fold-3-pattern cross-
+  //     chain anchor; emitted when a status change happens INSIDE an
+  //     in_progress meeting. Carries the action_item.status_changed
+  //     event hash so the verifier can compose the two chains
+  //     (mirrors meeting.recommendation_drafted from M2.1).
+  | 'action_item.closure_verified'
+  | 'action_item.reopened'
+  | 'action_item.status_changed'
+  | 'meeting.action_item_status_changed'
+  // M2.2 S2 overflow (ADR-0013 §3.3): cross-chain anchors emitted on
+  // action-item create + move inside an in_progress meeting. The S1
+  // brief enumerated only the status-changed cross-anchor; S2 surfaces
+  // the symmetric added/moved anchors so the verifier walks ALL in-
+  // meeting operations consistently (per ADR §3.10 audit-emission
+  // discipline). Same TM-fold-3 envelope pattern as
+  // meeting.recommendation_drafted (M2.1).
+  | 'meeting.action_item_added'
+  | 'meeting.action_item_moved'
   | AuthEventKind;
 
 // ---------------------------------------------------------------------------
@@ -858,6 +891,18 @@ export type AuditPayload =
           readonly metAtCallToOrder: boolean;
           readonly ruleCitation: string;
         };
+        // M2.2 S5 F-S5 fix: the type-level enumeration of the
+        // closureVerifications dict is the structural backstop
+        // against payload-drift toward per-actor breakdowns. T-IM27
+        // (no per-rep attribution) is preserved by enforcing AGGREGATE
+        // counts only — never `selfAttestationActorIds` or analogous
+        // fields. Optional so M2.1 finalized rows emitted pre-2.2
+        // (which lack the field) still type-check.
+        readonly closureVerifications?: {
+          readonly total: number;
+          readonly selfAttestation: number;
+          readonly peerVerified: number;
+        };
       };
     }
   | {
@@ -874,10 +919,17 @@ export type AuditPayload =
       readonly attestationSigHash: string;
     }
   | {
+      // M2.2 TM-fold-5 (T-IM33) extension: closureVerificationCount is
+      // an additive optional field. Existing finalized events have
+      // closureVerificationCount: undefined (treated as 0 by the
+      // verifier extension); new events emitted post-2.2 carry the
+      // count of closure-verified items for the meeting so the
+      // audit-verify --check-meetings gate can cross-reference.
       readonly kind: 'meeting.finalized';
       readonly meetingId: string;
       readonly finalizedAt: string;
       readonly signatureIds: ReadonlyArray<string>;
+      readonly closureVerificationCount?: number;
     }
   | {
       // Assignee name is NEVER in the payload. nameHash is the sha256
@@ -903,6 +955,107 @@ export type AuditPayload =
       readonly recommendationId: string;
       readonly sectionId: string;
       readonly recommendationCreatedEventHash: string;
+    }
+  // ---------------------------------------------------------------------
+  // In-meeting action item management (Milestone 2.2, ADR-0013 §3.3)
+  //
+  // Closure verification + reopen + status-change anchors. PI-clean per
+  // T-AC9 — IDs + enums + hashes + counts only. Free-text rationales
+  // (closure reasons, reopen reasons in the future) NEVER enter the
+  // payload — only their hashes or enum codes.
+  //
+  // The cross-anchor pattern (meeting.action_item_status_changed)
+  // mirrors meeting.recommendation_drafted from M2.1 TM-fold-3 —
+  // emitted alongside the per-item action_item.status_changed event
+  // when the change happens inside an in_progress meeting.
+  // ---------------------------------------------------------------------
+  | {
+      // The JHSC counter-sign closure attestation anchor. evidenceHash
+      // is null when no evidence blob is attached. attestationSigHash
+      // is the sha256 of the TM-fold-5 Ed25519 detached signature
+      // bytes (mirrors meeting.signed).
+      //
+      // M2.2 S5 F-S2 fix: closureReasonHash + closedAt + counterSignedAt
+      // are emitted so an offline verifier walking the chain alone can
+      // re-derive the canonical digest the Ed25519 attestation signs
+      // over. Pre-fix, the payload omitted both fields and the verifier
+      // had to fetch the action_item_closures row to reconstruct the
+      // signed bytes — forfeiting the chain's standalone tamper-
+      // detection property.
+      readonly kind: 'action_item.closure_verified';
+      readonly actionItemId: string;
+      readonly closureId: string;
+      readonly meetingId: string | null;
+      readonly closerActorId: string;
+      readonly counterSignerActorId: string;
+      readonly selfAttestation: boolean;
+      readonly signingKeyId: string;
+      readonly closureReasonHash: string;
+      readonly closedAt: string;
+      readonly counterSignedAt: string;
+      readonly evidenceHash: string | null;
+      readonly attestationSigHash: string;
+    }
+  | {
+      // Closed → non-Closed transition. Carries the prior closure row
+      // id (the chain links forward to the closure attestation that
+      // is being superseded operationally) + an ENUM reopen reason
+      // (no narrative; never PI).
+      readonly kind: 'action_item.reopened';
+      readonly actionItemId: string;
+      readonly previousClosureId: string;
+      readonly reopenedAt: string;
+      readonly reopenedByActorId: string;
+      readonly reason: ActionItemReopenReason;
+    }
+  | {
+      // Per-item status-change anchor. Fires for any status change
+      // including in-meeting and out-of-meeting paths. meetingId is
+      // null when the change happens outside a meeting context.
+      readonly kind: 'action_item.status_changed';
+      readonly actionItemId: string;
+      readonly fromStatus: ActionItemStatus;
+      readonly toStatus: ActionItemStatus;
+      readonly changedAt: string;
+      readonly changedByActorId: string;
+      readonly meetingId: string | null;
+    }
+  | {
+      // Cross-chain anchor — fired when the underlying status change
+      // happens INSIDE an in_progress meeting. Carries the per-item
+      // event's hash so the verifier can compose the two chains
+      // (mirrors meeting.recommendation_drafted from M2.1 TM-fold-3).
+      readonly kind: 'meeting.action_item_status_changed';
+      readonly meetingId: string;
+      readonly actionItemId: string;
+      readonly fromStatus: ActionItemStatus;
+      readonly toStatus: ActionItemStatus;
+      readonly changedAt: string;
+      readonly statusChangedEventHash: string;
+    }
+  | {
+      // M2.2 S2 overflow — TM-fold-3 cross-chain anchor for
+      // POST /api/action-items inside an in_progress meeting. Carries
+      // the per-item action_item.created event hash so the verifier
+      // composes the two chains. PI-clean (IDs + enum + hash only).
+      readonly kind: 'meeting.action_item_added';
+      readonly meetingId: string;
+      readonly actionItemId: string;
+      readonly section: ActionItemSection;
+      readonly addedAt: string;
+      readonly actionItemCreatedEventHash: string;
+    }
+  | {
+      // M2.2 S2 overflow — TM-fold-3 cross-chain anchor for
+      // POST /api/action-items/:id/moves inside an in_progress
+      // meeting. Carries the per-item action_item.moved event hash.
+      readonly kind: 'meeting.action_item_moved';
+      readonly meetingId: string;
+      readonly actionItemId: string;
+      readonly fromSection: ActionItemSection | null;
+      readonly toSection: ActionItemSection;
+      readonly movedAt: string;
+      readonly actionItemMovedEventHash: string;
     }
   | {
       // S4 administrative anchor — emitted by the seed-meeting-template

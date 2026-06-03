@@ -306,6 +306,50 @@
     background: transparent !important;
   }
 
+  /*
+   * Milestone 2.2 — closure verification + reopen + live metrics +
+   * move history surfaces (ADR-0013 §3.4 / §3.5 / §3.6 / §3.9).
+   *
+   *   - Live metrics panel renders with data-print="card" so the
+   *     printed minutes carry the canonical aggregate snapshot per
+   *     ADR §3.4. Per T-IM27, the panel never carries per-rep
+   *     attribution — only aggregates.
+   *   - Closure verification panel renders with data-print="card";
+   *     the chain anchor + attestation sig + signing key id surface
+   *     via data-print="evidentiary" inside the panel so the print
+   *     stylesheet's bordered-divider + JetBrains-Mono rule applies.
+   *   - Section move history list renders below each section's
+   *     action items with data-print="card"; per-row timestamps
+   *     carry data-print="evidentiary" so the audit chain reads as
+   *     a JetBrains-Mono per-row prefix.
+   *   - The meeting-history timeline on the action-item detail view
+   *     uses Source Serif 4 (set inline on the wrapper) — the print
+   *     stylesheet's root font-family rule already governs the
+   *     fallback; the inline style preserves the serif framing on
+   *     screen too.
+   *
+   * Reopen dialog + the inline status menu + swipe affordances are
+   * all marked data-print="hide" inline at the component layer — the
+   * top-level `[data-print='hide']` rule above removes them.
+   */
+  [data-testid='live-metrics-panel'],
+  [data-testid='closure-verification-panel'],
+  [data-testid='meeting-history-timeline'],
+  [data-testid='closure-success-panel'] {
+    page-break-inside: avoid;
+    break-inside: avoid;
+    margin-bottom: 0.5rem;
+  }
+
+  /* Force-expand the move history collapse on print so the chain
+     reads as flat content. The component renders `print:block` on
+     the body wrapper but the parent has `display: contents`-style
+     semantics — this rule is the belt-and-braces. */
+  [data-print='card'] > div.hidden.print\:block,
+  div.hidden.print\:block {
+    display: block !important;
+  }
+
   /* Page setup — letter / A4 friendly, generous margins for filing. */
   @page {
     margin: 0.75in;

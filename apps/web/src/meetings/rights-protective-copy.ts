@@ -68,6 +68,49 @@ export const MEETING_RIGHTS_COPY = {
     'Meeting in progress. Tap a section to expand it; section notes and attendance are saved as you work.',
 
   scheduledBanner: 'Meeting scheduled. Start the meeting when the co-chair calls it to order.',
+
+  // -------------------------------------------------------------------------
+  // Milestone 2.2 — closure verification / reopen / live metrics
+  // (ADR-0013 §3.5, SECURITY.md §2.14 T-IM23/T-IM25/T-IM26/T-IM27 mitigations)
+  // -------------------------------------------------------------------------
+  //
+  // Per the M2.2 S0 user-decision addendum:
+  //   - T-IM25 (counter-sign as verification, not gatekeeping):
+  //     the framing is evidentiary, not a precondition for the rep's
+  //     operational work. "Verify closure" never "Approve closure".
+  //   - T-IM26 (closure reason framing):
+  //     the textarea placeholder asks "what was done", not "justify
+  //     the closure". Adversarial framing is forbidden.
+  //   - T-IM23 (offline counter-sign UX):
+  //     the require-online state surfaces a neutral hint with the
+  //     recovery affordance ("connect and retry"). No drama, no
+  //     lost-work warnings.
+  //   - T-IM27 (metrics surveillance copy):
+  //     the dashboard surfaces aggregate counts only — never
+  //     per-rep productivity attribution.
+
+  closureVerificationBanner:
+    'Closure verification is your evidence that this item was addressed. The chain anchor makes it tamper-evident for a future MLITSD review.',
+
+  closureSelfAttestationBanner:
+    'You are both the closer and the counter-signer because no other in-app worker co-chair is available. This is recorded in the chain so a future reviewer can see the single-rep constraint.',
+
+  closureReasonPlaceholder: 'What was done to verify closure?',
+
+  closureSubmitCta: 'Record closure verification',
+
+  closureOfflineHint:
+    'Closure verification requires a network connection. The action item will stay open until you are back online.',
+
+  closureSuccessHeading: 'Closure verified',
+
+  reopenDialogTitle: 'Reopen action item',
+  reopenDialogDescription:
+    'Reopening is a normal operational move. The previous closure verification stays in the chain as historical evidence.',
+  reopenSubmitCta: 'Reopen',
+  reopenSuccessMessage: 'Reopened. The previous closure verification is preserved in the chain.',
+
+  liveMetricsLegend: 'Live aggregates from this meeting. Counts only — no per-rep attribution.',
 } as const;
 
 /**

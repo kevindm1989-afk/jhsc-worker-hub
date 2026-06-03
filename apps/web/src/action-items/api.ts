@@ -9,6 +9,7 @@ import type {
   ActionItemUpdateField,
 } from '@jhsc/shared-types';
 import type { ActionFlag } from '@jhsc/shared-types/action-item-flag';
+import type { ActionItemReopenReason } from '@jhsc/shared-types/action-item-closure';
 
 const BASE = '/api/action-items';
 
@@ -145,6 +146,90 @@ export interface ActionItemListFilters {
   readonly meetingId?: string;
 }
 
+// ---------------------------------------------------------------------------
+// Milestone 2.2 — close-verification + reopen (ADR-0013 §3.2 / §3.5)
+// ---------------------------------------------------------------------------
+
+export interface ActionItemClosureVerificationBody {
+  readonly counterSignerActorId: string;
+  readonly selfAttestation: boolean;
+  readonly meetingId?: string;
+  readonly closureReason: {
+    readonly ciphertextB64: string;
+    readonly dekCiphertextB64: string;
+  };
+  readonly evidence?: {
+    readonly storageKey: string;
+    readonly envelopeCtB64: string;
+    readonly envelopeDekCtB64: string;
+  };
+  readonly clientId?: string;
+}
+
+export interface ActionItemClosureVerificationResponse {
+  readonly id: string;
+  readonly actionItemId: string;
+  readonly closureId: string;
+  readonly status: ActionItemStatus;
+  readonly closedAt: string;
+  readonly counterSignedAt: string;
+  readonly chainAnchorHash: string;
+  readonly attestationSigHash: string;
+  readonly selfAttestation: boolean;
+  readonly version: number;
+}
+
+export interface ActionItemReopenBody {
+  readonly reason: ActionItemReopenReason;
+}
+
+export interface ActionItemReopenResponse {
+  readonly id: string;
+  readonly status: ActionItemStatus;
+  readonly previousClosureId: string;
+  readonly version: number;
+}
+
+// M2.2 S5 F-L3 fix: GET /api/action-items/:id/meeting-history
+// returns the per-meeting touch history (snapshots + moves +
+// closures grouped by meetingId, chronological). Replaces the
+// "faked from moves only" client-side timeline in S3.
+export interface ActionItemMeetingHistoryEntry {
+  readonly meetingId: string;
+  readonly meetingDate: string | null;
+  readonly meetingStatus: string | null;
+  readonly meetingLocation: string | null;
+  readonly snapshotsThisMeeting: ReadonlyArray<{
+    readonly snapshotKind: 'live' | 'finalized';
+    readonly snapshotAt: string;
+    readonly status: string;
+    readonly section: string;
+  }>;
+  readonly movesThisMeeting: ReadonlyArray<{
+    readonly id: string;
+    readonly fromSection: string | null;
+    readonly toSection: string;
+    readonly movedAt: string;
+    readonly movedByActorId: string;
+  }>;
+  readonly closuresThisMeeting: ReadonlyArray<{
+    readonly id: string;
+    readonly closedAt: string;
+    readonly counterSignedAt: string;
+    readonly closedByActorId: string;
+    readonly counterSignerActorId: string;
+    readonly selfAttestation: boolean;
+    readonly superseded: boolean;
+  }>;
+}
+
+export interface ActionItemMeetingHistoryResponse {
+  readonly actionItemId: string;
+  readonly firstRaisedMeetingId: string | null;
+  readonly items: ReadonlyArray<ActionItemMeetingHistoryEntry>;
+  readonly asOf: string;
+}
+
 export const actionItemsApi = {
   list: (
     filters: ActionItemListFilters = {},
@@ -182,4 +267,21 @@ export const actionItemsApi = {
     call(`/${encodeURIComponent(id)}/moves/${encodeURIComponent(moveId)}/undo`, {
       method: 'POST',
     }),
+  /** POST /api/action-items/:id/close-verification — Milestone 2.2 §3.5
+   * (the JHSC counter-sign closure attestation). Require-online per
+   * ADR §3.8 — step-up gate cannot be queued. */
+  closeVerification: (
+    id: string,
+    body: ActionItemClosureVerificationBody,
+  ): Promise<ActionItemClosureVerificationResponse> =>
+    call(`/${encodeURIComponent(id)}/close-verification`, { method: 'POST', json: body }),
+  /** POST /api/action-items/:id/reopen — Milestone 2.2 §3.5
+   * (Closed → In Progress transition). Require-online per ADR §3.8. */
+  reopen: (id: string, body: ActionItemReopenBody): Promise<ActionItemReopenResponse> =>
+    call(`/${encodeURIComponent(id)}/reopen`, { method: 'POST', json: body }),
+  /** GET /api/action-items/:id/meeting-history — Milestone 2.2 S5
+   *  F-L3. Per-meeting touch history (snapshots + moves +
+   *  closures grouped by meetingId, chronological). */
+  meetingHistory: (id: string): Promise<ActionItemMeetingHistoryResponse> =>
+    call(`/${encodeURIComponent(id)}/meeting-history`),
 };
