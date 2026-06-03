@@ -11,19 +11,36 @@
 //   DATABASE_URL=... bun run scripts/audit-log-verify.ts --check-backfill
 //   DATABASE_URL=... bun run scripts/audit-log-verify.ts --check-evidence
 //   DATABASE_URL=... bun run scripts/audit-log-verify.ts --check-sync
+//   DATABASE_URL=... bun run scripts/audit-log-verify.ts --full
+//   DATABASE_URL=... bun run scripts/audit-log-verify.ts --full --since=2026-01-01T00:00:00Z
+//   DATABASE_URL=... bun run scripts/audit-log-verify.ts --full --report=json
 //
 // Exit codes
 //   0   chain verified (and any requested anchor checks pass)
 //   1   tamper detected (firstDivergence reported, or backfill mismatch,
 //       or evidence forward-defense check fails, or sync_idempotency
-//       anomaly detected)
+//       anomaly detected, or --full reported any divergence)
 //   2   operational error (could not reach DB, etc.)
+//
+// --full (ADR-0011 §3.7, Milestone 1.12 S2)
+//   Re-canonicalizes + rehashes every chain row's payload, walks the
+//   chain-link sequence, runs per-actor timestamp monotonicity, and
+//   emits a structured report. See docs/release-1-audit-verify-gaps.md
+//   for the documented skip-list (Ed25519 signatures, per-actor
+//   sequence column, per-kind field validation).
 
 import { createHash } from 'node:crypto';
 import { sql } from 'drizzle-orm';
 import { canonicalJsonStringify, verify } from '@jhsc/audit';
 import { authEvents } from '../src/db/schema';
 import { getDb } from '../src/db/client';
+import {
+  parseFullArgs,
+  renderHumanReport,
+  renderJsonReport,
+  verifyChainFull,
+  type AuditRow,
+} from '../src/lib/audit-verify-full';
 
 interface AuthEventRow {
   id: string;
@@ -260,12 +277,90 @@ async function checkSyncIdempotency(
   return { ok: false, anomalies, rowsChecked: rows.length };
 }
 
+/**
+ * Fetch the audit_log rows in idx-ASC order, optionally bounded by
+ * `ts >= sinceIso`. Returns the rows in the in-memory `AuditRow` shape
+ * the pure verifier consumes.
+ */
+async function fetchChainRows(
+  db: ReturnType<typeof getDb>,
+  sinceIso: string | null,
+): Promise<AuditRow[]> {
+  // We rely on SQL filtering for the windowed case so we do not pull
+  // megabytes of pre-window rows into memory just to discard them.
+  const rows = (sinceIso
+    ? await db.execute(sql`
+        SELECT idx, ts, actor_id, kind, resource_type, resource_id, ip,
+               user_agent, prev_hash, this_hash, payload
+        FROM audit_log
+        WHERE ts >= ${sinceIso}::timestamptz
+        ORDER BY idx ASC
+      `)
+    : await db.execute(sql`
+        SELECT idx, ts, actor_id, kind, resource_type, resource_id, ip,
+               user_agent, prev_hash, this_hash, payload
+        FROM audit_log
+        ORDER BY idx ASC
+      `)) as unknown as Array<{
+    idx: number | string;
+    ts: Date;
+    actor_id: string | null;
+    kind: string;
+    resource_type: string | null;
+    resource_id: string | null;
+    ip: string | null;
+    user_agent: string | null;
+    prev_hash: Uint8Array | Buffer;
+    this_hash: Uint8Array | Buffer;
+    payload: unknown;
+  }>;
+  return rows.map((r) => ({
+    idx: Number(r.idx),
+    ts: r.ts,
+    actorId: r.actor_id,
+    kind: r.kind,
+    resourceType: r.resource_type,
+    resourceId: r.resource_id,
+    ip: r.ip,
+    userAgent: r.user_agent,
+    prevHash: Uint8Array.from(r.prev_hash as Uint8Array | Buffer),
+    thisHash: Uint8Array.from(r.this_hash as Uint8Array | Buffer),
+    payload: r.payload,
+  }));
+}
+
 async function main(): Promise<void> {
   const quiet = process.argv.includes('--quiet');
   const checkBackfill = process.argv.includes('--check-backfill');
   const checkEvidence = process.argv.includes('--check-evidence');
   const checkSync = process.argv.includes('--check-sync');
+  const fullArgs = parseFullArgs(process.argv);
+
   const db = getDb();
+
+  // --full mode: skip the existing per-row spot-check and run the
+  // structured full-chain verifier. The two modes are mutually
+  // exclusive at the report level — combining them would produce two
+  // overlapping reports for the same chain; the --full report
+  // supersedes the spot-check.
+  if (fullArgs.full) {
+    const rows = await fetchChainRows(db, fullArgs.sinceIso);
+    const report = verifyChainFull({
+      rows,
+      window: {
+        sinceIso: fullArgs.sinceIso,
+        fromIdx: null,
+        toIdx: null,
+      },
+    });
+    if (fullArgs.reportJson) {
+      process.stdout.write(renderJsonReport(report));
+    } else {
+      process.stdout.write(renderHumanReport(report));
+    }
+    process.exit(report.ok ? 0 : 1);
+  }
+
   const result = await verify(db);
   if (!result.ok) {
     if (quiet) {

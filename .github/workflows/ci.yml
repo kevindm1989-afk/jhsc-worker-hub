@@ -39,6 +39,46 @@ jobs:
 
       - run: pnpm --filter @jhsc/web build
 
+  fuzz:
+    name: excel-import fuzz (1000 cases)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: pnpm/action-setup@v6
+        with:
+          version: 9.12.0
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version-file: .nvmrc
+          cache: pnpm
+
+      - run: pnpm install --frozen-lockfile
+
+      # Deterministic but commit-varying seed (ADR-0011 §3.5: each CI
+      # run gets fresh coverage while remaining reproducible from the
+      # SHA). The harness accepts an `0x`-prefixed 32-bit hex seed; we
+      # take the first 8 hex chars of the commit SHA so the seed is
+      # stable within a build and varies across commits.
+      - name: Compute fuzz seed from commit SHA
+        id: seed
+        run: echo "value=0x${GITHUB_SHA:0:8}" >> "$GITHUB_OUTPUT"
+
+      - name: Run Excel-parser fuzz harness
+        env:
+          FUZZ_SEED: ${{ steps.seed.outputs.value }}
+          FUZZ_CASES: 1000
+        run: pnpm --filter @jhsc/excel-import test:fuzz
+
+      - name: Upload fuzz failure dumps
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: excel-import-fuzz-failures
+          path: packages/excel-import/test/fuzz/failures
+          retention-days: 14
+
   e2e:
     name: e2e (chromium)
     runs-on: ubuntu-latest
