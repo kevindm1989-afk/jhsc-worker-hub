@@ -192,6 +192,15 @@ export type AuditEventKind =
   | 'action_item.reopened'
   | 'action_item.status_changed'
   | 'meeting.action_item_status_changed'
+  // M2.2 S2 overflow (ADR-0013 §3.3): cross-chain anchors emitted on
+  // action-item create + move inside an in_progress meeting. The S1
+  // brief enumerated only the status-changed cross-anchor; S2 surfaces
+  // the symmetric added/moved anchors so the verifier walks ALL in-
+  // meeting operations consistently (per ADR §3.10 audit-emission
+  // discipline). Same TM-fold-3 envelope pattern as
+  // meeting.recommendation_drafted (M2.1).
+  | 'meeting.action_item_added'
+  | 'meeting.action_item_moved'
   | AuthEventKind;
 
 // ---------------------------------------------------------------------------
@@ -1000,6 +1009,30 @@ export type AuditPayload =
       readonly toStatus: ActionItemStatus;
       readonly changedAt: string;
       readonly statusChangedEventHash: string;
+    }
+  | {
+      // M2.2 S2 overflow — TM-fold-3 cross-chain anchor for
+      // POST /api/action-items inside an in_progress meeting. Carries
+      // the per-item action_item.created event hash so the verifier
+      // composes the two chains. PI-clean (IDs + enum + hash only).
+      readonly kind: 'meeting.action_item_added';
+      readonly meetingId: string;
+      readonly actionItemId: string;
+      readonly section: ActionItemSection;
+      readonly addedAt: string;
+      readonly actionItemCreatedEventHash: string;
+    }
+  | {
+      // M2.2 S2 overflow — TM-fold-3 cross-chain anchor for
+      // POST /api/action-items/:id/moves inside an in_progress
+      // meeting. Carries the per-item action_item.moved event hash.
+      readonly kind: 'meeting.action_item_moved';
+      readonly meetingId: string;
+      readonly actionItemId: string;
+      readonly fromSection: ActionItemSection | null;
+      readonly toSection: ActionItemSection;
+      readonly movedAt: string;
+      readonly actionItemMovedEventHash: string;
     }
   | {
       // S4 administrative anchor — emitted by the seed-meeting-template

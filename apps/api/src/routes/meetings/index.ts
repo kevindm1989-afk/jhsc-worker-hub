@@ -79,8 +79,15 @@ import { idempotencyKey } from '../../middleware/idempotency';
 import { readIfMatchOr428, versionConflictBody } from '../../middleware/if-match';
 import { rateLimit } from '../../middleware/rate-limit';
 import { loadWorkplaceConfig } from '../../../../../config/workplace';
+import { meetingMetricsRoute } from './metrics';
 
 export const meetingsRoute = new Hono();
+
+// M2.2 S2: GET /api/meetings/:id/metrics is mounted via a sub-router
+// so its own Cache-Control discipline + rate-limit bucket apply
+// independently of the writes on this route. The sub-router runs its
+// own authMiddleware (a read endpoint does not need idempotency).
+meetingsRoute.route('/', meetingMetricsRoute);
 
 meetingsRoute.use('*', authMiddleware());
 // 1.10 (ADR-0009 §3.4): idempotencyKey AFTER auth, BEFORE rate-limit.
@@ -1549,83 +1556,120 @@ meetingsRoute.post('/:id/adjourn', async (c) => {
       recommendationsDrafted: number;
       inspectionsReviewed: number;
       quorumCompliance: { metAtCallToOrder: boolean; ruleCitation: string };
+      // M2.2 S2 (ADR-0013 TM-fold-5): closure verifications surfaced
+      // in the adjournment metrics dict + the
+      // `meeting.adjourned` chain payload. Mirrors the
+      // S1 compute-meeting-live-metrics helper's shape so the
+      // pre-adjournment chip-bar and the post-adjournment chain
+      // payload carry the same numbers.
+      closureVerifications: { total: number; selfAttestation: number; peerVerified: number };
     };
     adjournedAt: string;
     version: number;
   };
 
-  let result: AdjournResult;
-  try {
-    result = await db.transaction(async (tx) => {
-      const locked = (await tx.execute(sql`
+  // TM-fold-4 (T-IM30 + T-IM36): SERIALIZABLE wraps the metrics-
+  // compute + finalized-snapshot-write + chain-emit sequence so a
+  // hostile in-flight `live` snapshot insert between metrics compute
+  // and chain emit cannot falsify the canonical `meeting.adjourned`
+  // payload. Postgres 40001 (serialization_failure) is the documented
+  // retry surface — we retry up to 3 times with exponential backoff
+  // and surface a clean error on the final failure.
+  const MAX_SERIALIZE_RETRIES = 3;
+  let result: AdjournResult | null = null;
+  let lastError: unknown = null;
+  for (let attempt = 0; attempt < MAX_SERIALIZE_RETRIES; attempt += 1) {
+    try {
+      // The Drizzle transaction's `isolationLevel` option drives a
+      // SET TRANSACTION ISOLATION LEVEL SERIALIZABLE at the start of
+      // the block. Same shape as the M2.1 default-tx wrap, just with
+      // the stricter isolation.
+      result = await db.transaction(
+        async (tx): Promise<AdjournResult> => {
+          const locked = (await tx.execute(sql`
         SELECT id, status, version, actual_start_at::text AS actual_start_at
         FROM meetings WHERE id = ${idParsed.data} FOR UPDATE
       `)) as unknown as Array<{
-        id: string;
-        status: string;
-        version: number;
-        actual_start_at: string | null;
-      }>;
-      if (locked.length === 0) {
-        throw new MeetingWriteAborted({ status: 404, body: { error: 'not_found' } });
-      }
-      const m = locked[0]!;
-      if (m.status !== 'in_progress') {
-        throw new MeetingWriteAborted({
-          status: 422,
-          body: { error: 'illegal_transition', from: m.status, to: 'pending_finalization' },
-        });
-      }
+            id: string;
+            status: string;
+            version: number;
+            actual_start_at: string | null;
+          }>;
+          if (locked.length === 0) {
+            throw new MeetingWriteAborted({ status: 404, body: { error: 'not_found' } });
+          }
+          const m = locked[0]!;
+          if (m.status !== 'in_progress') {
+            throw new MeetingWriteAborted({
+              status: 422,
+              body: { error: 'illegal_transition', from: m.status, to: 'pending_finalization' },
+            });
+          }
 
-      // Compute metrics from query results.
-      const itemsRaisedRows = (await tx.execute(sql`
+          // Compute metrics from query results.
+          const itemsRaisedRows = (await tx.execute(sql`
         SELECT COUNT(*)::int AS n FROM action_items WHERE first_raised_meeting_id = ${idParsed.data}
       `)) as unknown as Array<{ n: number }>;
-      const itemsClosedRows = (await tx.execute(sql`
+          const itemsClosedRows = (await tx.execute(sql`
         SELECT COUNT(*)::int AS n FROM action_items
         WHERE meeting_id = ${idParsed.data}
           AND status IN ('Closed','Cancelled')
       `)) as unknown as Array<{ n: number }>;
-      const recsDraftedRows = (await tx.execute(sql`
+          const recsDraftedRows = (await tx.execute(sql`
         SELECT COUNT(*)::int AS n FROM recommendations WHERE meeting_id = ${idParsed.data}
       `)) as unknown as Array<{ n: number }>;
-      const inspReviewedRows = (await tx.execute(sql`
+          const inspReviewedRows = (await tx.execute(sql`
         SELECT COUNT(*)::int AS n FROM meeting_inspection_review WHERE meeting_id = ${idParsed.data}
       `)) as unknown as Array<{ n: number }>;
 
-      // Quorum compute at adjournment (snapshot of current attendance).
-      const attendanceRows = (await tx.execute(sql`
+          // M2.2 S2 (ADR-0013 TM-fold-5 + T-IM33): closure verifications
+          // scoped to this meeting. Self-attestation vs peer-verified are
+          // counted separately so a reviewer can see the structural
+          // composition of the meeting's closures at a glance.
+          const closureRows = (await tx.execute(sql`
+        SELECT self_attestation FROM action_item_closures WHERE meeting_id = ${idParsed.data}
+      `)) as unknown as Array<{ self_attestation: boolean }>;
+          const closureTotal = closureRows.length;
+          let closureSelfAttestation = 0;
+          let closurePeerVerified = 0;
+          for (const c of closureRows) {
+            if (c.self_attestation) closureSelfAttestation += 1;
+            else closurePeerVerified += 1;
+          }
+
+          // Quorum compute at adjournment (snapshot of current attendance).
+          const attendanceRows = (await tx.execute(sql`
         SELECT role, present_status FROM meeting_attendance WHERE meeting_id = ${idParsed.data}
       `)) as unknown as Array<{ role: string; present_status: string }>;
-      const quorum = computeQuorum(
-        attendanceRows.map((a) => ({
-          role: a.role as QuorumAttendanceRow['role'],
-          presentStatus: a.present_status as QuorumAttendanceRow['presentStatus'],
-        })),
-        workplace.jurisdiction,
-      );
+          const quorum = computeQuorum(
+            attendanceRows.map((a) => ({
+              role: a.role as QuorumAttendanceRow['role'],
+              presentStatus: a.present_status as QuorumAttendanceRow['presentStatus'],
+            })),
+            workplace.jurisdiction,
+          );
 
-      // Promote every `live` snapshot to a `finalized` snapshot if no
-      // finalized row exists yet for (meeting_id, action_item_id). The
-      // partial UNIQUE makes this idempotent (T-ML16-class replay).
-      const liveRows = (await tx.execute(sql`
+          // Promote every `live` snapshot to a `finalized` snapshot if no
+          // finalized row exists yet for (meeting_id, action_item_id). The
+          // partial UNIQUE makes this idempotent (T-ML16-class replay).
+          const liveRows = (await tx.execute(sql`
         SELECT DISTINCT ON (action_item_id) action_item_id, snapshot_status, snapshot_section,
                snapshot_assignee_ct, snapshot_assignee_dek_ct
         FROM meeting_action_item_state
         WHERE meeting_id = ${idParsed.data} AND snapshot_kind = 'live'
         ORDER BY action_item_id, snapshot_at DESC
       `)) as unknown as Array<{
-        action_item_id: string;
-        snapshot_status: string;
-        snapshot_section: string;
-        snapshot_assignee_ct: Uint8Array | null;
-        snapshot_assignee_dek_ct: Uint8Array | null;
-      }>;
+            action_item_id: string;
+            snapshot_status: string;
+            snapshot_section: string;
+            snapshot_assignee_ct: Uint8Array | null;
+            snapshot_assignee_dek_ct: Uint8Array | null;
+          }>;
 
-      for (const live of liveRows) {
-        const finalizedId = randomUUID();
-        try {
-          await tx.execute(sql`
+          for (const live of liveRows) {
+            const finalizedId = randomUUID();
+            try {
+              await tx.execute(sql`
             INSERT INTO meeting_action_item_state (
               id, meeting_id, action_item_id, snapshot_kind,
               snapshot_status, snapshot_section,
@@ -1638,37 +1682,40 @@ meetingsRoute.post('/:id/adjourn', async (c) => {
               ${live.snapshot_assignee_dek_ct ? (Buffer.from(live.snapshot_assignee_dek_ct) as unknown as Uint8Array) : null}
             )
           `);
-          const assigneeNameHash = live.snapshot_assignee_ct
-            ? sha256Hex(Uint8Array.from(live.snapshot_assignee_ct))
-            : null;
-          await append(tx, {
-            actorId: auth.userId,
-            payload: {
-              kind: 'meeting.action_item_snapshot',
-              meetingId: idParsed.data,
-              actionItemId: live.action_item_id,
-              snapshotKind: 'finalized',
-              snapshotAt: new Date().toISOString(),
-              status: live.snapshot_status,
-              section: live.snapshot_section,
-              assigneeNameHash,
-            },
-            resourceType: 'meeting_action_item_state',
-            resourceId: finalizedId,
-          });
-        } catch (e) {
-          // Partial UNIQUE collision = a prior adjourn replay already
-          // landed the finalized row. Idempotent: skip.
-          if (e instanceof Error && /meeting_action_item_state_finalized_unique/.test(e.message)) {
-            continue;
+              const assigneeNameHash = live.snapshot_assignee_ct
+                ? sha256Hex(Uint8Array.from(live.snapshot_assignee_ct))
+                : null;
+              await append(tx, {
+                actorId: auth.userId,
+                payload: {
+                  kind: 'meeting.action_item_snapshot',
+                  meetingId: idParsed.data,
+                  actionItemId: live.action_item_id,
+                  snapshotKind: 'finalized',
+                  snapshotAt: new Date().toISOString(),
+                  status: live.snapshot_status,
+                  section: live.snapshot_section,
+                  assigneeNameHash,
+                },
+                resourceType: 'meeting_action_item_state',
+                resourceId: finalizedId,
+              });
+            } catch (e) {
+              // Partial UNIQUE collision = a prior adjourn replay already
+              // landed the finalized row. Idempotent: skip.
+              if (
+                e instanceof Error &&
+                /meeting_action_item_state_finalized_unique/.test(e.message)
+              ) {
+                continue;
+              }
+              throw e;
+            }
           }
-          throw e;
-        }
-      }
 
-      // Flip status and timestamps.
-      const newVersion = m.version + 1;
-      const adjourned = (await tx.execute(sql`
+          // Flip status and timestamps.
+          const newVersion = m.version + 1;
+          const adjourned = (await tx.execute(sql`
         UPDATE meetings
         SET status = 'pending_finalization',
             actual_end_at = COALESCE(actual_end_at, now()),
@@ -1678,40 +1725,81 @@ meetingsRoute.post('/:id/adjourn', async (c) => {
         RETURNING actual_end_at::text AS actual_end_at,
                   EXTRACT(EPOCH FROM (now() - actual_start_at))::int AS duration_seconds
       `)) as unknown as Array<{ actual_end_at: string; duration_seconds: number }>;
-      const adjournedAt = adjourned[0]!.actual_end_at;
-      const durationSeconds = Number(adjourned[0]!.duration_seconds);
+          const adjournedAt = adjourned[0]!.actual_end_at;
+          const durationSeconds = Number(adjourned[0]!.duration_seconds);
 
-      const metrics = {
-        durationSeconds,
-        itemsRaised: Number(itemsRaisedRows[0]!.n),
-        itemsClosed: Number(itemsClosedRows[0]!.n),
-        recommendationsDrafted: Number(recsDraftedRows[0]!.n),
-        inspectionsReviewed: Number(inspReviewedRows[0]!.n),
-        quorumCompliance: {
-          metAtCallToOrder: quorum.compliant,
-          ruleCitation: quorum.ruleCitation,
+          const metrics = {
+            durationSeconds,
+            itemsRaised: Number(itemsRaisedRows[0]!.n),
+            itemsClosed: Number(itemsClosedRows[0]!.n),
+            recommendationsDrafted: Number(recsDraftedRows[0]!.n),
+            inspectionsReviewed: Number(inspReviewedRows[0]!.n),
+            quorumCompliance: {
+              metAtCallToOrder: quorum.compliant,
+              ruleCitation: quorum.ruleCitation,
+            },
+            closureVerifications: {
+              total: closureTotal,
+              selfAttestation: closureSelfAttestation,
+              peerVerified: closurePeerVerified,
+            },
+          };
+
+          await append(tx, {
+            actorId: auth.userId,
+            payload: {
+              kind: 'meeting.adjourned',
+              meetingId: idParsed.data,
+              adjournedAt,
+              metrics,
+            },
+            resourceType: 'meetings',
+            resourceId: idParsed.data,
+          });
+
+          return { metrics, adjournedAt, version: newVersion };
         },
-      };
-
-      await append(tx, {
-        actorId: auth.userId,
-        payload: {
-          kind: 'meeting.adjourned',
-          meetingId: idParsed.data,
-          adjournedAt,
-          metrics,
-        },
-        resourceType: 'meetings',
-        resourceId: idParsed.data,
-      });
-
-      return { metrics, adjournedAt, version: newVersion };
-    });
-  } catch (err) {
-    if (err instanceof MeetingWriteAborted) {
-      return c.json(err.payload.body, err.payload.status as 404 | 422);
+        { isolationLevel: 'serializable' },
+      );
+      lastError = null;
+      break;
+    } catch (err) {
+      // TM-fold-4 retry surface: Postgres 40001 is the
+      // serialization_failure code (pg-driver surfaces it on .code).
+      // We retry up to MAX_SERIALIZE_RETRIES with exponential backoff;
+      // other errors propagate immediately.
+      const isSerializationFailure =
+        err instanceof Error &&
+        (('code' in err && (err as { code?: string }).code === '40001') ||
+          /serialization failure|could not serialize access/i.test(err.message));
+      if (isSerializationFailure && attempt + 1 < MAX_SERIALIZE_RETRIES) {
+        lastError = err;
+        // Exponential backoff: 10ms, 40ms, 160ms. Single-tenant scale
+        // means concurrent adjournments are vanishingly rare; this
+        // keeps the wait bounded under 250ms even at the limit.
+        await new Promise((resolve) => setTimeout(resolve, 10 * Math.pow(4, attempt)));
+        continue;
+      }
+      if (err instanceof MeetingWriteAborted) {
+        return c.json(err.payload.body, err.payload.status as 404 | 422);
+      }
+      throw err;
     }
-    throw err;
+  }
+  if (!result) {
+    // All retries exhausted — surface a clean 503 so the client knows
+    // to retry. The chain stays intact (rollback discarded all
+    // partial writes).
+    return c.json(
+      {
+        error: 'ADJOURN_SERIALIZATION_FAILURE',
+        message:
+          'The adjournment transaction could not be serialized after multiple retries. Try again shortly.',
+        attempts: MAX_SERIALIZE_RETRIES,
+        lastError: lastError instanceof Error ? lastError.message : null,
+      },
+      503,
+    );
   }
   return c.json({
     id: idParsed.data,
@@ -2049,6 +2137,19 @@ meetingsRoute.post('/:id/finalize', async (c) => {
       `)) as unknown as Array<{ finalized_at: string }>;
       const finalizedAt = finalized[0]!.finalized_at;
 
+      // M2.2 S2 (ADR-0013 TM-fold-5): closureVerificationCount enters
+      // the meeting.finalized payload so the audit-verify
+      // --check-meetings Gate 5 can cross-reference the count of
+      // closure-verified items against the count of in-meeting
+      // closures on the chain. Additive field; the payload's
+      // discriminated-union shape (shared-types §M2.2) keeps existing
+      // M2.1 finalized rows whose closureVerificationCount is absent
+      // (== 0 in the verifier).
+      const closureCountRow = (await tx.execute(sql`
+        SELECT COUNT(*)::int AS n FROM action_item_closures WHERE meeting_id = ${idParsed.data}
+      `)) as unknown as Array<{ n: number }>;
+      const closureVerificationCount = Number(closureCountRow[0]!.n);
+
       await append(tx, {
         actorId: auth.userId,
         payload: {
@@ -2056,6 +2157,7 @@ meetingsRoute.post('/:id/finalize', async (c) => {
           meetingId: idParsed.data,
           finalizedAt,
           signatureIds: sigRows.map((r) => r.id),
+          closureVerificationCount,
         },
         resourceType: 'meetings',
         resourceId: idParsed.data,

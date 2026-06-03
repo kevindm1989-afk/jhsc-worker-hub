@@ -916,3 +916,436 @@ describe('checkMeetingChain — runtime signer roles (M2.1 S5 F-S2)', () => {
     ]);
   });
 });
+
+// ---------------------------------------------------------------------------
+// M2.2 S2 — Gate 5 (closure_verification_count cross-check on meeting.finalized)
+// ---------------------------------------------------------------------------
+
+const AID_1 = '00000000-0000-0000-0000-000000aaaaa1';
+const AID_2 = '00000000-0000-0000-0000-000000aaaaa2';
+const CLOSURE_1 = '00000000-0000-0000-0000-000000cccc11';
+const CLOSURE_2 = '00000000-0000-0000-0000-000000cccc22';
+const ACTOR = '00000000-0000-0000-0000-000000aaaaff';
+
+describe('checkMeetingChain — Gate 5 closure_verification_count (M2.2)', () => {
+  it('passes when meeting.finalized.closureVerificationCount matches the number of closure_verified events', () => {
+    const rows = [
+      meetingRow({ idx: 0, kind: 'meeting.created', payload: { meetingId: MID } }),
+      meetingRow({
+        idx: 1,
+        kind: 'action_item.closure_verified',
+        payload: {
+          actionItemId: AID_1,
+          closureId: CLOSURE_1,
+          meetingId: MID,
+          closerActorId: ACTOR,
+          counterSignerActorId: ACTOR,
+          selfAttestation: true,
+        },
+      }),
+      meetingRow({
+        idx: 2,
+        kind: 'action_item.closure_verified',
+        payload: {
+          actionItemId: AID_2,
+          closureId: CLOSURE_2,
+          meetingId: MID,
+          closerActorId: ACTOR,
+          counterSignerActorId: ACTOR,
+          selfAttestation: true,
+        },
+      }),
+      meetingRow({
+        idx: 3,
+        kind: 'meeting.adjourned',
+        payload: { meetingId: MID, metrics: VALID_METRICS },
+      }),
+      meetingRow({
+        idx: 4,
+        kind: 'meeting.signed',
+        payload: { meetingId: MID, signerRole: 'worker_co_chair' },
+      }),
+      meetingRow({
+        idx: 5,
+        kind: 'meeting.signed',
+        payload: { meetingId: MID, signerRole: 'mgmt_co_chair' },
+      }),
+      meetingRow({
+        idx: 6,
+        kind: 'meeting.signed',
+        payload: { meetingId: MID, signerRole: 'mgmt_external_1' },
+      }),
+      meetingRow({
+        idx: 7,
+        kind: 'meeting.signed',
+        payload: { meetingId: MID, signerRole: 'mgmt_external_2' },
+      }),
+      meetingRow({
+        idx: 8,
+        kind: 'meeting.finalized',
+        payload: { meetingId: MID, closureVerificationCount: 2 },
+      }),
+    ];
+    const result = verifyInternals.checkMeetingChain(rows);
+    expect(result.ok).toBe(true);
+  });
+
+  it('flags meeting.finalized when claimed count does NOT match upstream closure_verified events', () => {
+    const rows = [
+      meetingRow({ idx: 0, kind: 'meeting.created', payload: { meetingId: MID } }),
+      meetingRow({
+        idx: 1,
+        kind: 'action_item.closure_verified',
+        payload: {
+          actionItemId: AID_1,
+          closureId: CLOSURE_1,
+          meetingId: MID,
+          closerActorId: ACTOR,
+          counterSignerActorId: ACTOR,
+          selfAttestation: true,
+        },
+      }),
+      meetingRow({
+        idx: 2,
+        kind: 'meeting.signed',
+        payload: { meetingId: MID, signerRole: 'worker_co_chair' },
+      }),
+      meetingRow({
+        idx: 3,
+        kind: 'meeting.signed',
+        payload: { meetingId: MID, signerRole: 'mgmt_co_chair' },
+      }),
+      meetingRow({
+        idx: 4,
+        kind: 'meeting.signed',
+        payload: { meetingId: MID, signerRole: 'mgmt_external_1' },
+      }),
+      meetingRow({
+        idx: 5,
+        kind: 'meeting.signed',
+        payload: { meetingId: MID, signerRole: 'mgmt_external_2' },
+      }),
+      meetingRow({
+        idx: 6,
+        kind: 'meeting.finalized',
+        // Payload claims 5 closures but only 1 exists upstream.
+        payload: { meetingId: MID, closureVerificationCount: 5 },
+      }),
+    ];
+    const result = verifyInternals.checkMeetingChain(rows);
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.anomalies.some((a) => a.reason === 'closure_verification_count_mismatch')).toBe(
+        true,
+      );
+    }
+  });
+
+  it('treats undefined closureVerificationCount as 0 (M2.1 forward-compat)', () => {
+    // A finalized event predating M2.2 carries no closureVerificationCount.
+    // The verifier treats undefined as 0 and passes when no
+    // closure_verified events exist upstream.
+    const rows = [
+      meetingRow({ idx: 0, kind: 'meeting.created', payload: { meetingId: MID } }),
+      meetingRow({
+        idx: 1,
+        kind: 'meeting.signed',
+        payload: { meetingId: MID, signerRole: 'worker_co_chair' },
+      }),
+      meetingRow({
+        idx: 2,
+        kind: 'meeting.signed',
+        payload: { meetingId: MID, signerRole: 'mgmt_co_chair' },
+      }),
+      meetingRow({
+        idx: 3,
+        kind: 'meeting.signed',
+        payload: { meetingId: MID, signerRole: 'mgmt_external_1' },
+      }),
+      meetingRow({
+        idx: 4,
+        kind: 'meeting.signed',
+        payload: { meetingId: MID, signerRole: 'mgmt_external_2' },
+      }),
+      meetingRow({
+        idx: 5,
+        kind: 'meeting.finalized',
+        payload: { meetingId: MID },
+      }),
+    ];
+    const result = verifyInternals.checkMeetingChain(rows);
+    expect(result.ok).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// M2.2 S2 — --check-action-items (ADR-0013 §3.3)
+// ---------------------------------------------------------------------------
+
+describe('checkActionItemChain — happy path', () => {
+  it('ok=true for a clean create → closure_verified chain', () => {
+    const rows = [
+      meetingRow({
+        idx: 0,
+        kind: 'action_item.created',
+        payload: { itemId: AID_1, itemType: 'INSIGHT', section: 'new_business', risk: 'Medium' },
+      }),
+      meetingRow({
+        idx: 1,
+        kind: 'action_item.closure_verified',
+        payload: {
+          actionItemId: AID_1,
+          closureId: CLOSURE_1,
+          meetingId: null,
+          closerActorId: ACTOR,
+          counterSignerActorId: ACTOR,
+          selfAttestation: true,
+        },
+      }),
+    ];
+    const result = verifyInternals.checkActionItemChain(rows);
+    expect(result.ok).toBe(true);
+    if (result.ok) expect(result.checked).toBe(2);
+  });
+});
+
+describe('checkActionItemChain — Gate 1 closure_verified requires upstream create', () => {
+  it('flags closure_verified with no matching action_item.created', () => {
+    const rows = [
+      meetingRow({
+        idx: 0,
+        kind: 'action_item.closure_verified',
+        payload: {
+          actionItemId: AID_1,
+          closureId: CLOSURE_1,
+          meetingId: null,
+          closerActorId: ACTOR,
+          counterSignerActorId: ACTOR,
+          selfAttestation: true,
+        },
+      }),
+    ];
+    const result = verifyInternals.checkActionItemChain(rows);
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.anomalies.some((a) => a.reason === 'closure_verified_no_upstream_create')).toBe(
+        true,
+      );
+    }
+  });
+});
+
+describe('checkActionItemChain — Gate 2 reopened requires prior closure (T-IM4)', () => {
+  it('flags action_item.reopened with no upstream closure_verified', () => {
+    const rows = [
+      meetingRow({
+        idx: 0,
+        kind: 'action_item.created',
+        payload: { itemId: AID_1, itemType: 'INSIGHT', section: 'new_business', risk: 'Medium' },
+      }),
+      meetingRow({
+        idx: 1,
+        kind: 'action_item.reopened',
+        payload: {
+          actionItemId: AID_1,
+          previousClosureId: CLOSURE_1,
+          reopenedAt: '2026-06-10T14:00:00.000Z',
+          reopenedByActorId: ACTOR,
+          reason: 'rep_decision',
+        },
+      }),
+    ];
+    const result = verifyInternals.checkActionItemChain(rows);
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.anomalies.some((a) => a.reason === 'reopened_no_prior_closure')).toBe(true);
+    }
+  });
+
+  it('passes when a prior closure_verified exists', () => {
+    const rows = [
+      meetingRow({
+        idx: 0,
+        kind: 'action_item.created',
+        payload: { itemId: AID_1, itemType: 'INSIGHT', section: 'new_business', risk: 'Medium' },
+      }),
+      meetingRow({
+        idx: 1,
+        kind: 'action_item.closure_verified',
+        payload: {
+          actionItemId: AID_1,
+          closureId: CLOSURE_1,
+          meetingId: null,
+          closerActorId: ACTOR,
+          counterSignerActorId: ACTOR,
+          selfAttestation: true,
+        },
+      }),
+      meetingRow({
+        idx: 2,
+        kind: 'action_item.reopened',
+        payload: {
+          actionItemId: AID_1,
+          previousClosureId: CLOSURE_1,
+          reopenedAt: '2026-06-10T14:00:00.000Z',
+          reopenedByActorId: ACTOR,
+          reason: 'rep_decision',
+        },
+      }),
+    ];
+    const result = verifyInternals.checkActionItemChain(rows);
+    expect(result.ok).toBe(true);
+  });
+});
+
+describe('checkActionItemChain — Gate 3 status_changed cannot carry toStatus=Closed (T-IM3)', () => {
+  it('flags status_changed with toStatus=Closed as a route bypass', () => {
+    const rows = [
+      meetingRow({
+        idx: 0,
+        kind: 'action_item.created',
+        payload: { itemId: AID_1, itemType: 'INSIGHT', section: 'new_business', risk: 'Medium' },
+      }),
+      meetingRow({
+        idx: 1,
+        kind: 'action_item.status_changed',
+        payload: {
+          actionItemId: AID_1,
+          fromStatus: 'Pending Review',
+          toStatus: 'Closed',
+          changedAt: '2026-06-10T14:00:00.000Z',
+          changedByActorId: ACTOR,
+          meetingId: null,
+        },
+      }),
+    ];
+    const result = verifyInternals.checkActionItemChain(rows);
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.anomalies.some((a) => a.reason === 'status_changed_closed_bypass')).toBe(true);
+    }
+  });
+
+  it('accepts non-Closed status transitions', () => {
+    const rows = [
+      meetingRow({
+        idx: 0,
+        kind: 'action_item.created',
+        payload: { itemId: AID_1, itemType: 'INSIGHT', section: 'new_business', risk: 'Medium' },
+      }),
+      meetingRow({
+        idx: 1,
+        kind: 'action_item.status_changed',
+        payload: {
+          actionItemId: AID_1,
+          fromStatus: 'Not Started',
+          toStatus: 'In Progress',
+          changedAt: '2026-06-10T14:00:00.000Z',
+          changedByActorId: ACTOR,
+          meetingId: null,
+        },
+      }),
+    ];
+    const result = verifyInternals.checkActionItemChain(rows);
+    expect(result.ok).toBe(true);
+  });
+});
+
+describe('checkActionItemChain — Gate 4 cross-anchor hash match (TM-fold-3)', () => {
+  it('passes when the cross-anchor statusChangedEventHash matches the upstream status_changed event', () => {
+    const statusChangedHash = new Uint8Array(32).fill(0xab);
+    const statusChangedHashHex = Buffer.from(statusChangedHash).toString('hex');
+    const rows = [
+      meetingRow({
+        idx: 0,
+        kind: 'action_item.status_changed',
+        payload: {
+          actionItemId: AID_1,
+          fromStatus: 'Not Started',
+          toStatus: 'In Progress',
+          changedAt: '2026-06-10T14:00:00.000Z',
+          changedByActorId: ACTOR,
+          meetingId: MID,
+        },
+        thisHash: statusChangedHash,
+      }),
+      meetingRow({
+        idx: 1,
+        kind: 'meeting.action_item_status_changed',
+        payload: {
+          meetingId: MID,
+          actionItemId: AID_1,
+          fromStatus: 'Not Started',
+          toStatus: 'In Progress',
+          changedAt: '2026-06-10T14:00:00.000Z',
+          statusChangedEventHash: statusChangedHashHex,
+        },
+      }),
+    ];
+    const result = verifyInternals.checkActionItemChain(rows);
+    expect(result.ok).toBe(true);
+  });
+
+  it('flags a cross-anchor with no matching upstream hash', () => {
+    const rows = [
+      meetingRow({
+        idx: 0,
+        kind: 'meeting.action_item_status_changed',
+        payload: {
+          meetingId: MID,
+          actionItemId: AID_1,
+          fromStatus: 'Not Started',
+          toStatus: 'In Progress',
+          changedAt: '2026-06-10T14:00:00.000Z',
+          statusChangedEventHash: 'ff'.repeat(32),
+        },
+      }),
+    ];
+    const result = verifyInternals.checkActionItemChain(rows);
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(
+        result.anomalies.some((a) => a.reason === 'status_changed_cross_anchor_no_upstream'),
+      ).toBe(true);
+    }
+  });
+
+  it('flags a cross-anchor whose actionItemId disagrees with the upstream event (hash collision masquerade)', () => {
+    const statusChangedHash = new Uint8Array(32).fill(0xab);
+    const statusChangedHashHex = Buffer.from(statusChangedHash).toString('hex');
+    const rows = [
+      meetingRow({
+        idx: 0,
+        kind: 'action_item.status_changed',
+        payload: {
+          actionItemId: AID_1,
+          fromStatus: 'Not Started',
+          toStatus: 'In Progress',
+          changedAt: '2026-06-10T14:00:00.000Z',
+          changedByActorId: ACTOR,
+          meetingId: MID,
+        },
+        thisHash: statusChangedHash,
+      }),
+      meetingRow({
+        idx: 1,
+        kind: 'meeting.action_item_status_changed',
+        payload: {
+          meetingId: MID,
+          actionItemId: AID_2, // disagrees with upstream
+          fromStatus: 'Not Started',
+          toStatus: 'In Progress',
+          changedAt: '2026-06-10T14:00:00.000Z',
+          statusChangedEventHash: statusChangedHashHex,
+        },
+      }),
+    ];
+    const result = verifyInternals.checkActionItemChain(rows);
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(
+        result.anomalies.some((a) => a.reason === 'status_changed_cross_anchor_hash_mismatch'),
+      ).toBe(true);
+    }
+  });
+});

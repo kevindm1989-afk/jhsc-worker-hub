@@ -54,9 +54,17 @@ import {
 import { idempotencyKey } from '../../middleware/idempotency';
 import { readIfMatchOr428, versionConflictBody } from '../../middleware/if-match';
 import { rateLimit } from '../../middleware/rate-limit';
-import { writeLiveActionItemSnapshot } from '../meetings';
+import { computeChainEntryHash, writeLiveActionItemSnapshot } from '../meetings';
+import { actionItemClosureRoute } from './close-verification';
 
 export const actionItemsRoute = new Hono();
+
+// M2.2 S2: mount the closure-verification + reopen routes BEFORE the
+// generic action-items route handlers below. The sub-router carries
+// its own auth + idempotency + rate-limit stack so the close-
+// verification route's step-up + Tigris HEAD verification chain is
+// fully wrapped.
+actionItemsRoute.route('/', actionItemClosureRoute);
 
 actionItemsRoute.use('*', authMiddleware());
 // 1.10 (ADR-0009 §3.4): idempotencyKey AFTER auth, BEFORE rate-limit.
@@ -387,6 +395,38 @@ actionItemsRoute.post('/', async (c) => {
       });
     }
 
+    // M2.2 S2 (ADR-0013 §3.3): when the action item is first raised
+    // INSIDE an in_progress meeting, emit the
+    // `meeting.action_item_added` cross-chain anchor. Same TM-fold-3
+    // pattern as `meeting.recommendation_drafted` — payload carries
+    // the upstream `action_item.created` event's thisHash so the
+    // verifier can compose the two chains.
+    if (body.firstRaisedMeetingId) {
+      const meetingRows = (await tx.execute(sql`
+        SELECT status FROM meetings WHERE id = ${body.firstRaisedMeetingId} LIMIT 1
+      `)) as unknown as Array<{ status: string }>;
+      if (meetingRows.length > 0 && meetingRows[0]!.status === 'in_progress') {
+        const createdHashHex = Buffer.from(chainRow.thisHash).toString('hex');
+        await append(tx, {
+          actorId: auth.userId,
+          payload: {
+            kind: 'meeting.action_item_added',
+            meetingId: body.firstRaisedMeetingId,
+            actionItemId: row.id,
+            section: row.section as ActionItemSection,
+            addedAt: new Date().toISOString(),
+            actionItemCreatedEventHash: createdHashHex,
+          },
+          resourceType: 'meetings',
+          resourceId: body.firstRaisedMeetingId,
+        });
+      }
+    }
+    // computeChainEntryHash is exported by the meetings route for
+    // cross-chain hash computation; referenced here so the import
+    // stays load-bearing across the file.
+    void computeChainEntryHash;
+
     return row;
   });
 
@@ -661,6 +701,72 @@ actionItemsRoute.patch('/:id', async (c) => {
   const body = bodyParsed.data;
   const db = getDb();
 
+  // M2.2 S2 (ADR-0013 §3.2 + T-IM3 + T-IM4):
+  //   * status='Closed' MUST go through POST /:id/close-verification —
+  //     the verified-close path is the only one that produces the
+  //     evidentiary attestation row + Ed25519 signature.
+  //   * status='In Progress' coming FROM 'Closed' MUST go through
+  //     POST /:id/reopen — re-opening is high-stakes; step-up + chain
+  //     anchor with enum reason is the canonical path.
+  // Routing these via clear 422 errors keeps the chain consistent
+  // (T-IM3) and surfaces the right endpoint to the client.
+  if (body.status === 'Closed') {
+    return c.json(
+      {
+        error: 'CLOSE_VIA_VERIFICATION',
+        message:
+          'Use POST /api/action-items/:id/close-verification to close an item. The verified-close path produces the JHSC counter-sign attestation.',
+        endpoint: `/api/action-items/${idParsed.data}/close-verification`,
+      },
+      422,
+    );
+  }
+
+  if (body.status !== undefined) {
+    const current = (await db.execute(sql`
+      SELECT status FROM action_items WHERE id = ${idParsed.data} LIMIT 1
+    `)) as unknown as Array<{ status: string }>;
+    if (current.length > 0 && current[0]!.status === 'Closed') {
+      return c.json(
+        {
+          error: 'REOPEN_VIA_REOPEN',
+          message:
+            'Closed items must be re-opened via POST /api/action-items/:id/reopen, which captures an enum reason in the chain.',
+          endpoint: `/api/action-items/${idParsed.data}/reopen`,
+        },
+        422,
+      );
+    }
+  }
+
+  // T-IM36 mitigation: a PATCH that targets an action_item linked to
+  // a meeting that has already been adjourned (pending_finalization
+  // or finalized) must be rejected at the route layer. Once the
+  // meeting is frozen, late PATCHes would write a `live` snapshot
+  // that contradicts the canonical `finalized` snapshots — breaking
+  // the chain's per-meeting state machine.
+  if (body.meetingId !== undefined && body.meetingId !== null) {
+    const meetingRows = (await db.execute(sql`
+      SELECT status FROM meetings WHERE id = ${body.meetingId} LIMIT 1
+    `)) as unknown as Array<{ status: string }>;
+    if (
+      meetingRows.length > 0 &&
+      (meetingRows[0]!.status === 'pending_finalization' ||
+        meetingRows[0]!.status === 'finalized' ||
+        meetingRows[0]!.status === 'archived')
+    ) {
+      return c.json(
+        {
+          error: 'MEETING_FROZEN',
+          message:
+            'The linked meeting has been adjourned. Late mutations against an adjourned meeting are blocked to preserve the finalized chain.',
+          meetingStatus: meetingRows[0]!.status,
+        },
+        422,
+      );
+    }
+  }
+
   // Sec-review F1 + F3 1.6: every patchable column lives in ONE table that
   // produces both the SET fragments AND the audit-chain changedFields. A
   // future contributor who adds a column has to extend the table or the
@@ -877,6 +983,76 @@ actionItemsRoute.patch('/:id', async (c) => {
         });
       }
 
+      // M2.2 S2 (ADR-0013 §3.3 + T-IM7): on every status change emit
+      // the per-item `action_item.status_changed` anchor. The earlier
+      // `action_item.updated` anchor is the broad change-of-record;
+      // status_changed is the targeted status-machine event that the
+      // verifier's --check-action-items gate walks. PI-clean — enum
+      // values + IDs + timestamp only.
+      const effectiveMeetingIdForStatusChange =
+        body.meetingId !== undefined ? body.meetingId : peek[0]!.meeting_id;
+      let statusChangedHash: string | null = null;
+      if (body.status !== undefined && body.status !== peek[0]!.status) {
+        const statusChangedRow = await append(tx, {
+          actorId: auth.userId,
+          payload: {
+            kind: 'action_item.status_changed',
+            actionItemId: idParsed.data,
+            fromStatus: peek[0]!.status as
+              | 'Not Started'
+              | 'In Progress'
+              | 'Blocked'
+              | 'Pending Review'
+              | 'Closed'
+              | 'Cancelled',
+            toStatus: body.status,
+            changedAt: new Date().toISOString(),
+            changedByActorId: auth.userId,
+            meetingId: effectiveMeetingIdForStatusChange,
+          },
+          resourceType: 'action_items',
+          resourceId: idParsed.data,
+        });
+        statusChangedHash = Buffer.from(statusChangedRow.thisHash).toString('hex');
+      }
+
+      // Cross-chain anchor when the status change happens INSIDE an
+      // in_progress meeting (TM-fold-3 pattern). The cross-anchor
+      // wraps the per-item status_changed event with the meeting-
+      // context envelope so the verifier composes the two chains.
+      if (
+        body.status !== undefined &&
+        body.status !== peek[0]!.status &&
+        effectiveMeetingIdForStatusChange &&
+        statusChangedHash
+      ) {
+        const meetingRows = (await tx.execute(sql`
+          SELECT status FROM meetings WHERE id = ${effectiveMeetingIdForStatusChange} LIMIT 1
+        `)) as unknown as Array<{ status: string }>;
+        if (meetingRows.length > 0 && meetingRows[0]!.status === 'in_progress') {
+          await append(tx, {
+            actorId: auth.userId,
+            payload: {
+              kind: 'meeting.action_item_status_changed',
+              meetingId: effectiveMeetingIdForStatusChange,
+              actionItemId: idParsed.data,
+              fromStatus: peek[0]!.status as
+                | 'Not Started'
+                | 'In Progress'
+                | 'Blocked'
+                | 'Pending Review'
+                | 'Closed'
+                | 'Cancelled',
+              toStatus: body.status,
+              changedAt: new Date().toISOString(),
+              statusChangedEventHash: statusChangedHash,
+            },
+            resourceType: 'meetings',
+            resourceId: effectiveMeetingIdForStatusChange,
+          });
+        }
+      }
+
       // 2.1 (ADR-0012 §3.2 Layer 3): if the row (after the PATCH) has a
       // meeting_id pointing at an in_progress meeting, drop a `live`
       // snapshot capturing the post-PATCH state. The check is read-after-
@@ -1021,6 +1197,32 @@ actionItemsRoute.post('/:id/moves', async (c) => {
           ${chainRow.idx}
         )
       `);
+      // M2.2 S2 (ADR-0013 §3.3): cross-chain anchor when the move
+      // happens INSIDE an in_progress meeting (TM-fold-3 pattern).
+      // Wraps the per-item action_item.moved event with the meeting-
+      // context envelope so the verifier composes the two chains.
+      if (bodyParsed.data.meetingId) {
+        const meetingRows = (await tx.execute(sql`
+          SELECT status FROM meetings WHERE id = ${bodyParsed.data.meetingId} LIMIT 1
+        `)) as unknown as Array<{ status: string }>;
+        if (meetingRows.length > 0 && meetingRows[0]!.status === 'in_progress') {
+          const movedHashHex = Buffer.from(chainRow.thisHash).toString('hex');
+          await append(tx, {
+            actorId: auth.userId,
+            payload: {
+              kind: 'meeting.action_item_moved',
+              meetingId: bodyParsed.data.meetingId,
+              actionItemId: idParsed.data,
+              fromSection: from,
+              toSection: to,
+              movedAt: new Date().toISOString(),
+              actionItemMovedEventHash: movedHashHex,
+            },
+            resourceType: 'meetings',
+            resourceId: bodyParsed.data.meetingId,
+          });
+        }
+      }
       // sec-review F2: the item's sequence_number is per-section. Moving
       // sections must re-allocate the "#" in the destination section,
       // otherwise the (section, sequence_number) UNIQUE index throws when

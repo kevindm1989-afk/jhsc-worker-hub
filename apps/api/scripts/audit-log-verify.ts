@@ -12,6 +12,7 @@
 //   DATABASE_URL=... bun run scripts/audit-log-verify.ts --check-evidence
 //   DATABASE_URL=... bun run scripts/audit-log-verify.ts --check-sync
 //   DATABASE_URL=... bun run scripts/audit-log-verify.ts --check-meetings
+//   DATABASE_URL=... bun run scripts/audit-log-verify.ts --check-action-items
 //   DATABASE_URL=... bun run scripts/audit-log-verify.ts --full
 //   DATABASE_URL=... bun run scripts/audit-log-verify.ts --full --since=2026-01-01T00:00:00Z
 //   DATABASE_URL=... bun run scripts/audit-log-verify.ts --full --report=json
@@ -330,7 +331,14 @@ interface MeetingAnomaly {
     | 'adjourned_metrics_malformed'
     | 'recommendation_drafted_hash_missing'
     | 'recommendation_drafted_hash_mismatch'
-    | 'created_template_not_seeded';
+    | 'created_template_not_seeded'
+    // M2.2 S2 (ADR-0013 TM-fold-5) Gate 5: meeting.finalized's
+    // closureVerificationCount payload field must match the count
+    // of `action_item.closure_verified` events between this
+    // meeting's `meeting.created` and the finalized event whose
+    // payload.meetingId matches. A mismatch is a chain-vs-payload
+    // tamper signal.
+    | 'closure_verification_count_mismatch';
   readonly detail: string;
 }
 
@@ -373,6 +381,18 @@ function checkMeetingChain(
   const meetingEvents = rows.filter((r) => r.kind.startsWith('meeting.'));
   const recommendationDraftedEvents = rows.filter((r) => r.kind === 'recommendation.drafted');
   const templateSeededEvents = rows.filter((r) => r.kind === 'audit.meeting_template.seeded');
+  // Gate 5: closure-verification events scoped to a meeting. We bucket
+  // by meetingId so the cross-reference against `meeting.finalized`'s
+  // payload.closureVerificationCount is O(n).
+  const closureVerifiedEvents = rows.filter((r) => r.kind === 'action_item.closure_verified');
+  const closuresByMeetingId = new Map<string, MeetingChainRow[]>();
+  for (const c of closureVerifiedEvents) {
+    const mid = c.payload?.meetingId;
+    if (typeof mid !== 'string') continue;
+    const list = closuresByMeetingId.get(mid) ?? [];
+    list.push(c);
+    closuresByMeetingId.set(mid, list);
+  }
 
   // Index recommendation.drafted by recommendationId for O(1) lookup.
   const recDraftedByRecId = new Map<string, MeetingChainRow>();
@@ -453,6 +473,31 @@ function checkMeetingChain(
           kind: e.kind,
           reason: 'finalized_missing_signatures',
           detail: `missing signer roles: ${missing.join(', ')}`,
+        });
+      }
+      // Gate 5 (M2.2 S2 / TM-fold-5): cross-reference the payload's
+      // closureVerificationCount against the count of
+      // action_item.closure_verified events whose payload.meetingId
+      // matches AND whose idx falls between this meeting's
+      // meeting.created and meeting.finalized events. The earliest
+      // meeting.created in `peers` is the lower bound; the finalized
+      // event itself is the upper bound. An undefined count is
+      // treated as 0 per the additive-field invariant (M2.1 finalized
+      // rows pre-2.2 carry no count).
+      const claimedCount: number =
+        typeof e.payload?.closureVerificationCount === 'number'
+          ? e.payload.closureVerificationCount
+          : 0;
+      const created = peers.find((p) => p.kind === 'meeting.created' && p.idx < e.idx);
+      const lowerBound = created ? created.idx : -1;
+      const meetingClosures = closuresByMeetingId.get(mid) ?? [];
+      const actualCount = meetingClosures.filter((c) => c.idx > lowerBound && c.idx < e.idx).length;
+      if (claimedCount !== actualCount) {
+        anomalies.push({
+          idx: e.idx,
+          kind: e.kind,
+          reason: 'closure_verification_count_mismatch',
+          detail: `payload.closureVerificationCount=${claimedCount} but ${actualCount} action_item.closure_verified events found between meeting.created and meeting.finalized`,
         });
       }
     } else if (e.kind === 'meeting.adjourned') {
@@ -548,7 +593,223 @@ function checkMeetingChain(
   return { ok: false, anomalies, checked: meetingEvents.length };
 }
 
-export const _internals = { checkMeetingChain, readRequiredSignerRolesFromEnv };
+// ---------------------------------------------------------------------------
+// --check-action-items forward defense (Milestone 2.2 S2, ADR-0013 §3.3)
+// ---------------------------------------------------------------------------
+//
+// Walks `action_item.*` + `meeting.action_item_*` chain rows asserting:
+//
+//   1. Every `action_item.closure_verified` event has a corresponding
+//      action_item upstream (FK presence via action_item.created in
+//      the chain — same chain-only stance as the M2.1 verifier; the DB
+//      row's FK is enforced by Postgres).
+//
+//   2. Every `action_item.reopened` event has a prior
+//      `action_item.closure_verified` event with the same
+//      actionItemId upstream. T-IM4 mitigation — re-opening without
+//      a prior closure is a chain-shape violation.
+//
+//   3. No `action_item.status_changed` event has `toStatus='Closed'`.
+//      T-IM3 mitigation — closures must go through the verified path
+//      (`action_item.closure_verified`); a status-change anchor with
+//      `Closed` would mean a route bypassed close-verification.
+//
+//   4. Each `meeting.action_item_status_changed` cross-anchor's
+//      `statusChangedEventHash` matches the upstream
+//      `action_item.status_changed` event for the same actionItemId
+//      (mirrors Gate 3 from M2.1 — recommendation.drafted hash match).
+//      For closure cross-anchors (toStatus='Closed') the upstream is
+//      the `action_item.closure_verified` event whose hash the
+//      cross-anchor carries (T-IM3 path).
+
+interface ActionItemAnomaly {
+  readonly idx: number;
+  readonly kind: string;
+  readonly reason:
+    | 'closure_verified_no_upstream_create'
+    | 'reopened_no_prior_closure'
+    | 'status_changed_closed_bypass'
+    | 'status_changed_cross_anchor_hash_mismatch'
+    | 'status_changed_cross_anchor_no_upstream';
+  readonly detail: string;
+}
+
+function checkActionItemChain(
+  rows: ReadonlyArray<MeetingChainRow>,
+):
+  | { ok: true; checked: number }
+  | { ok: false; anomalies: ReadonlyArray<ActionItemAnomaly>; checked: number } {
+  const aiEvents = rows.filter(
+    (r) =>
+      r.kind.startsWith('action_item.') ||
+      r.kind === 'meeting.action_item_status_changed' ||
+      r.kind === 'meeting.action_item_added' ||
+      r.kind === 'meeting.action_item_moved',
+  );
+
+  // Index by actionItemId / itemId for O(1) upstream lookups.
+  const createdById = new Map<string, MeetingChainRow>();
+  const closureById = new Map<string, MeetingChainRow>();
+  // Per-item status_changed events keyed by hash for cross-anchor
+  // lookup (Gate 4).
+  const statusChangedByHash = new Map<string, MeetingChainRow>();
+  const closureByHash = new Map<string, MeetingChainRow>();
+
+  for (const r of aiEvents) {
+    if (r.kind === 'action_item.created') {
+      const id = r.payload?.itemId;
+      if (typeof id === 'string') createdById.set(id, r);
+    } else if (r.kind === 'action_item.closure_verified') {
+      const id = r.payload?.actionItemId;
+      if (typeof id === 'string') closureById.set(id, r);
+      const hashHex = Buffer.from(r.this_hash).toString('hex');
+      closureByHash.set(hashHex, r);
+    } else if (r.kind === 'action_item.status_changed') {
+      const hashHex = Buffer.from(r.this_hash).toString('hex');
+      statusChangedByHash.set(hashHex, r);
+    }
+  }
+
+  const anomalies: ActionItemAnomaly[] = [];
+
+  for (const e of aiEvents) {
+    if (e.kind === 'action_item.closure_verified') {
+      const aid = e.payload?.actionItemId;
+      if (typeof aid === 'string') {
+        const created = createdById.get(aid);
+        if (!created || created.idx >= e.idx) {
+          anomalies.push({
+            idx: e.idx,
+            kind: e.kind,
+            reason: 'closure_verified_no_upstream_create',
+            detail: `no upstream action_item.created for actionItemId=${aid}`,
+          });
+        }
+      }
+    } else if (e.kind === 'action_item.reopened') {
+      const aid = e.payload?.actionItemId;
+      if (typeof aid === 'string') {
+        const closure = closureById.get(aid);
+        if (!closure || closure.idx >= e.idx) {
+          anomalies.push({
+            idx: e.idx,
+            kind: e.kind,
+            reason: 'reopened_no_prior_closure',
+            detail: `no upstream action_item.closure_verified for actionItemId=${aid}`,
+          });
+        }
+      }
+    } else if (e.kind === 'action_item.status_changed') {
+      // T-IM3: status_changed cannot carry toStatus='Closed'. The
+      // verified-close path emits action_item.closure_verified
+      // INSTEAD of status_changed for the Closed transition.
+      const to = e.payload?.toStatus;
+      if (to === 'Closed') {
+        anomalies.push({
+          idx: e.idx,
+          kind: e.kind,
+          reason: 'status_changed_closed_bypass',
+          detail:
+            'action_item.status_changed carries toStatus=Closed; closures must go through action_item.closure_verified',
+        });
+      }
+    } else if (e.kind === 'meeting.action_item_status_changed') {
+      // Gate 4 (TM-fold-3 hash match). The cross-anchor's
+      // statusChangedEventHash points at either an
+      // action_item.status_changed event OR (for the Closed
+      // transition) the action_item.closure_verified event whose
+      // hash anchors the closure — both shapes are produced by the
+      // route layer (PATCH vs close-verification). A mismatch is
+      // the canonical "the chain composes incorrectly" tamper signal.
+      const claimedHash = e.payload?.statusChangedEventHash;
+      if (typeof claimedHash !== 'string') {
+        anomalies.push({
+          idx: e.idx,
+          kind: e.kind,
+          reason: 'status_changed_cross_anchor_no_upstream',
+          detail: 'statusChangedEventHash missing from payload',
+        });
+        continue;
+      }
+      const upstream = statusChangedByHash.get(claimedHash) ?? closureByHash.get(claimedHash);
+      if (!upstream || upstream.idx >= e.idx) {
+        anomalies.push({
+          idx: e.idx,
+          kind: e.kind,
+          reason: 'status_changed_cross_anchor_no_upstream',
+          detail: `no upstream action_item.status_changed or action_item.closure_verified with this_hash=${claimedHash}`,
+        });
+        continue;
+      }
+      // Sanity-check that the upstream event references the same
+      // action item the cross-anchor claims. This catches a hash
+      // collision masquerading as a valid linkage.
+      const aid = e.payload?.actionItemId;
+      const upstreamAid = upstream.payload?.actionItemId ?? upstream.payload?.itemId;
+      if (aid !== upstreamAid) {
+        anomalies.push({
+          idx: e.idx,
+          kind: e.kind,
+          reason: 'status_changed_cross_anchor_hash_mismatch',
+          detail: `cross-anchor claims actionItemId=${aid}; upstream event at idx=${upstream.idx} carries actionItemId=${upstreamAid}`,
+        });
+      }
+    }
+  }
+
+  if (anomalies.length === 0) {
+    return { ok: true, checked: aiEvents.length };
+  }
+  return { ok: false, anomalies, checked: aiEvents.length };
+}
+
+// ---------------------------------------------------------------------------
+// Replica-lag advisory (T-IM38)
+// ---------------------------------------------------------------------------
+//
+// On a streaming-replica deploy a verifier reading the replica may see
+// a stale chain tail relative to the writes the route layer has just
+// committed. We surface a soft warning if lag exceeds 5s; the verifier
+// remains fail-soft on warnings + hard-fail on actual chain
+// inconsistencies. The lag query is the standard
+// pg_last_xact_replay_lsn() vs pg_current_wal_lsn() shape; on a
+// primary the function returns NULL (no lag) and we skip the warning.
+
+interface ReplicaLagStatus {
+  readonly ok: boolean;
+  readonly lagSeconds: number | null;
+  readonly note: string;
+}
+
+async function checkReplicaLag(db: ReturnType<typeof getDb>): Promise<ReplicaLagStatus> {
+  try {
+    const rows = (await db.execute(sql`
+      SELECT EXTRACT(EPOCH FROM (now() - pg_last_xact_replay_timestamp()))::float AS lag_seconds
+    `)) as unknown as Array<{ lag_seconds: number | null }>;
+    const lag = rows[0]?.lag_seconds ?? null;
+    if (lag === null) {
+      return { ok: true, lagSeconds: null, note: 'primary or no replay (lag check skipped)' };
+    }
+    if (lag > 5) {
+      return {
+        ok: false,
+        lagSeconds: lag,
+        note: 'replica lag > 5s; chain reads may be stale (T-IM38 advisory)',
+      };
+    }
+    return { ok: true, lagSeconds: lag, note: 'replica lag within bounds' };
+  } catch {
+    // Function not available on this Postgres flavor (e.g. local test
+    // DB) — skip silently.
+    return { ok: true, lagSeconds: null, note: 'pg_last_xact_replay_timestamp unavailable' };
+  }
+}
+
+export const _internals = {
+  checkMeetingChain,
+  readRequiredSignerRolesFromEnv,
+  checkActionItemChain,
+};
 
 /**
  * Fetch the audit_log rows in idx-ASC order, optionally bounded by
@@ -608,9 +869,20 @@ async function main(): Promise<void> {
   const checkEvidence = process.argv.includes('--check-evidence');
   const checkSync = process.argv.includes('--check-sync');
   const checkMeetings = process.argv.includes('--check-meetings');
+  const checkActionItems = process.argv.includes('--check-action-items');
   const fullArgs = parseFullArgs(process.argv);
 
   const db = getDb();
+
+  // T-IM38 advisory: surface replica lag as a soft warning before any
+  // chain reads. Fail-soft on warnings (lag is operational, not chain
+  // tamper); hard-fail on real chain inconsistencies below.
+  const lag = await checkReplicaLag(db);
+  if (!lag.ok && !quiet) {
+    process.stderr.write(
+      `audit-log-verify WARN (replica lag) ${lag.note} (lag=${lag.lagSeconds?.toFixed(2)}s)\n`,
+    );
+  }
 
   // --full mode: skip the existing per-row spot-check and run the
   // structured full-chain verifier. The two modes are mutually
@@ -713,6 +985,7 @@ async function main(): Promise<void> {
       WHERE kind LIKE 'meeting.%'
          OR kind = 'recommendation.drafted'
          OR kind = 'audit.meeting_template.seeded'
+         OR kind = 'action_item.closure_verified'
       ORDER BY idx ASC
     `)) as unknown as Array<{
       idx: number | string;
@@ -754,6 +1027,58 @@ async function main(): Promise<void> {
     if (!quiet) {
       process.stdout.write(
         `audit-log-verify meeting forward defense: ${meetingsCheck.checked} meeting.* chain row(s) checked, no anomalies found.\n`,
+      );
+    }
+  }
+
+  if (checkActionItems) {
+    const aiRows = (await db.execute(sql`
+      SELECT idx, kind, payload, this_hash
+      FROM audit_log
+      WHERE kind LIKE 'action_item.%'
+         OR kind = 'meeting.action_item_status_changed'
+         OR kind = 'meeting.action_item_added'
+         OR kind = 'meeting.action_item_moved'
+      ORDER BY idx ASC
+    `)) as unknown as Array<{
+      idx: number | string;
+      kind: string;
+      payload: unknown;
+      this_hash: Uint8Array | Buffer;
+    }>;
+    const aiCheck = checkActionItemChain(
+      aiRows.map((r) => ({
+        idx: Number(r.idx),
+        kind: r.kind,
+        payload: r.payload,
+        this_hash: r.this_hash,
+      })),
+    );
+    if (!aiCheck.ok) {
+      if (quiet) {
+        for (const a of aiCheck.anomalies) {
+          process.stdout.write(
+            `audit-log-verify ACTION_ITEM_ANOMALY idx=${a.idx} kind=${a.kind} reason=${a.reason}\n`,
+          );
+        }
+      } else {
+        process.stderr.write(
+          `audit-log-verify FAIL (action item lifecycle forward defense)\n  rows checked:  ${aiCheck.checked}\n  anomalies:     ${aiCheck.anomalies.length}\n`,
+        );
+        for (const a of aiCheck.anomalies) {
+          process.stderr.write(
+            `    - idx=${a.idx} kind='${a.kind}' reason=${a.reason} (${a.detail})\n`,
+          );
+        }
+        process.stderr.write(
+          '\nReason codes:\n  closure_verified_no_upstream_create        — action_item.closure_verified with no matching action_item.created (T-IM3).\n  reopened_no_prior_closure                  — action_item.reopened without an upstream closure (T-IM4).\n  status_changed_closed_bypass               — status_changed event carries toStatus=Closed; closures must use action_item.closure_verified (T-IM3).\n  status_changed_cross_anchor_no_upstream    — meeting.action_item_status_changed claims a hash with no upstream event (TM-fold-3).\n  status_changed_cross_anchor_hash_mismatch  — cross-anchor + upstream disagree on actionItemId (hash collision masquerade).\n',
+        );
+      }
+      process.exit(1);
+    }
+    if (!quiet) {
+      process.stdout.write(
+        `audit-log-verify action item forward defense: ${aiCheck.checked} action_item.* chain row(s) checked, no anomalies found.\n`,
       );
     }
   }
