@@ -186,3 +186,55 @@ describe('scanForPii — multi-class + boundary cases', () => {
     expect(text).toBe(before);
   });
 });
+
+// S5 priv-F5 close-out: the heuristic now runs against the source
+// filename, the Minutes attendance string, and the joined Inspection
+// Review snapshot in addition to the four per-row action_item fields.
+// These tests assert the scanner handles those input shapes correctly
+// (and that empty / whitespace-only input returns clean flags).
+describe('scanForPii — extended-surface input shapes (S5 priv-F5)', () => {
+  it('scans a filename string + flags workplace-name-shape', () => {
+    // The heuristic's name-shape regex requires capitalized words with
+    // lowercase tails (e.g. "Acme Foods" matches but "ACME Foods" does
+    // not — all-caps tokens fail `[A-Z][a-z]+`). The rep is encouraged
+    // (via the runbook §6) to rename files with all-caps shouty
+    // workplace names BEFORE upload because the heuristic does not
+    // catch them; the sealed-box encryption catches them regardless.
+    const r = scanForPii('Minutes Acme Foods Q3.xlsx');
+    expect(r.nameShape).toBe(true);
+  });
+
+  it('scans an attendance list + flags multiple name-shape entries', () => {
+    const r = scanForPii('Jane Doe, John Smith, Sarah Chen, Maria Garcia');
+    expect(r.nameShape).toBe(true);
+    // The rollup count expects at least 2 distinct name-shape matches.
+    const nameMatches = r.raw.filter((m) => m.kind === 'nameShape');
+    expect(nameMatches.length).toBeGreaterThanOrEqual(2);
+  });
+
+  it('scans a joined inspection-review snapshot + flags name + phone shapes', () => {
+    const snapshot = [
+      'Zone 1\tOK\tno issues',
+      'Zone 2\tflagged\twitness John Doe at 555-123-4567',
+      'Zone 3\tOK\tsupervisor Sarah Chen reviewed',
+    ].join('\n');
+    const r = scanForPii(snapshot);
+    expect(r.nameShape).toBe(true);
+    expect(r.phoneShape).toBe(true);
+  });
+
+  it('empty filename / attendance / snapshot returns clean flags (no false positives)', () => {
+    const r = scanForPii('');
+    expect(r.nameShape).toBe(false);
+    expect(r.emailShape).toBe(false);
+    expect(r.phoneShape).toBe(false);
+    expect(r.sinShape).toBe(false);
+    expect(r.raw).toEqual([]);
+  });
+
+  it('whitespace-only input returns clean flags', () => {
+    const r = scanForPii('   \n\t  ');
+    expect(r.nameShape).toBe(false);
+    expect(r.raw).toEqual([]);
+  });
+});

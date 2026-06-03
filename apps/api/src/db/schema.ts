@@ -1115,8 +1115,17 @@ export const excelImports = pgTable(
     stepUpJti: text('step_up_jti'),
     // Envelope-encrypted JSONB snapshot of the Inspection Review sheet
     // (read-only per ADR §3.4; not promoted to native inspection rows).
+    // S5 sec-F2 / priv-F2 close-out: sealed-box-encrypted in browser
+    // before upload; server stores ciphertext + sealed DEK as-is.
     inspectionReviewSnapshotCt: bytea('inspection_review_snapshot_ct'),
     inspectionReviewSnapshotDekCt: bytea('inspection_review_snapshot_dek_ct'),
+    // S5 priv-F6 close-out: envelope-encrypted JSONB of the Minutes
+    // sheet's meeting metadata (meeting_date, quorum, attendance,
+    // workbook_version). The parser already produces the shape; the
+    // route now persists it. Sealed-box-encrypted in browser; sensitive
+    // because attendance lists meeting attendees by name.
+    meetingMetadataCt: bytea('meeting_metadata_ct'),
+    meetingMetadataDekCt: bytea('meeting_metadata_dek_ct'),
     auditIdx: bigint('audit_idx', { mode: 'number' })
       .notNull()
       .references(() => auditLog.idx, { onDelete: 'restrict', onUpdate: 'restrict' }),

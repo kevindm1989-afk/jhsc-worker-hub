@@ -190,6 +190,29 @@ export function UploadDropZone({
         Up to 10 MB. .xlsx or .xlsm only. Parsing happens on this device — the file never leaves
         your browser.
       </p>
+      {/* S5 priv-F15 close-out: in-product data-handling notice on the
+          upload step. The runbook (§3 + §6) is the canonical source; the
+          drop-zone surfaces the three documentary points the rep needs
+          before they pick a file. */}
+      <details className="mt-3 max-w-sm text-left text-[11px] text-muted-foreground">
+        <summary className="cursor-pointer select-none rounded px-1 py-0.5 hover:bg-muted focus:outline-none focus:ring-2 focus:ring-ring">
+          How your data is handled
+        </summary>
+        <ul className="mt-1 ml-4 list-disc space-y-1">
+          <li>
+            Parsing runs entirely on your device. The raw workbook bytes never reach the server.
+          </li>
+          <li>
+            Sensitive fields (filename, descriptions, attendance, inspection-review notes) are
+            sealed-box-encrypted in your browser before any API call.
+          </li>
+          <li>
+            The PII heuristic is best-effort and over-flags on purpose. Rename your file before
+            upload if it carries the workplace name (e.g. &ldquo;JHSC Minutes &mdash; [Workplace]
+            Q3.xlsx&rdquo;).
+          </li>
+        </ul>
+      </details>
       <input
         id="excel-import-file-input"
         ref={inputRef}

@@ -172,10 +172,19 @@ export interface ExcelImportListItem {
 export interface ExcelImportDetail {
   readonly id: string;
   readonly status: ExcelImportStatus;
-  readonly sourceFilename: string;
+  /** Decrypted filename — present only when the server's step-up gate
+   * passed (S5 sec-F7 / priv-F11 close-out). When the gate fails the
+   * server returns `sourceFilename: null + sourceFilenameMasked: true`
+   * and the UI renders a "tap to reveal" affordance. */
+  readonly sourceFilename: string | null;
+  readonly sourceFilenameMasked: boolean;
   readonly sourceSha256: string;
   readonly schemaVersion: ExcelImportSchemaVersion;
   readonly rowCount: number;
+  /** Decrypted Inspection Review snapshot — present only post-step-up. */
+  readonly inspectionReviewSnapshot?: string | null;
+  /** Decrypted Meeting metadata blob — present only post-step-up. */
+  readonly meetingMetadata?: string | null;
   readonly createdAt: string;
   readonly previewedAt: string | null;
   readonly committedAt: string | null;
@@ -203,14 +212,24 @@ export interface ExcelImportItemsPage {
 }
 
 export interface CreateExcelImportBody {
-  readonly sourceFilename: string;
+  // S5 sec-F1 / priv-F1 close-out: the source filename is sealed-box-
+  // encrypted in the BROWSER before the POST. The route's Zod schema
+  // is strict: a legacy plaintext `sourceFilename` field is rejected.
+  readonly sourceFilenameCt: string;
+  readonly sourceFilenameSealedDek: string;
   readonly sourceSha256: string;
   readonly schemaVersion: ExcelImportSchemaVersion;
   readonly rowCount: number;
-  /** Optional opaque JSONB snapshot of the Inspection Review sheet
-   * (the worker returns `{rows: string[][]}`); the server canonical-
-   * JSON-stringifies before envelope encryption. */
-  readonly inspectionReviewSnapshot?: Record<string, unknown>;
+  /** Optional sealed-box-encrypted Inspection Review snapshot (the
+   * parser's `{rows: string[][]}` canonical-JSON-stringified). The
+   * server stores the bytes as-is; only the workplace private key
+   * (held in Fly Secrets) can decrypt. S5 sec-F2 / priv-F2 close-out. */
+  readonly inspectionReviewSnapshotCt?: string;
+  readonly inspectionReviewSnapshotSealedDek?: string;
+  /** Optional sealed-box-encrypted Meeting metadata blob (meeting_date,
+   * quorum, attendance, workbook_version). S5 priv-F6 close-out. */
+  readonly meetingMetadataCt?: string;
+  readonly meetingMetadataSealedDek?: string;
 }
 
 export interface CreateExcelImportResponse {

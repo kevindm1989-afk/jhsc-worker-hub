@@ -70,11 +70,8 @@ import { getDb } from '../../db/client';
 import { authMiddleware, checkStepUpFreshness } from '../../auth/step-up';
 import { idempotencyKey } from '../../middleware/idempotency';
 import { rateLimit } from '../../middleware/rate-limit';
-import {
-  sealExcelImportField,
-  sealOptionalExcelImportField,
-  openExcelImportField,
-} from '../../excel-imports/crypto';
+import { openExcelImportField, openOptionalExcelImportField } from '../../excel-imports/crypto';
+import { getActiveWorkplacePublicKey } from '../../evidence/workplace-key';
 import { allocateSequenceNumber } from '../action-items';
 
 export const excelImportsRoute = new Hono();
@@ -171,19 +168,57 @@ class ExcelImportWriteAborted extends Error {
 const uuidParam = z.string().uuid();
 const isoDate = z.string().regex(/^\d{4}-\d{2}-\d{2}$/, 'must be YYYY-MM-DD');
 const hex64 = z.string().regex(/^[0-9a-f]{64}$/, 'must be 64-char lowercase hex (SHA-256)');
+// Base64 strings carrying the v=0x02 sealed-box envelope + sealed DEK
+// produced in the browser. Length bounds reflect the realistic size of
+// a filename / Inspection Review snapshot / Meeting metadata blob:
+// the envelope is `1 + 24 + plaintext + 16` bytes pre-base64, so an 8KB
+// plaintext is ~11KB base64. The sealed DEK is always
+// `32 (key) + 16 (overhead) + 32 (sender ephemeral pk) = 80` bytes pre-
+// base64 → 108 base64 chars; we cap generously at 8KB to leave room for
+// future libsodium revisions.
+const b64Ciphertext = z
+  .string()
+  .min(1)
+  .max(64 * 1024);
+const b64SealedDek = z.string().min(1).max(8192);
 
 const createBody = z
   .object({
-    sourceFilename: z.string().min(1).max(255),
+    // S5 sec-F1 / priv-F1 close-out: source filename is sealed-box-
+    // encrypted in the BROWSER before upload. The server stores the
+    // bytes as-is; no plaintext filename ever crosses the wire.
+    sourceFilenameCt: b64Ciphertext,
+    sourceFilenameSealedDek: b64SealedDek,
     sourceSha256: hex64,
     schemaVersion: z.enum(excelImportSchemaVersion),
     rowCount: z.number().int().min(0).max(50000),
-    // Optional opaque JSONB snapshot of the Inspection Review sheet.
-    // The parser produced a `{rows: string[][]}` shape; we accept any
-    // JSON object here and store the canonical-JSON form.
-    inspectionReviewSnapshot: z.record(z.unknown()).optional(),
+    // S5 sec-F2 / priv-F2 close-out: Inspection Review snapshot is
+    // sealed-box-encrypted in the browser too. Optional; absent when
+    // the workbook has no Inspection Review sheet.
+    inspectionReviewSnapshotCt: b64Ciphertext.optional(),
+    inspectionReviewSnapshotSealedDek: b64SealedDek.optional(),
+    // S5 priv-F6 close-out: Meeting metadata blob (meeting_date, quorum,
+    // attendance, workbook_version). Sealed-box-encrypted in the browser.
+    // Optional; absent on degenerate workbooks with no Minutes sheet.
+    meetingMetadataCt: b64Ciphertext.optional(),
+    meetingMetadataSealedDek: b64SealedDek.optional(),
   })
-  .strict();
+  // strict() rejects unknown keys — a client that still ships the
+  // legacy plaintext `sourceFilename` field is hard-rejected at the
+  // Zod boundary (sec-F1 close-out: NO fallback to plaintext).
+  .strict()
+  .refine(
+    (b) =>
+      (b.inspectionReviewSnapshotCt === undefined) ===
+      (b.inspectionReviewSnapshotSealedDek === undefined),
+    {
+      message: 'inspectionReviewSnapshotCt + sealedDek must be supplied together',
+    },
+  )
+  .refine(
+    (b) => (b.meetingMetadataCt === undefined) === (b.meetingMetadataSealedDek === undefined),
+    { message: 'meetingMetadataCt + sealedDek must be supplied together' },
+  );
 
 const patchBody = z.object({}).strict();
 const cancelBody = z.object({}).strict();
@@ -281,23 +316,6 @@ function bytesToHex(bytes: Uint8Array): string {
   return s;
 }
 
-/**
- * Canonical-JSON-stringify an object for stable envelope encryption.
- * Same canonicalization as @jhsc/audit so the chain hash is
- * reproducible across runtimes.
- */
-function canonicalJson(value: unknown): string {
-  return JSON.stringify(value, (_k, v) => {
-    if (v && typeof v === 'object' && !Array.isArray(v)) {
-      const obj = v as Record<string, unknown>;
-      const sorted: Record<string, unknown> = {};
-      for (const k of Object.keys(obj).sort()) sorted[k] = obj[k];
-      return sorted;
-    }
-    return v;
-  });
-}
-
 // ---------------------------------------------------------------------------
 // POST /api/excel-imports — create pending import
 // ---------------------------------------------------------------------------
@@ -311,12 +329,28 @@ excelImportsRoute.post('/', async (c) => {
   const auth = c.get('auth');
   const db = getDb();
 
-  // Envelope-encrypt the source filename (T-X19) + optional
-  // inspection-review snapshot (T-X13).
-  const filenameSealed = sealExcelImportField(body.sourceFilename);
-  const snapshotSealed = sealOptionalExcelImportField(
-    body.inspectionReviewSnapshot ? canonicalJson(body.inspectionReviewSnapshot) : null,
-  );
+  // S5 sec-F1 / sec-F2 / priv-F6 close-out: the route does NOT encrypt
+  // anything — the browser sealed the filename, the optional Inspection
+  // Review snapshot, and the optional Meeting metadata blob before
+  // upload. The server stores the raw bytes as-is into the matching
+  // _ct / _dek_ct column pair. Decryption happens only via the
+  // step-up-gated reveal path (GET /:id under fresh step-up).
+  const filenameCtBytes = base64ToBytes(body.sourceFilenameCt);
+  const filenameDekCtBytes = base64ToBytes(body.sourceFilenameSealedDek);
+  const snapshotCtBytes =
+    body.inspectionReviewSnapshotCt !== undefined
+      ? base64ToBytes(body.inspectionReviewSnapshotCt)
+      : null;
+  const snapshotDekCtBytes =
+    body.inspectionReviewSnapshotSealedDek !== undefined
+      ? base64ToBytes(body.inspectionReviewSnapshotSealedDek)
+      : null;
+  const meetingCtBytes =
+    body.meetingMetadataCt !== undefined ? base64ToBytes(body.meetingMetadataCt) : null;
+  const meetingDekCtBytes =
+    body.meetingMetadataSealedDek !== undefined
+      ? base64ToBytes(body.meetingMetadataSealedDek)
+      : null;
   const sourceSha256Bytes = hexToBytes(body.sourceSha256);
 
   const importId = crypto.randomUUID();
@@ -341,16 +375,19 @@ excelImportsRoute.post('/', async (c) => {
         source_filename_ct, source_filename_dek_ct,
         source_sha256, schema_version, row_count, status,
         inspection_review_snapshot_ct, inspection_review_snapshot_dek_ct,
+        meeting_metadata_ct, meeting_metadata_dek_ct,
         audit_idx
       )
       VALUES (
         ${importId}, ${auth.userId},
-        ${Buffer.from(filenameSealed.ct) as unknown as Uint8Array},
-        ${Buffer.from(filenameSealed.dekCt) as unknown as Uint8Array},
+        ${Buffer.from(filenameCtBytes) as unknown as Uint8Array},
+        ${Buffer.from(filenameDekCtBytes) as unknown as Uint8Array},
         ${Buffer.from(sourceSha256Bytes) as unknown as Uint8Array},
         ${body.schemaVersion}, ${body.rowCount}, 'pending',
-        ${snapshotSealed ? (Buffer.from(snapshotSealed.ct) as unknown as Uint8Array) : null},
-        ${snapshotSealed ? (Buffer.from(snapshotSealed.dekCt) as unknown as Uint8Array) : null},
+        ${snapshotCtBytes ? (Buffer.from(snapshotCtBytes) as unknown as Uint8Array) : null},
+        ${snapshotDekCtBytes ? (Buffer.from(snapshotDekCtBytes) as unknown as Uint8Array) : null},
+        ${meetingCtBytes ? (Buffer.from(meetingCtBytes) as unknown as Uint8Array) : null},
+        ${meetingDekCtBytes ? (Buffer.from(meetingDekCtBytes) as unknown as Uint8Array) : null},
         ${chainRow.idx}
       )
       RETURNING created_at::text AS created_at
@@ -612,6 +649,64 @@ excelImportsRoute.post('/:id/commit', async (c) => {
         });
       }
 
+      // S5 sec-F3 close-out: server-side reconciliation re-run. Prior to
+      // S5 the route trusted the client-asserted item.status as the
+      // conflict gate; per the security review, the canonical
+      // classifier is the SERVER, not the browser. We re-validate every
+      // 'created' row against the live action_items pool: if any
+      // content_hash collides with a live action_items row, that's a
+      // server-side conflict the rep must resolve in preview (not a
+      // create the server should accept). The client's status is
+      // ADVISORY ONLY.
+      //
+      // Lookup index: build a Set of content_hash bytes that the import
+      // claims are 'created' rows, then SELECT action_items whose
+      // source_excel_hash already lives at that hash. Any hit is a
+      // server-side conflict.
+      const createdItemHashes: Buffer[] = [];
+      for (const r of itemRows) {
+        if (r.status === 'created') {
+          createdItemHashes.push(Buffer.from(r.content_hash));
+        }
+      }
+      if (createdItemHashes.length > 0) {
+        // Cross-check: the same content_hash already lives on a live
+        // action_items row (via the import_items provenance join +
+        // action_item_id pointer + a content_hash existing on action_
+        // items.source_excel_hash). The simpler, equivalent check is:
+        // for each candidate 'created' content_hash, does any prior
+        // excel_import_items row in the same workplace point at a live
+        // action_items row with the same content_hash? Single-tenant
+        // scope reduces this to "any other import that committed this
+        // content_hash and whose action_item is not Cancelled".
+        const conflictRows = (await tx.execute(sql`
+          SELECT encode(eii.content_hash, 'hex') AS content_hash_hex
+          FROM excel_import_items eii
+          JOIN action_items ai ON ai.id = eii.action_item_id
+          WHERE eii.action_item_id IS NOT NULL
+            AND eii.import_id != ${idParsed.data}
+            AND ai.status != 'Cancelled'
+            AND eii.content_hash IN (${sql.join(
+              createdItemHashes.map((b) => sql`${b as unknown as Uint8Array}`),
+              sql`, `,
+            )})
+        `)) as unknown as Array<{ content_hash_hex: string }>;
+        if (conflictRows.length > 0) {
+          // Client claimed these as 'created' but the server reconciles
+          // them as conflicts. Reject the commit; the rep must re-open
+          // the preview and reconcile (S5 sec-F3 close-out — the
+          // server's classification is canonical).
+          throw new ExcelImportWriteAborted({
+            status: 422,
+            body: {
+              error: 'conflicts_detected_server_side',
+              count: conflictRows.length,
+              contentHashes: conflictRows.map((r) => r.content_hash_hex),
+            },
+          });
+        }
+      }
+
       let createdCount = 0;
       let updatedCount = 0;
       let skippedCount = 0;
@@ -691,6 +786,18 @@ excelImportsRoute.post('/:id/commit', async (c) => {
             resourceId: newActionItemId,
           });
 
+          // S5 sec-F6 close-out: idempotent retry. A transient 5xx
+          // mid-commit (Idempotency-Key middleware doesn't cache 5xx;
+          // line 250 of apps/api/src/middleware/idempotency.ts) leaves
+          // the import row at status='preview' but with the per-item
+          // anchors partially fired. The retry walks every item; a
+          // create that already happened on the prior attempt would
+          // raise a PRIMARY KEY violation here on the
+          // newActionItemId = clientId match. ON CONFLICT (id) DO
+          // NOTHING makes the per-row INSERT idempotent; the per-row
+          // chain anchor still fires (audit_log's idx is monotonic
+          // and additive, never replayed). The runbook (§5 retry
+          // semantics) documents the trade-off.
           await tx.execute(sql`
             INSERT INTO action_items (
               id, sequence_number, type, type_subtype,
@@ -716,6 +823,7 @@ excelImportsRoute.post('/:id/commit', async (c) => {
               ${ai.startDate}, ${ai.targetDate ?? null}, ${ai.closedDate ?? null},
               'excel_import', ${idParsed.data}, ${ai.tags as unknown as string[]}::text[]
             )
+            ON CONFLICT (id) DO NOTHING
           `);
 
           // Bootstrap action_item_moves row (mirror 1.6 create path).
@@ -1250,6 +1358,8 @@ excelImportsRoute.get('/:id', async (c) => {
       source_filename_ct, source_filename_dek_ct,
       encode(source_sha256, 'hex') AS source_sha256_hex,
       schema_version, row_count,
+      inspection_review_snapshot_ct, inspection_review_snapshot_dek_ct,
+      meeting_metadata_ct, meeting_metadata_dek_ct,
       created_at::text AS created_at,
       previewed_at::text AS previewed_at,
       committed_at::text AS committed_at,
@@ -1268,6 +1378,10 @@ excelImportsRoute.get('/:id', async (c) => {
     source_sha256_hex: string;
     schema_version: string;
     row_count: number;
+    inspection_review_snapshot_ct: Uint8Array | null;
+    inspection_review_snapshot_dek_ct: Uint8Array | null;
+    meeting_metadata_ct: Uint8Array | null;
+    meeting_metadata_dek_ct: Uint8Array | null;
     created_at: string;
     previewed_at: string | null;
     committed_at: string | null;
@@ -1278,19 +1392,81 @@ excelImportsRoute.get('/:id', async (c) => {
   if (rows.length === 0) return c.json({ error: 'not_found' }, 404);
   const r = rows[0]!;
   if (r.imported_by_user_id !== auth.userId) {
+    // S5 priv-F12: 404-vs-403 enumeration posture — deliberately 404
+    // on cross-actor reads to avoid leaking row existence to another
+    // rep. The single-tenant scope makes this irrelevant today but
+    // the posture documents the multi-rep future correctly.
     return c.json({ error: 'not_found' }, 404);
   }
-  const sourceFilename = openExcelImportField({
-    ct: r.source_filename_ct,
-    dekCt: r.source_filename_dek_ct,
+
+  // S5 sec-F7 / priv-F11 close-out: the source filename + the
+  // Inspection Review snapshot + the Meeting metadata are decrypted
+  // only when the rep proves fresh step-up. Without step-up we return
+  // a MASKED detail response that carries only the structural metadata
+  // — no plaintext filename / snapshot / metadata crosses the wire.
+  //
+  // The reveal endpoint pattern from 1.7 evidence inspired this shape:
+  // a list-or-summary read does not require step-up; a decrypt does.
+  const challenge = checkStepUpFreshness(auth, {
+    action: 'excel_import.read',
+    maxAgeSeconds: 60,
   });
+  if (challenge) {
+    // Mask: structural metadata only; clients render
+    // "<filename hidden — tap to reveal>" with a 401 dispatch into the
+    // step-up modal. The hash prefix is the rep's grep handle.
+    return c.json({
+      id: r.id,
+      status: r.status as ExcelImportStatus,
+      sourceFilename: null,
+      sourceFilenameMasked: true,
+      sourceSha256: r.source_sha256_hex,
+      schemaVersion: r.schema_version as ExcelImportSchemaVersion,
+      rowCount: Number(r.row_count),
+      createdAt: r.created_at,
+      previewedAt: r.previewed_at,
+      committedAt: r.committed_at,
+      cancelledAt: r.cancelled_at,
+      reversedAt: r.reversed_at,
+      auditIdx: Number(r.audit_idx),
+    });
+  }
+
+  // Step-up clear: open the workplace private key once and decrypt
+  // every sealed field. The opener zeros the private key after each
+  // use; we still want a single opener call so the private key opens
+  // exactly once per detail read (the openExcelImportField helper
+  // opens / decrypts / zeros end-to-end).
+  const workplaceKey = await getActiveWorkplacePublicKey(db);
+  if (!workplaceKey) {
+    return c.json({ error: 'workplace_key_unavailable' }, 500);
+  }
+
+  const sourceFilename = await openExcelImportField(db, workplaceKey.id, {
+    ct: Uint8Array.from(r.source_filename_ct),
+    dekCt: Uint8Array.from(r.source_filename_dek_ct),
+  });
+  const inspectionReviewSnapshot = await openOptionalExcelImportField(db, workplaceKey.id, {
+    ct: r.inspection_review_snapshot_ct ? Uint8Array.from(r.inspection_review_snapshot_ct) : null,
+    dekCt: r.inspection_review_snapshot_dek_ct
+      ? Uint8Array.from(r.inspection_review_snapshot_dek_ct)
+      : null,
+  });
+  const meetingMetadata = await openOptionalExcelImportField(db, workplaceKey.id, {
+    ct: r.meeting_metadata_ct ? Uint8Array.from(r.meeting_metadata_ct) : null,
+    dekCt: r.meeting_metadata_dek_ct ? Uint8Array.from(r.meeting_metadata_dek_ct) : null,
+  });
+
   return c.json({
     id: r.id,
     status: r.status as ExcelImportStatus,
     sourceFilename,
+    sourceFilenameMasked: false,
     sourceSha256: r.source_sha256_hex,
     schemaVersion: r.schema_version as ExcelImportSchemaVersion,
     rowCount: Number(r.row_count),
+    inspectionReviewSnapshot,
+    meetingMetadata,
     createdAt: r.created_at,
     previewedAt: r.previewed_at,
     committedAt: r.committed_at,

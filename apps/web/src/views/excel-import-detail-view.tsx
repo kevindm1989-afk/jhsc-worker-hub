@@ -17,6 +17,8 @@ import { Link, useParams } from 'react-router-dom';
 import {
   ChevronLeft,
   CircleSlash,
+  Eye,
+  EyeOff,
   FileSpreadsheet,
   Hash,
   Lock,
@@ -182,9 +184,19 @@ function ExcelImportDetailInner({ id }: { id: string }): JSX.Element {
           </span>
           <ImportStatusBadge status={detail.status} />
         </div>
+        {/* S5 priv-F10 close-out: h1 carries import id + status; the
+            source filename was the headline previously, which leaks
+            workplace identity in print + screenshots + screen-shares.
+            The filename lives as a smaller secondary line below + is
+            masked-by-default until the rep explicitly reveals (S5
+            sec-F7 / priv-F11). */}
         <h1 className="mt-1 text-2xl font-semibold tracking-tight text-foreground md:text-3xl">
-          {detail.sourceFilename}
+          Excel import {detail.id.slice(0, 8)}
         </h1>
+        <FilenameRevealLine
+          sourceFilename={detail.sourceFilename}
+          sourceFilenameMasked={detail.sourceFilenameMasked}
+        />
         <div className="mt-1 flex flex-wrap items-center gap-x-2 gap-y-0.5 text-xs text-muted-foreground">
           <span className="inline-flex items-center gap-1">
             <Hash className="h-3 w-3" strokeWidth={1.75} aria-hidden="true" />
@@ -321,7 +333,14 @@ function ExcelImportDetailInner({ id }: { id: string }): JSX.Element {
       <ReverseConfirmDialog
         open={reverseOpen}
         importId={detail.id}
-        sourceFilename={detail.sourceFilename}
+        // S5 priv-F10 close-out: pass the hash-prefix when the filename
+        // is masked. The reverse-confirm dialog is itself a print /
+        // screenshot surface; the filename should not appear unless
+        // the rep has reveal-cleared (and even then, only if they
+        // explicitly opened the reveal-line above).
+        sourceFilename={
+          detail.sourceFilename ?? `import ${detail.id.slice(0, 8)} (filename hidden)`
+        }
         committedAt={detail.committedAt ?? new Date().toISOString()}
         createdCount={counts.created}
         updatedCount={counts.updated}
@@ -342,6 +361,70 @@ function ExcelImportDetailInner({ id }: { id: string }): JSX.Element {
 // ---------------------------------------------------------------------------
 // Sub-components
 // ---------------------------------------------------------------------------
+
+/**
+ * Render the source filename on a secondary line below the h1.
+ *
+ * Three states:
+ *   1. The server returned `sourceFilenameMasked: true` (no fresh
+ *      step-up) — render a "tap to reveal" affordance + a step-up
+ *      dispatch on click.
+ *   2. The server returned the decrypted filename — render it INLINE
+ *      but hidden-by-default; the rep taps "Show" to expand.
+ *   3. The filename is absent (e.g. pending import without a sealed
+ *      filename column populated yet) — render nothing.
+ *
+ * S5 priv-F10 close-out: a print / screenshot / screen-share never
+ * captures the filename unless the rep explicitly opened the reveal +
+ * cleared step-up. This is the documentary mirror of the 1.7 evidence
+ * reveal pattern.
+ */
+function FilenameRevealLine({
+  sourceFilename,
+  sourceFilenameMasked,
+}: {
+  sourceFilename: string | null;
+  sourceFilenameMasked: boolean;
+}): JSX.Element | null {
+  const [revealed, setRevealed] = useState(false);
+  if (sourceFilenameMasked) {
+    // The server didn't return the plaintext (step-up not fresh).
+    // Render the "tap to reveal" affordance; the rep has to dispatch
+    // a step-up via the existing modal (the API returns 401 with
+    // WWW-Authenticate, which the typed client already routes through
+    // stepUpEmitter).
+    return (
+      <div className="mt-1 flex items-center gap-1.5 text-xs text-muted-foreground">
+        <Lock className="h-3 w-3" strokeWidth={1.75} aria-hidden="true" />
+        <span>Filename hidden — step-up required to reveal.</span>
+      </div>
+    );
+  }
+  if (!sourceFilename) return null;
+  return (
+    <div className="mt-1 flex items-center gap-1.5 text-xs text-muted-foreground">
+      <button
+        type="button"
+        onClick={() => setRevealed((v) => !v)}
+        className="inline-flex items-center gap-1 rounded px-1.5 py-0.5 hover:bg-muted focus:outline-none focus:ring-2 focus:ring-ring"
+        aria-pressed={revealed}
+        aria-label={revealed ? 'Hide source filename' : 'Show source filename'}
+      >
+        {revealed ? (
+          <EyeOff className="h-3 w-3" strokeWidth={1.75} aria-hidden="true" />
+        ) : (
+          <Eye className="h-3 w-3" strokeWidth={1.75} aria-hidden="true" />
+        )}
+        <span>{revealed ? 'Hide filename' : 'Show filename'}</span>
+      </button>
+      {revealed ? (
+        <code className="font-mono text-foreground">{sourceFilename}</code>
+      ) : (
+        <span className="font-mono italic">workbook.xlsx</span>
+      )}
+    </div>
+  );
+}
 
 function BackLink(): JSX.Element {
   return (

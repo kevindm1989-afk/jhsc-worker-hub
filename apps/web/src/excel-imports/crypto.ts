@@ -27,6 +27,11 @@
 // key for sealed-box. Both shapes coexist in the system.
 
 import sodium from 'libsodium-wrappers';
+import {
+  canonicalJsonStringify,
+  sealStringForWorkplaceKey,
+  type SealedExcelField,
+} from '@jhsc/excel-import';
 
 let sodiumReady: Promise<void> | null = null;
 async function ready(): Promise<void> {
@@ -37,6 +42,117 @@ async function ready(): Promise<void> {
 const WIRE_VERSION = 0x02;
 const KEY_BYTES = 32;
 const NONCE_BYTES = 24;
+
+// ---------------------------------------------------------------------------
+// Workplace key cache + refresh (S5 sec-F1 / priv-F16)
+// ---------------------------------------------------------------------------
+//
+// The view caches the workplace public key on mount; this helper re-
+// fetches if the cache is stale (>1 hour) to limit the workplace-key-
+// rotation-during-preview surface (T-X33). The save handler calls this
+// before sealing any field. A 409 from the route on a stale key still
+// drops the rep into the preview-lost path documented in the runbook
+// (§4 priv-F16 residual).
+
+const WORKPLACE_KEY_TTL_MS = 60 * 60 * 1000; // 1 hour
+
+export interface CachedWorkplaceKey {
+  readonly id: string;
+  readonly publicKey: Uint8Array;
+  readonly fetchedAtMs: number;
+}
+
+let cachedWorkplaceKey: CachedWorkplaceKey | null = null;
+
+/**
+ * Get the workplace public key, fetching from /api/auth/session if the
+ * cache is empty or stale. Returns null when the session response has
+ * no workplaceKey (first-run not complete).
+ *
+ * S5 priv-F16 close-out: stale cache is refreshed before the save
+ * handler attempts to seal fields. The TTL of 1h matches the typical
+ * preview-review session length.
+ */
+export async function getOrRefreshWorkplaceKey(): Promise<CachedWorkplaceKey | null> {
+  const now = Date.now();
+  if (cachedWorkplaceKey && now - cachedWorkplaceKey.fetchedAtMs < WORKPLACE_KEY_TTL_MS) {
+    return cachedWorkplaceKey;
+  }
+  try {
+    const res = await fetch('/api/auth/session', {
+      credentials: 'same-origin',
+      headers: { 'X-Requested-With': 'jhsc-web' },
+    });
+    if (!res.ok) return cachedWorkplaceKey;
+    const body = (await res.json()) as {
+      workplaceKey?: { id: string; publicKeyB64: string } | null;
+    };
+    if (!body.workplaceKey) return cachedWorkplaceKey;
+    cachedWorkplaceKey = {
+      id: body.workplaceKey.id,
+      publicKey: b64ToBytes(body.workplaceKey.publicKeyB64),
+      fetchedAtMs: now,
+    };
+    return cachedWorkplaceKey;
+  } catch {
+    return cachedWorkplaceKey;
+  }
+}
+
+/**
+ * Seed the cache from the view's initial session fetch so the helper
+ * does not double-fetch on mount. Idempotent.
+ */
+export function seedWorkplaceKeyCache(key: { id: string; publicKey: Uint8Array }): void {
+  cachedWorkplaceKey = { id: key.id, publicKey: key.publicKey, fetchedAtMs: Date.now() };
+}
+
+/** Test-only — clear the in-process workplace key cache. */
+export function _resetWorkplaceKeyCacheForTests(): void {
+  cachedWorkplaceKey = null;
+}
+
+// ---------------------------------------------------------------------------
+// Import-level sealed-box helpers (S5 sec-F1 / sec-F2 / priv-F6)
+// ---------------------------------------------------------------------------
+
+export interface SealedFieldB64 {
+  /** Base64 of the v=0x02 envelope ciphertext. */
+  readonly ctB64: string;
+  /** Base64 of `crypto_box_seal(DEK, workplacePublicKey)`. */
+  readonly dekCtB64: string;
+}
+
+/**
+ * Seal the import-level source filename for the POST body. Mirrors the
+ * 1.7 evidence sealEvidence shape; the route stores the bytes as-is
+ * into `excel_imports.source_filename_ct + source_filename_dek_ct`.
+ *
+ * The plaintext filename NEVER crosses the wire — the v=0x02 envelope
+ * is the only thing the server sees.
+ */
+export async function sealExcelImportFilename(
+  plaintext: string,
+  workplacePublicKey: Uint8Array,
+): Promise<SealedFieldB64> {
+  const sealed: SealedExcelField = await sealStringForWorkplaceKey(plaintext, workplacePublicKey);
+  return { ctB64: bytesToB64(sealed.ciphertext), dekCtB64: bytesToB64(sealed.sealedDek) };
+}
+
+/**
+ * Seal an arbitrary JSON-serializable snapshot — canonical-JSON-
+ * stringified before sealing so the produced bytes are deterministic
+ * across runtimes. Used for the Inspection Review snapshot (S5 sec-F2)
+ * and the Meeting metadata blob (S5 priv-F6).
+ */
+export async function sealExcelImportJsonSnapshot(
+  snapshot: unknown,
+  workplacePublicKey: Uint8Array,
+): Promise<SealedFieldB64> {
+  const canonical = canonicalJsonStringify(snapshot);
+  const sealed: SealedExcelField = await sealStringForWorkplaceKey(canonical, workplacePublicKey);
+  return { ctB64: bytesToB64(sealed.ciphertext), dekCtB64: bytesToB64(sealed.sealedDek) };
+}
 
 export interface SealedField {
   /** Base64 of `v=0x02 || nonce || ciphertext+tag` */

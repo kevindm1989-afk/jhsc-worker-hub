@@ -1,62 +1,95 @@
-// Envelope helpers for the two sensitive excel_imports columns (ADR-0010
-// §3.8 / SECURITY T-X13 / T-X19):
+// Envelope helpers for the three sensitive excel_imports columns
+// (ADR-0010 §3.8 + SECURITY T-X13 / T-X19 + the S5 sec-F1 / sec-F2 /
+// priv-F1 / priv-F2 / priv-F6 close-outs):
 //
-//   - excel_imports.source_filename_ct — envelope-encrypted source
-//     filename (T-X19 — filenames frequently leak workplace identity).
-//   - excel_imports.inspection_review_snapshot_ct — envelope-encrypted
-//     JSONB snapshot of the workbook's Inspection Review sheet (T-X13
-//     — the snapshot may carry supervisor / witness names).
+//   - excel_imports.source_filename_ct — filename (T-X19 — filenames
+//     frequently leak workplace identity).
+//   - excel_imports.inspection_review_snapshot_ct — Inspection Review
+//     JSONB snapshot (T-X13 — may carry supervisor + witness names).
+//   - excel_imports.meeting_metadata_ct — Meeting metadata blob (S5
+//     priv-F6 close-out — attendance carries meeting attendee names).
 //
-// Mirrors apps/api/src/recommendations/crypto.ts (same shape as the
-// other 1.6+ encryption boundaries). The route layer never touches
-// the KEK directly; this file is the single encryption boundary for
-// the excel-imports module.
+// S5 SHIFT: prior to S5 the route encrypted these fields server-side
+// using the master KEK (sealWithEnvelope). Per CLAUDE.md non-negotiable
+// #11 + ADR-0010 §3, the fields are now sealed-box-encrypted in the
+// BROWSER before any API call, using the workplace public key. The
+// server stores the raw bytes as-is and decrypts via the workplace
+// private key (held under the master KEK, opened one-shot for each
+// reveal — same pattern as 1.7 evidence decrypt at apps/api/src/
+// routes/evidence/index.ts).
 //
-// The route handler stores the canonical-JSON-stringified inspection-
-// review snapshot under the same envelope pair as the source filename
-// — both are short text blobs that fit comfortably inside one DEK
-// envelope.
+// The opener (openExcelImportField) is the only place the workplace
+// private key briefly enters process memory; it zeros immediately
+// after use.
 
-import { openWithEnvelope, sealWithEnvelope } from '@jhsc/crypto';
-import { getMasterKey } from '../auth/crypto-stub';
+import sodium from 'libsodium-wrappers-sumo';
+import type { DrizzlePg } from '@jhsc/audit';
+import { openWorkplacePrivateKey } from '../evidence/workplace-key';
 
-export interface EncryptedField {
+const WIRE_VERSION = 0x02;
+const NONCE_BYTES = 24;
+
+export interface SealedExcelImportField {
+  /** v=0x02 envelope ciphertext (sealed-box DEK encrypts; XChaCha20-Poly1305 body). */
   readonly ct: Uint8Array;
+  /** crypto_box_seal(DEK, workplace_public_key). */
   readonly dekCt: Uint8Array;
 }
 
-/** Seal a non-empty plaintext under the workplace KEK envelope. */
-export function sealExcelImportField(plaintext: string): EncryptedField {
-  const sealed = sealWithEnvelope(new TextEncoder().encode(plaintext), getMasterKey());
-  return { ct: sealed.ciphertext, dekCt: sealed.dekSealed };
-}
+/**
+ * Open a sealed-box-encrypted excel-imports field back to its UTF-8
+ * plaintext. The caller passes the workplace_key_id (from the active
+ * workplace_keys row) so the function can open the private key once,
+ * decrypt, then zero.
+ *
+ * Mirrors the 1.7 evidence decrypt path. The workplace private key
+ * NEVER persists in memory beyond this function's stack.
+ */
+export async function openExcelImportField(
+  db: DrizzlePg,
+  workplaceKeyId: string,
+  field: SealedExcelImportField,
+): Promise<string> {
+  await sodium.ready;
+  const privateKey = await openWorkplacePrivateKey(db, workplaceKeyId);
+  let dek: Uint8Array;
+  try {
+    const publicKey = sodium.crypto_scalarmult_base(privateKey);
+    dek = sodium.crypto_box_seal_open(Uint8Array.from(field.dekCt), publicKey, privateKey);
+  } finally {
+    sodium.memzero(privateKey);
+  }
 
-/** Open an envelope-sealed excel-import field back to its UTF-8 plaintext. */
-export function openExcelImportField(field: EncryptedField): string {
-  const plaintextBytes = openWithEnvelope(
-    { ciphertext: field.ct, dekSealed: field.dekCt },
-    getMasterKey(),
-  );
-  return new TextDecoder().decode(plaintextBytes);
+  let plaintext: Uint8Array;
+  try {
+    // v=0x02 wire format: 1 byte version || 24 bytes nonce || ciphertext+tag.
+    if (field.ct.length < 1 + NONCE_BYTES || field.ct[0] !== WIRE_VERSION) {
+      throw new Error('unexpected excel-import ciphertext format');
+    }
+    const nonce = field.ct.slice(1, 1 + NONCE_BYTES);
+    const body = field.ct.slice(1 + NONCE_BYTES);
+    plaintext = sodium.crypto_aead_xchacha20poly1305_ietf_decrypt(null, body, null, nonce, dek);
+  } finally {
+    sodium.memzero(dek);
+  }
+
+  const out = new TextDecoder().decode(plaintext);
+  // Best-effort zero of the plaintext byte buffer; the returned string
+  // already lives in the V8 heap as an immutable copy.
+  sodium.memzero(plaintext);
+  return out;
 }
 
 /**
- * Seal an optional plaintext; returns null on empty / null / undefined.
- * Used for the inspection_review_snapshot pair which is nullable
- * (workbooks without the snapshot sheet land NULL on both columns).
+ * Open a nullable ciphertext pair; returns null when either column is
+ * NULL on the DB row (e.g. the inspection_review_snapshot pair was
+ * never populated because the workbook had no Inspection Review sheet).
  */
-export function sealOptionalExcelImportField(
-  plaintext: string | null | undefined,
-): EncryptedField | null {
-  if (plaintext === null || plaintext === undefined || plaintext === '') return null;
-  return sealExcelImportField(plaintext);
-}
-
-/** Open a nullable ciphertext pair; returns null when either column is NULL. */
-export function openOptionalExcelImportField(field: {
-  ct: Uint8Array | null;
-  dekCt: Uint8Array | null;
-}): string | null {
+export async function openOptionalExcelImportField(
+  db: DrizzlePg,
+  workplaceKeyId: string,
+  field: { ct: Uint8Array | null; dekCt: Uint8Array | null },
+): Promise<string | null> {
   if (field.ct === null || field.dekCt === null) return null;
-  return openExcelImportField({ ct: field.ct, dekCt: field.dekCt });
+  return openExcelImportField(db, workplaceKeyId, { ct: field.ct, dekCt: field.dekCt });
 }

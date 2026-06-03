@@ -122,9 +122,14 @@ export function scanForPii(text: string): PiiFlags {
   const raw: PiiMatch[] = [];
 
   // Collect matches per class. Regex flags include 'g' so .matchAll
-  // walks the full string. Each regex is local — no `lastIndex`
-  // leakage across calls (regex literals are recreated on each scope
-  // entry).
+  // walks the full string. The regex literals are module-scope (lines
+  // 70/77/84/100 are SINGLE shared objects), but `String.prototype.
+  // matchAll` is spec-required to clone the regex + reset lastIndex
+  // before iterating, so the shared module-scope regexes are SAFE
+  // here. Do NOT switch to .exec/.test on these globals without
+  // scoping them inside scanForPii — the latter APIs honor lastIndex
+  // and would leak state across calls. (S5 sec-F9 close-out: comment
+  // accuracy fix; the behavior was always correct.)
   for (const m of text.matchAll(NAME_SHAPE_RE)) {
     if (m[0]) raw.push({ kind: 'nameShape', match: m[0] });
   }

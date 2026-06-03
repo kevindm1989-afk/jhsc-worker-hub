@@ -41,6 +41,14 @@ export { scanForPii } from './pii';
 export type { PiiFlags, PiiMatch } from './pii';
 
 // ---------------------------------------------------------------------------
+// Sealed-box wrappers for the import-level sensitive fields (S5 sec-F1
+// / sec-F2 / priv-F1 / priv-F2 / priv-F6 close-outs).
+// ---------------------------------------------------------------------------
+
+export { sealStringForWorkplaceKey, canonicalJsonStringify } from './sealed-box';
+export type { SealedExcelField } from './sealed-box';
+
+// ---------------------------------------------------------------------------
 // Schema + parser shapes (FULL implementation in S2)
 // ---------------------------------------------------------------------------
 

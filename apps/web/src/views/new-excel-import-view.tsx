@@ -34,8 +34,12 @@ import {
 } from '@/excel-imports/api';
 import {
   b64ToBytes,
+  getOrRefreshWorkplaceKey,
   sealActionItemField,
+  sealExcelImportFilename,
+  sealExcelImportJsonSnapshot,
   sealOptionalActionItemField,
+  seedWorkplaceKeyCache,
   sha256HexOfArrayBuffer,
 } from '@/excel-imports/crypto';
 import { CommitConfirmDialog } from '@/excel-imports/commit-confirm-dialog';
@@ -116,6 +120,14 @@ function NewExcelImportInner(): JSX.Element {
   const [plan, setPlan] = useState<ReconciliationPlan | null>(null);
   const [perRow, setPerRow] = useState<Record<string, PerRowState>>({});
   const [piiFlagsByLocalId, setPiiFlagsByLocalId] = useState<Record<string, PiiFlags>>({});
+  // S5 priv-F5 close-out: extended-surface PII flags. The reconciler
+  // ran the heuristic over the four action_item fields only; per the
+  // privacy review (and ADR §3.5), the heuristic must also scan the
+  // source filename, the Minutes attendance string, and every row of
+  // the Inspection Review snapshot. The rollup row carries the counts.
+  const [filenamePiiFlags, setFilenamePiiFlags] = useState<PiiFlags | null>(null);
+  const [attendancePiiFlags, setAttendancePiiFlags] = useState<PiiFlags | null>(null);
+  const [snapshotPiiFlags, setSnapshotPiiFlags] = useState<PiiFlags | null>(null);
   const [activeSection, setActiveSection] = useState<ActionItemSection>('new_business');
   const [importId, setImportId] = useState<string | null>(null);
   const [commitOpen, setCommitOpen] = useState(false);
@@ -142,10 +154,15 @@ function NewExcelImportInner(): JSX.Element {
           workplaceKey?: { id: string; publicKeyB64: string } | null;
         };
         if (body.workplaceKey) {
-          setWorkplaceKey({
+          const key = {
             id: body.workplaceKey.id,
             publicKey: b64ToBytes(body.workplaceKey.publicKeyB64),
-          });
+          };
+          setWorkplaceKey(key);
+          // S5 priv-F16 close-out: seed the shared cache so the save
+          // handler's getOrRefreshWorkplaceKey() does not double-fetch
+          // when the cache is still fresh.
+          seedWorkplaceKeyCache(key);
         }
       } catch {
         // best-effort; the commit step surfaces the missing-key error.
@@ -155,7 +172,11 @@ function NewExcelImportInner(): JSX.Element {
 
   // Phase transitions trigger row-state initialization (per parsed row).
   const initialiseRowState = useCallback(
-    async (sheets: ParsedSheets, existingPool: ReadonlyArray<ExistingActionItemView>) => {
+    async (
+      file: File,
+      sheets: ParsedSheets,
+      existingPool: ReadonlyArray<ExistingActionItemView>,
+    ) => {
       const plan = reconcile(sheets, existingPool, crypto.randomUUID());
       setPlan(plan);
       const flags: Record<string, PiiFlags> = {};
@@ -180,6 +201,25 @@ function NewExcelImportInner(): JSX.Element {
       }
       setPiiFlagsByLocalId(flags);
       setPerRow(state);
+      // S5 priv-F5 close-out: extended-surface PII scans. The runbook
+      // (§6) documents the rationale: the four classes (name / email /
+      // phone / SIN) now run against the filename, the Minutes
+      // attendance, and the joined inspection-review cells in addition
+      // to the per-row action_item fields. The heuristic is documentary
+      // only — the fields are sealed-box-encrypted before upload
+      // regardless of the flag — but the rep gets a chance to scrub.
+      setFilenamePiiFlags(scanForPii(file.name));
+      setAttendancePiiFlags(scanForPii(sheets.metadata.attendance ?? ''));
+      const snapshotJoined = sheets.inspectionReview
+        ? sheets.inspectionReview.rows
+            .map((r) => r.join(' '))
+            .join('\n')
+            // Cap the joined input at 32KB to keep the heuristic O(n)
+            // bounded even on pathological snapshots; the SECURITY
+            // per-cell cap is 8KB and a typical sheet has <50 cells.
+            .slice(0, 32 * 1024)
+        : '';
+      setSnapshotPiiFlags(scanForPii(snapshotJoined));
     },
     [],
   );
@@ -235,7 +275,7 @@ function NewExcelImportInner(): JSX.Element {
           );
         }
         setExisting(existingPool);
-        await initialiseRowState(detection.sheets, existingPool);
+        await initialiseRowState(file, detection.sheets, existingPool);
         setPhase('preview');
       } catch (e) {
         setError(e instanceof Error ? e.message : String(e));
@@ -331,16 +371,59 @@ function NewExcelImportInner(): JSX.Element {
     setNetworkRequired(false);
     setPhase('saving_preview');
     try {
-      // Step 1: create the pending import row.
+      // S5 priv-F16 close-out: re-fetch the workplace key if the cache
+      // is stale (>1h). The save handler is the last barrier before
+      // any sealed field crosses the wire under a possibly-rotated
+      // key; better a fresh fetch + a 409 than a silent encrypt-under-
+      // old-key + server-side reject (T-X33).
+      const freshKey = (await getOrRefreshWorkplaceKey()) ?? workplaceKey;
+      const wkPub = freshKey.publicKey;
+
+      // S5 sec-F1 / sec-F2 / priv-F6 close-out: seal the source
+      // filename, the optional Inspection Review snapshot, and the
+      // optional Meeting metadata blob in the BROWSER before the POST.
+      // Per CLAUDE.md non-negotiable #11 no plaintext sensitive field
+      // crosses the wire.
+      const sealedFilename = await sealExcelImportFilename(parsed.file.name, wkPub);
       const inspReview = parsed.sheets.inspectionReview
         ? { rows: parsed.sheets.inspectionReview.rows.map((r) => r.slice()) }
-        : undefined;
+        : null;
+      const sealedSnapshot = inspReview
+        ? await sealExcelImportJsonSnapshot(inspReview, wkPub)
+        : null;
+      const meetingMetadata = parsed.sheets.metadata
+        ? {
+            meetingDate: parsed.sheets.metadata.meetingDate,
+            quorum: parsed.sheets.metadata.quorum,
+            attendance: parsed.sheets.metadata.attendance,
+            workbookVersionString: parsed.sheets.metadata.workbookVersionString,
+          }
+        : null;
+      const sealedMetadata = meetingMetadata
+        ? await sealExcelImportJsonSnapshot(meetingMetadata, wkPub)
+        : null;
+
+      // Step 1: create the pending import row. Wire format is
+      // sealed-box fields only — the legacy `sourceFilename` /
+      // `inspectionReviewSnapshot` plaintext fields no longer exist.
       const created = await excelImportsApi.create({
-        sourceFilename: parsed.file.name,
+        sourceFilenameCt: sealedFilename.ctB64,
+        sourceFilenameSealedDek: sealedFilename.dekCtB64,
         sourceSha256: parsed.sourceSha256,
         schemaVersion: 'meeting_minutes_v1',
         rowCount: parsed.sheets.rowCount,
-        inspectionReviewSnapshot: inspReview,
+        ...(sealedSnapshot
+          ? {
+              inspectionReviewSnapshotCt: sealedSnapshot.ctB64,
+              inspectionReviewSnapshotSealedDek: sealedSnapshot.dekCtB64,
+            }
+          : {}),
+        ...(sealedMetadata
+          ? {
+              meetingMetadataCt: sealedMetadata.ctB64,
+              meetingMetadataSealedDek: sealedMetadata.dekCtB64,
+            }
+          : {}),
       });
       // Step 2: build the per-row payload (envelope-encrypts sensitive
       // fields here on the client). The wire shape mirrors the route's
@@ -602,7 +685,11 @@ function NewExcelImportInner(): JSX.Element {
           plan={plan}
           effectiveDecisions={effectiveDecisions}
           piiFlagsByLocalId={piiFlagsByLocalId}
-          piiRollup={computePiiRollup(Object.values(piiFlagsByLocalId))}
+          piiRollup={computePiiRollup(Object.values(piiFlagsByLocalId), {
+            filename: filenamePiiFlags,
+            attendance: attendancePiiFlags,
+            snapshot: snapshotPiiFlags,
+          })}
           validationErrorCount={parsed.sheets.validationErrors.length}
           validationErrors={parsed.sheets.validationErrors}
           perRow={perRow}

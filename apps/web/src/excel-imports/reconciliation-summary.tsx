@@ -25,9 +25,24 @@ export interface PiiRollup {
   readonly emailShape: number;
   readonly phoneShape: number;
   readonly sinShape: number;
+  // S5 priv-F5 close-out: extended-surface flags. The four classes
+  // also run against the filename, the Minutes attendance, and the
+  // joined Inspection Review snapshot. The rep sees a documentary
+  // nudge per extra surface; the fields are sealed-box-encrypted
+  // before upload regardless of the flag.
+  readonly filenameHasAny?: boolean;
+  readonly attendanceHasAny?: boolean;
+  readonly snapshotHasAny?: boolean;
 }
 
-export function computePiiRollup(perRowFlags: ReadonlyArray<PiiFlags>): PiiRollup {
+export function computePiiRollup(
+  perRowFlags: ReadonlyArray<PiiFlags>,
+  extras?: {
+    filename?: PiiFlags | null;
+    attendance?: PiiFlags | null;
+    snapshot?: PiiFlags | null;
+  },
+): PiiRollup {
   let nameShape = 0;
   let emailShape = 0;
   let phoneShape = 0;
@@ -38,7 +53,19 @@ export function computePiiRollup(perRowFlags: ReadonlyArray<PiiFlags>): PiiRollu
     if (f.phoneShape) phoneShape++;
     if (f.sinShape) sinShape++;
   }
-  return { nameShape, emailShape, phoneShape, sinShape };
+  return {
+    nameShape,
+    emailShape,
+    phoneShape,
+    sinShape,
+    filenameHasAny: extras?.filename ? hasAnyFlag(extras.filename) : false,
+    attendanceHasAny: extras?.attendance ? hasAnyFlag(extras.attendance) : false,
+    snapshotHasAny: extras?.snapshot ? hasAnyFlag(extras.snapshot) : false,
+  };
+}
+
+function hasAnyFlag(f: PiiFlags): boolean {
+  return f.nameShape || f.emailShape || f.phoneShape || f.sinShape;
 }
 
 export interface ReconciliationSummaryProps {
@@ -184,7 +211,11 @@ function Cell({ label, count, icon: Icon, tone, ...rest }: CellProps): JSX.Eleme
 
 function PiiRollupRow({ rollup }: { rollup: PiiRollup }): JSX.Element | null {
   const total = rollup.nameShape + rollup.emailShape + rollup.phoneShape + rollup.sinShape;
-  if (total === 0) return null;
+  const extraHits =
+    (rollup.filenameHasAny ? 1 : 0) +
+    (rollup.attendanceHasAny ? 1 : 0) +
+    (rollup.snapshotHasAny ? 1 : 0);
+  if (total === 0 && extraHits === 0) return null;
   return (
     <div className="mt-3 rounded-md border border-border bg-background p-2 text-xs text-muted-foreground">
       <div className="mb-1 text-[11px] uppercase tracking-wide text-muted-foreground">
@@ -215,9 +246,36 @@ function PiiRollupRow({ rollup }: { rollup: PiiRollup }): JSX.Element | null {
           </span>
         ) : null}
       </div>
+      {/* S5 priv-F5 close-out: extended-surface flags. The four classes
+          now run against the filename, the Minutes attendance, and the
+          joined Inspection Review snapshot. These nudges surface the
+          documentary risk to the rep BEFORE the sealed-box upload (the
+          fields are sealed-box-encrypted regardless of the flag). */}
+      {extraHits > 0 ? (
+        <div className="mt-1.5 flex flex-wrap items-center gap-x-3 gap-y-1">
+          {rollup.filenameHasAny ? (
+            <span>
+              <span className="font-semibold text-amber-800">filename</span> may carry name / email
+              / phone shape — consider renaming before upload
+            </span>
+          ) : null}
+          {rollup.attendanceHasAny ? (
+            <span>
+              <span className="font-semibold text-amber-800">attendance</span> list contains
+              name-shape entries
+            </span>
+          ) : null}
+          {rollup.snapshotHasAny ? (
+            <span>
+              <span className="font-semibold text-amber-800">inspection-review snapshot</span>{' '}
+              contains name / phone / SIN shape
+            </span>
+          ) : null}
+        </div>
+      ) : null}
       <p className="mt-1 text-[11px] text-muted-foreground">
-        The heuristic over-flags on purpose. These fields are envelope-encrypted before upload
-        regardless. The flag is a chance to scrub a row before commit.
+        The heuristic over-flags on purpose. These fields are sealed-box-encrypted in your browser
+        before upload regardless. The flag is a chance to scrub before commit.
       </p>
     </div>
   );

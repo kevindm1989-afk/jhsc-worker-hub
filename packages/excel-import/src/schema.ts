@@ -648,7 +648,15 @@ async function parseActionItemRow(
       sheet: sheetName,
       rowIndex,
       column: 'Start Date',
-      reason: startText === '' ? 'required cell is empty' : `unparseable date "${startText}"`,
+      // S5 priv-F8 close-out: do NOT echo the raw cell value in the
+      // reason string. A free-text cell could carry name-shape PII;
+      // validation errors are rendered in the React preview as plain
+      // text and could leak via future error reporters / bug reports.
+      // Surface length / index only.
+      reason:
+        startText === ''
+          ? 'required cell is empty'
+          : `unparseable date (length: ${startText.length})`,
     });
     return null;
   }
@@ -672,7 +680,11 @@ async function parseActionItemRow(
       sheet: sheetName,
       rowIndex,
       column: 'Risk',
-      reason: riskRaw === '' ? 'required cell is empty' : `unrecognized value "${riskRaw}"`,
+      // S5 priv-F8 close-out: length-only; no raw value echo.
+      reason:
+        riskRaw === ''
+          ? 'required cell is empty'
+          : `unrecognized value (length: ${riskRaw.length})`,
     });
     return null;
   }
@@ -685,7 +697,7 @@ async function parseActionItemRow(
   if (targetText !== '') {
     targetDate = parseDateCell(targetCell);
     if (targetDate === null) {
-      warnings['target_date'] = `unparseable date "${targetText}"`;
+      warnings['target_date'] = `unparseable date (length: ${targetText.length})`;
     }
   }
   const closedCell = colCell('Closed Date');
@@ -694,7 +706,7 @@ async function parseActionItemRow(
   if (closedText !== '') {
     closedDate = parseDateCell(closedCell);
     if (closedDate === null) {
-      warnings['closed_date'] = `unparseable date "${closedText}"`;
+      warnings['closed_date'] = `unparseable date (length: ${closedText.length})`;
     }
   }
   if (closedDateRequired && closedDate === null) {

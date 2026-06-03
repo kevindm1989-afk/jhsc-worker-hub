@@ -88,8 +88,31 @@ CREATE TABLE "excel_imports" (
 	-- Read-only per ROADMAP scope (NOT promoted to native inspection
 	-- records — the 1.8 inspection tooling is the going-forward path).
 	-- T-X13: the snapshot may carry supervisor + witness names.
+	--
+	-- S5 sec-F2 / priv-F2 close-out: the snapshot is now sealed-box-
+	-- encrypted in the BROWSER (per CLAUDE.md non-negotiable #11). The
+	-- ciphertext + per-field DEK arrive over the wire in their sealed
+	-- form; the server stores the bytes as-is. The DEK is sealed for
+	-- the workplace public key (libsodium crypto_box_seal); only the
+	-- workplace private key (held under the master KEK on the server,
+	-- never exposed to the browser) can later open it.
 	"inspection_review_snapshot_ct" "bytea",
 	"inspection_review_snapshot_dek_ct" "bytea",
+	-- Envelope-encrypted JSONB snapshot of the Minutes sheet's meeting
+	-- metadata (meeting_date, quorum, attendance, workbook_version).
+	--
+	-- S5 priv-F6 close-out: the parser already produces a
+	-- ParsedMeetingMetadata shape; prior to S5 the route dropped the
+	-- field silently. S5 lands the persistence path in-place (this
+	-- migration is unmerged so the column is added here rather than in
+	-- a follow-on migration).
+	--
+	-- Sensitivity: attendance is the load-bearing PI field — it lists
+	-- meeting attendees by name. The pair is sealed-box-encrypted in
+	-- the browser before upload (same shape as
+	-- inspection_review_snapshot_*). Pair-NULL CHECK below.
+	"meeting_metadata_ct" "bytea",
+	"meeting_metadata_dek_ct" "bytea",
 	-- Chain-anchor link. UNIQUE 1-to-1 with the excel_import.uploaded
 	-- audit_log row.
 	"audit_idx" bigint NOT NULL,
@@ -118,6 +141,12 @@ CREATE TABLE "excel_imports" (
 	CONSTRAINT "excel_imports_inspection_review_snapshot_pair_check" CHECK (
 		("inspection_review_snapshot_ct" IS NULL AND "inspection_review_snapshot_dek_ct" IS NULL)
 		OR ("inspection_review_snapshot_ct" IS NOT NULL AND "inspection_review_snapshot_dek_ct" IS NOT NULL)
+	),
+	-- meeting_metadata pair-NULL: same posture as inspection_review
+	-- snapshot. S5 priv-F6 close-out.
+	CONSTRAINT "excel_imports_meeting_metadata_pair_check" CHECK (
+		("meeting_metadata_ct" IS NULL AND "meeting_metadata_dek_ct" IS NULL)
+		OR ("meeting_metadata_ct" IS NOT NULL AND "meeting_metadata_dek_ct" IS NOT NULL)
 	),
 	-- State-consistency CHECK: the (status, *_at) tuple must be coherent.
 	-- A drifted route handler cannot land a row claiming status='committed'
