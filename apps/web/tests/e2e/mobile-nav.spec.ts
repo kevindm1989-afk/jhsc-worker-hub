@@ -39,16 +39,11 @@ test.describe('@mobile bottom tab bar', () => {
     await expect(nav).toBeVisible();
 
     // Every locked label resolves to a tab link inside the bottom nav.
-    // role+name selectors align with the WCAG audit (S1) — no testids
-    // required.
-    for (const label of EXPECTED_TAB_LABELS) {
-      // The label may render as a shortLabel ("Recs" for Recommendations)
-      // inside the bottom tab; the link's accessible name comes from
-      // NavLink's text content. We match on the link role's
-      // accessible-name (case-insensitive substring tolerant of short
-      // labels) by checking that at least one link in the nav points
-      // at the right path.
-      const link = nav.getByRole('link', { name: new RegExp(label, 'i') }).first();
+    // role+name selectors align with the WCAG audit (S1). The label
+    // spec's pattern accepts both the full label and the shortLabel
+    // (e.g., "Recs" for Recommendations per apps/web/src/lib/tabs.ts).
+    for (const labelSpec of EXPECTED_TAB_LABELS) {
+      const link = nav.getByRole('link', { name: labelSpec.pattern }).first();
       await expect(link).toBeVisible();
     }
   });

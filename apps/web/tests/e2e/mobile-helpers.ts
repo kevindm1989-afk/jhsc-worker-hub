@@ -82,11 +82,31 @@ export async function expectTouchTargetSize(locator: Locator): Promise<void> {
  *  More); the shipped 1.11 inventory locked Minutes / Hazards /
  *  Inspections / Recommendations / More. We test the shipped lock
  *  and document the brief-divergence in
- *  `docs/release-1-mobile-test-gaps.md`. */
-export const EXPECTED_TAB_LABELS = [
-  'Minutes',
-  'Hazards',
-  'Inspections',
-  'Recommendations',
-  'More',
+ *  `docs/release-1-mobile-test-gaps.md`.
+ *
+ *  Each entry carries the full label (used for desktop sidebar matches)
+ *  AND a regex that accepts the bottom-tab shortLabel — Recommendations
+ *  renders as "Recs" inside the 5-column mobile grid (apps/web/src/lib/
+ *  tabs.ts:54). Specs that walk the bottom tab bar match on `pattern`;
+ *  specs that walk the desktop sidebar can use `label`. */
+export interface TabLabelSpec {
+  readonly label: string;
+  readonly pattern: RegExp;
+}
+
+export const EXPECTED_TAB_LABELS: readonly TabLabelSpec[] = [
+  { label: 'Minutes', pattern: /minutes/i },
+  { label: 'Hazards', pattern: /hazards/i },
+  { label: 'Inspections', pattern: /inspections/i },
+  { label: 'Recommendations', pattern: /recs|recommendations/i },
+  { label: 'More', pattern: /more/i },
 ] as const;
+
+/** When set in the environment, the SW-dependent mobile specs (offline
+ *  navigation, PWA install) run instead of skipping. The dev server
+ *  (vite + vite-plugin-pwa with devOptions.enabled=false) does not
+ *  register the SW, so these specs only carry signal when the CI job
+ *  runs against `vite build && vite preview`. A future CI job can set
+ *  E2E_WITH_SW=1 against the prod-shape server. Documented in
+ *  docs/release-1-mobile-test-gaps.md. */
+export const E2E_WITH_SW: boolean = process.env.E2E_WITH_SW === '1';

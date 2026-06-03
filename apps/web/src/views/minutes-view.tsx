@@ -31,12 +31,7 @@ export function MinutesView(): JSX.Element {
           import your existing minutes spreadsheet to load prior history.
         </p>
         <div className="mt-4 flex flex-wrap items-center justify-center gap-2">
-          <Button
-            type="button"
-            size="sm"
-            className="h-9"
-            title="Start new meeting — lands in Milestone 2.1"
-          >
+          <Button type="button" size="sm" title="Start new meeting — lands in Milestone 2.1">
             <Plus className="h-3.5 w-3.5" strokeWidth={2} aria-hidden="true" />
             Start new meeting
           </Button>
@@ -44,7 +39,6 @@ export function MinutesView(): JSX.Element {
             type="button"
             variant="outline"
             size="sm"
-            className="h-9"
             title="Import Excel — lands in Milestone 1.11"
           >
             <Upload className="h-3.5 w-3.5" strokeWidth={2} aria-hidden="true" />
