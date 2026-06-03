@@ -303,6 +303,30 @@ DATABASE_URL='<production-connection-string>' bun apps/api/scripts/seed-inspecti
 
 **Pass criterion:** the template row count matches the manifest.
 
+### 4.4a Seed the meeting agenda template (Milestone 2.1)
+
+```bash
+DATABASE_URL='<production-connection-string>' WORKPLACE_JURISDICTION='<ON|CA-FED>' bun apps/api/scripts/seed-meeting-template.ts
+```
+
+Seeds the canonical "JHSC Standing Agenda v1" row for the configured jurisdiction (per ADR-0012 §3.3). The seed is idempotent — re-runs print `inserted=0 skipped=1` and exit 0. Emits one `audit.meeting_template.seeded` chain anchor on the INSERT path only.
+
+**Pass criterion (DB):**
+
+```bash
+psql '<production-connection-string>' -c "SELECT version_number, name, jurisdiction FROM meeting_templates WHERE retired_at IS NULL"
+```
+
+Expected: one row with `version_number=1`, `name='JHSC Standing Agenda v1'`, and `jurisdiction` matching the `WORKPLACE_JURISDICTION` env var.
+
+**Pass criterion (chain):**
+
+```bash
+DATABASE_URL='<production-connection-string>' bun apps/api/scripts/audit-log-verify.ts --check-meetings --quiet
+```
+
+Expected: exit 0 with `audit-log-verify OK …` on stdout. The `--check-meetings` walker (extended in S4) enforces that every `meeting.created` event references a template version that has a corresponding `audit.meeting_template.seeded` upstream — running the seed BEFORE the first meeting is created is the operational requirement.
+
 ### 4.5 Deploy the Fly Machines
 
 ```bash

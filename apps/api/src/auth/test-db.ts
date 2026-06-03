@@ -14,6 +14,17 @@ export function hasDb(): boolean {
 
 const TABLES_TO_TRUNCATE = [
   'sync_idempotency',
+  // 2.1 (ADR-0012) — meeting lifecycle tables. Children before parents
+  // so the CASCADE on meetings has nothing left to do; meeting_signatures
+  // references workplace_signing_keys (still alive), meeting_templates
+  // also references workplace_signing_keys with SET NULL.
+  'meeting_action_item_state',
+  'meeting_signatures',
+  'meeting_inspection_review',
+  'meeting_attendance',
+  'meeting_sections',
+  'meetings',
+  'meeting_templates',
   // 1.11 (ADR-0010) — excel_import_items references excel_imports, which
   // references audit_log + users; truncate the per-row table first so
   // the CASCADE on excel_imports's FKs has nothing to do.

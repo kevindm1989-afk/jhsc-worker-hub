@@ -521,3 +521,398 @@ describe('verifyChainFull — bytesToHex sanity', () => {
     expect(bytesToHex(GENESIS_PREV_HASH)).toBe('00'.repeat(32));
   });
 });
+
+// ---------------------------------------------------------------------------
+// --check-meetings (Milestone 2.1 S2, ADR-0012 §3.10)
+// ---------------------------------------------------------------------------
+//
+// Tests the meeting-lifecycle forward-defense walker. Each case feeds
+// `checkMeetingChain` a hand-built `meeting.*` chain slice and asserts
+// the expected anomaly surfaces (or absence thereof).
+
+import { _internals as verifyInternals } from '../audit-log-verify';
+
+const MID = '00000000-0000-0000-0000-000000aaaa01';
+const REC_ID = '00000000-0000-0000-0000-000000bbbb01';
+
+function meetingRow(args: {
+  idx: number;
+  kind: string;
+  payload: Record<string, unknown>;
+  thisHash?: Uint8Array;
+}): { idx: number; kind: string; payload: Record<string, unknown>; this_hash: Uint8Array } {
+  return {
+    idx: args.idx,
+    kind: args.kind,
+    payload: args.payload,
+    this_hash: args.thisHash ?? new Uint8Array(32),
+  };
+}
+
+const VALID_METRICS = {
+  durationSeconds: 5400,
+  itemsRaised: 3,
+  itemsClosed: 1,
+  recommendationsDrafted: 1,
+  inspectionsReviewed: 2,
+  quorumCompliance: { metAtCallToOrder: true, ruleCitation: 'OHSA s.9(8)' },
+};
+
+describe('checkMeetingChain — happy path', () => {
+  it('ok=true for a clean meeting.created → adjourned → 4 signed → finalized chain', () => {
+    const rows = [
+      meetingRow({ idx: 0, kind: 'meeting.created', payload: { meetingId: MID } }),
+      meetingRow({
+        idx: 1,
+        kind: 'meeting.adjourned',
+        payload: { meetingId: MID, metrics: VALID_METRICS },
+      }),
+      meetingRow({
+        idx: 2,
+        kind: 'meeting.signed',
+        payload: { meetingId: MID, signerRole: 'worker_co_chair' },
+      }),
+      meetingRow({
+        idx: 3,
+        kind: 'meeting.signed',
+        payload: { meetingId: MID, signerRole: 'mgmt_co_chair' },
+      }),
+      meetingRow({
+        idx: 4,
+        kind: 'meeting.signed',
+        payload: { meetingId: MID, signerRole: 'mgmt_external_1' },
+      }),
+      meetingRow({
+        idx: 5,
+        kind: 'meeting.signed',
+        payload: { meetingId: MID, signerRole: 'mgmt_external_2' },
+      }),
+      meetingRow({ idx: 6, kind: 'meeting.finalized', payload: { meetingId: MID } }),
+    ];
+    const result = verifyInternals.checkMeetingChain(rows);
+    expect(result.ok).toBe(true);
+    if (result.ok) expect(result.checked).toBe(7);
+  });
+});
+
+describe('checkMeetingChain — finalized missing signatures (T-ML4)', () => {
+  it('detects meeting.finalized with only 3 upstream meeting.signed events', () => {
+    const rows = [
+      meetingRow({ idx: 0, kind: 'meeting.created', payload: { meetingId: MID } }),
+      meetingRow({
+        idx: 1,
+        kind: 'meeting.adjourned',
+        payload: { meetingId: MID, metrics: VALID_METRICS },
+      }),
+      meetingRow({
+        idx: 2,
+        kind: 'meeting.signed',
+        payload: { meetingId: MID, signerRole: 'worker_co_chair' },
+      }),
+      meetingRow({
+        idx: 3,
+        kind: 'meeting.signed',
+        payload: { meetingId: MID, signerRole: 'mgmt_co_chair' },
+      }),
+      meetingRow({
+        idx: 4,
+        kind: 'meeting.signed',
+        payload: { meetingId: MID, signerRole: 'mgmt_external_1' },
+      }),
+      meetingRow({ idx: 5, kind: 'meeting.finalized', payload: { meetingId: MID } }),
+    ];
+    const result = verifyInternals.checkMeetingChain(rows);
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.anomalies[0]!.reason).toBe('finalized_signatures_wrong_count');
+    }
+  });
+
+  it('detects meeting.finalized with 4 signatures but wrong roles', () => {
+    const rows = [
+      meetingRow({ idx: 0, kind: 'meeting.created', payload: { meetingId: MID } }),
+      meetingRow({
+        idx: 1,
+        kind: 'meeting.signed',
+        payload: { meetingId: MID, signerRole: 'worker_co_chair' },
+      }),
+      meetingRow({
+        idx: 2,
+        kind: 'meeting.signed',
+        payload: { meetingId: MID, signerRole: 'worker_co_chair' },
+      }),
+      meetingRow({
+        idx: 3,
+        kind: 'meeting.signed',
+        payload: { meetingId: MID, signerRole: 'mgmt_co_chair' },
+      }),
+      meetingRow({
+        idx: 4,
+        kind: 'meeting.signed',
+        payload: { meetingId: MID, signerRole: 'mgmt_external_1' },
+      }),
+      meetingRow({ idx: 5, kind: 'meeting.finalized', payload: { meetingId: MID } }),
+    ];
+    const result = verifyInternals.checkMeetingChain(rows);
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.anomalies.some((a) => a.reason === 'finalized_missing_signatures')).toBe(true);
+    }
+  });
+});
+
+describe('checkMeetingChain — adjourned must have upstream create + valid metrics', () => {
+  it('detects meeting.adjourned with no upstream meeting.created', () => {
+    const rows = [
+      meetingRow({
+        idx: 0,
+        kind: 'meeting.adjourned',
+        payload: { meetingId: MID, metrics: VALID_METRICS },
+      }),
+    ];
+    const result = verifyInternals.checkMeetingChain(rows);
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.anomalies.some((a) => a.reason === 'adjourned_no_upstream_create')).toBe(true);
+    }
+  });
+
+  it('detects meeting.adjourned with malformed metrics dict', () => {
+    const rows = [
+      meetingRow({ idx: 0, kind: 'meeting.created', payload: { meetingId: MID } }),
+      meetingRow({
+        idx: 1,
+        kind: 'meeting.adjourned',
+        payload: { meetingId: MID, metrics: { durationSeconds: 0 } },
+      }),
+    ];
+    const result = verifyInternals.checkMeetingChain(rows);
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.anomalies.some((a) => a.reason === 'adjourned_metrics_malformed')).toBe(true);
+    }
+  });
+});
+
+describe('checkMeetingChain — cross-chain anchor (TM-fold-3 / T-ML42)', () => {
+  it('passes when meeting.recommendation_drafted hash matches upstream recommendation.drafted this_hash', () => {
+    const recHash = new Uint8Array(32).fill(0xab);
+    const recHashHex = Buffer.from(recHash).toString('hex');
+    const rows = [
+      meetingRow({ idx: 0, kind: 'meeting.created', payload: { meetingId: MID } }),
+      meetingRow({
+        idx: 1,
+        kind: 'recommendation.drafted',
+        payload: { recommendationId: REC_ID, recommendationNumber: 1, jurisdiction: 'ON' },
+        thisHash: recHash,
+      }),
+      meetingRow({
+        idx: 2,
+        kind: 'meeting.recommendation_drafted',
+        payload: {
+          meetingId: MID,
+          recommendationId: REC_ID,
+          sectionId: '00000000-0000-0000-0000-000000cccc01',
+          recommendationCreatedEventHash: recHashHex,
+        },
+      }),
+    ];
+    const result = verifyInternals.checkMeetingChain(rows);
+    expect(result.ok).toBe(true);
+  });
+
+  it('fails when the cross-chain hash does NOT match', () => {
+    const recHash = new Uint8Array(32).fill(0xab);
+    const rows = [
+      meetingRow({ idx: 0, kind: 'meeting.created', payload: { meetingId: MID } }),
+      meetingRow({
+        idx: 1,
+        kind: 'recommendation.drafted',
+        payload: { recommendationId: REC_ID, recommendationNumber: 1, jurisdiction: 'ON' },
+        thisHash: recHash,
+      }),
+      meetingRow({
+        idx: 2,
+        kind: 'meeting.recommendation_drafted',
+        payload: {
+          meetingId: MID,
+          recommendationId: REC_ID,
+          sectionId: '00000000-0000-0000-0000-000000cccc01',
+          recommendationCreatedEventHash: 'ff'.repeat(32),
+        },
+      }),
+    ];
+    const result = verifyInternals.checkMeetingChain(rows);
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(
+        result.anomalies.some((a) => a.reason === 'recommendation_drafted_hash_mismatch'),
+      ).toBe(true);
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// M2.1 S4 — meeting.created must reference a seeded template version
+// ---------------------------------------------------------------------------
+
+describe('checkMeetingChain — created_template_not_seeded (M2.1 S4)', () => {
+  it('passes when an upstream audit.meeting_template.seeded matches the (jurisdiction, version) pair', () => {
+    const rows = [
+      meetingRow({
+        idx: 0,
+        kind: 'audit.meeting_template.seeded',
+        payload: {
+          templateVersion: 1,
+          jurisdiction: 'ON',
+          templateHash: 'a'.repeat(64),
+        },
+      }),
+      meetingRow({
+        idx: 1,
+        kind: 'meeting.created',
+        payload: { meetingId: MID, agendaTemplateVersion: 1, jurisdiction: 'ON' },
+      }),
+    ];
+    const result = verifyInternals.checkMeetingChain(rows);
+    expect(result.ok).toBe(true);
+  });
+
+  it('detects a meeting.created event with no upstream template seed event', () => {
+    const rows = [
+      meetingRow({
+        idx: 0,
+        kind: 'meeting.created',
+        payload: { meetingId: MID, agendaTemplateVersion: 1, jurisdiction: 'ON' },
+      }),
+    ];
+    const result = verifyInternals.checkMeetingChain(rows);
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.anomalies.some((a) => a.reason === 'created_template_not_seeded')).toBe(true);
+    }
+  });
+
+  it('detects a meeting.created event when the seed is for the wrong jurisdiction', () => {
+    const rows = [
+      meetingRow({
+        idx: 0,
+        kind: 'audit.meeting_template.seeded',
+        payload: {
+          templateVersion: 1,
+          jurisdiction: 'CA-FED',
+          templateHash: 'a'.repeat(64),
+        },
+      }),
+      meetingRow({
+        idx: 1,
+        kind: 'meeting.created',
+        payload: { meetingId: MID, agendaTemplateVersion: 1, jurisdiction: 'ON' },
+      }),
+    ];
+    const result = verifyInternals.checkMeetingChain(rows);
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.anomalies.some((a) => a.reason === 'created_template_not_seeded')).toBe(true);
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// M2.1 S5 F-S2 — runtime signer roles config
+// ---------------------------------------------------------------------------
+//
+// The verifier's Gate 1 (4-of-4 signature presence) MUST match the
+// route's runtime config so a workplace whose env declares a different
+// role set is verifiable end-to-end. The pre-S5 verifier hardcoded the
+// 4 role IDs; this test asserts the Gate accepts a 3-role config when
+// passed via options and that Gates 2/3/4 still hold.
+
+describe('checkMeetingChain — runtime signer roles (M2.1 S5 F-S2)', () => {
+  it('accepts a meeting.finalized chain with 3 sigs when 3 roles are configured', () => {
+    const rows = [
+      meetingRow({
+        idx: 0,
+        kind: 'audit.meeting_template.seeded',
+        payload: { templateVersion: 1, jurisdiction: 'ON', templateHash: 'a'.repeat(64) },
+      }),
+      meetingRow({
+        idx: 1,
+        kind: 'meeting.created',
+        payload: { meetingId: MID, agendaTemplateVersion: 1, jurisdiction: 'ON' },
+      }),
+      meetingRow({
+        idx: 2,
+        kind: 'meeting.adjourned',
+        payload: { meetingId: MID, metrics: VALID_METRICS },
+      }),
+      meetingRow({
+        idx: 3,
+        kind: 'meeting.signed',
+        payload: { meetingId: MID, signerRole: 'worker_co_chair' },
+      }),
+      meetingRow({
+        idx: 4,
+        kind: 'meeting.signed',
+        payload: { meetingId: MID, signerRole: 'mgmt_co_chair' },
+      }),
+      meetingRow({
+        idx: 5,
+        kind: 'meeting.signed',
+        payload: { meetingId: MID, signerRole: 'mgmt_external_1' },
+      }),
+      meetingRow({ idx: 6, kind: 'meeting.finalized', payload: { meetingId: MID } }),
+    ];
+    const result = verifyInternals.checkMeetingChain(rows, {
+      requiredSignerRoles: ['worker_co_chair', 'mgmt_co_chair', 'mgmt_external_1'],
+    });
+    expect(result.ok).toBe(true);
+  });
+
+  it('flags a finalized chain that does NOT match the configured role count', () => {
+    // 3-role config but the chain has 4 sigs — count mismatch.
+    const rows = [
+      meetingRow({ idx: 0, kind: 'meeting.created', payload: { meetingId: MID } }),
+      meetingRow({
+        idx: 1,
+        kind: 'meeting.signed',
+        payload: { meetingId: MID, signerRole: 'worker_co_chair' },
+      }),
+      meetingRow({
+        idx: 2,
+        kind: 'meeting.signed',
+        payload: { meetingId: MID, signerRole: 'mgmt_co_chair' },
+      }),
+      meetingRow({
+        idx: 3,
+        kind: 'meeting.signed',
+        payload: { meetingId: MID, signerRole: 'mgmt_external_1' },
+      }),
+      meetingRow({
+        idx: 4,
+        kind: 'meeting.signed',
+        payload: { meetingId: MID, signerRole: 'mgmt_external_2' },
+      }),
+      meetingRow({ idx: 5, kind: 'meeting.finalized', payload: { meetingId: MID } }),
+    ];
+    const result = verifyInternals.checkMeetingChain(rows, {
+      requiredSignerRoles: ['worker_co_chair', 'mgmt_co_chair', 'mgmt_external_1'],
+    });
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.anomalies.some((a) => a.reason === 'finalized_signatures_wrong_count')).toBe(
+        true,
+      );
+    }
+  });
+
+  it('readRequiredSignerRolesFromEnv falls back to the canonical 4 roles when env is empty', () => {
+    const roles = verifyInternals.readRequiredSignerRolesFromEnv({});
+    expect(roles).toEqual([
+      'worker_co_chair',
+      'mgmt_co_chair',
+      'mgmt_external_1',
+      'mgmt_external_2',
+    ]);
+  });
+});

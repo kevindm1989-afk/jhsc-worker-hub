@@ -295,7 +295,7 @@ describe('sync enums (Milestone 1.10, ADR-0009)', () => {
     ]);
   });
 
-  it('syncEntityKind exports every queueable entity from ADR-0009 §3.6', () => {
+  it('syncEntityKind exports every queueable entity from ADR-0009 §3.6 (extended by ADR-0012 §3.11)', () => {
     expect([...syncEntityKind]).toEqual([
       'hazard',
       'action_item',
@@ -309,6 +309,14 @@ describe('sync enums (Milestone 1.10, ADR-0009)', () => {
       'recommendation_resolution',
       'recommendation_withdrawal',
       'evidence_finalize',
+      // Meeting lifecycle (2.1, ADR-0012 §3.11 S3).
+      'meeting',
+      'meeting_section',
+      'meeting_section_notes',
+      'meeting_attendance',
+      'meeting_inspection_review',
+      'meeting_signature',
+      'meeting_finalize',
     ]);
   });
 

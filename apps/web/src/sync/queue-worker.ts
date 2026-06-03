@@ -853,6 +853,21 @@ function entityKindToTable(kind: SyncEntityKind): string | null {
       return 'recommendations';
     case 'evidence_finalize':
       return 'evidence_files';
+    // Meeting lifecycle (Milestone 2.1, ADR-0012 §3.11 S3). Each kind
+    // maps to its Dexie table; the transition kinds (meeting_finalize)
+    // mutate the parent meeting row.
+    case 'meeting':
+    case 'meeting_finalize':
+      return 'meetings';
+    case 'meeting_section':
+    case 'meeting_section_notes':
+      return 'meeting_sections';
+    case 'meeting_attendance':
+      return 'meeting_attendance';
+    case 'meeting_inspection_review':
+      return 'meeting_inspection_review';
+    case 'meeting_signature':
+      return 'meeting_signatures';
   }
 }
 

@@ -11,6 +11,7 @@
 //   DATABASE_URL=... bun run scripts/audit-log-verify.ts --check-backfill
 //   DATABASE_URL=... bun run scripts/audit-log-verify.ts --check-evidence
 //   DATABASE_URL=... bun run scripts/audit-log-verify.ts --check-sync
+//   DATABASE_URL=... bun run scripts/audit-log-verify.ts --check-meetings
 //   DATABASE_URL=... bun run scripts/audit-log-verify.ts --full
 //   DATABASE_URL=... bun run scripts/audit-log-verify.ts --full --since=2026-01-01T00:00:00Z
 //   DATABASE_URL=... bun run scripts/audit-log-verify.ts --full --report=json
@@ -41,6 +42,7 @@ import {
   verifyChainFull,
   type AuditRow,
 } from '../src/lib/audit-verify-full';
+import { loadWorkplaceConfig, type SignerRoleId } from '../../../config/workplace';
 
 interface AuthEventRow {
   id: string;
@@ -277,6 +279,277 @@ async function checkSyncIdempotency(
   return { ok: false, anomalies, rowsChecked: rows.length };
 }
 
+// ---------------------------------------------------------------------------
+// --check-meetings forward defense (Milestone 2.1 S2, ADR-0012 §3.10)
+// ---------------------------------------------------------------------------
+//
+// Walks every `meeting.*` chain event and asserts:
+//
+//   1. Every `meeting.finalized` event has all 4 required
+//      `meeting.signed` events UPSTREAM with the required role coverage
+//      (worker_co_chair + mgmt_co_chair + mgmt_external_1 +
+//      mgmt_external_2). T-ML4 (4-sig bypass) close-out.
+//
+//   2. Every `meeting.adjourned` event has at least one
+//      `meeting.created` event upstream (referencing the same
+//      meetingId) AND a structurally valid metrics dict. T-ML16
+//      (replay) + T-ML9 (PI leak) close-out.
+//
+//   3. Every `meeting.recommendation_drafted` event's
+//      `recommendationCreatedEventHash` matches the `this_hash` of an
+//      upstream `recommendation.drafted` event for the same
+//      recommendationId. TM-fold-3 / T-ML42 cross-chain anchor
+//      integrity.
+//
+//   4. Every `meeting.created` event references an
+//      (agendaTemplateVersion, jurisdiction) pair that has a
+//      corresponding `audit.meeting_template.seeded` UPSTREAM in the
+//      chain. The seed script (M2.1 S4) is the only emitter of that
+//      kind; the gate catches a deploy where the route handler
+//      bootstrapped a meeting against a template row that was not also
+//      anchored in the chain (e.g. a manual INSERT into
+//      meeting_templates that bypassed the seed script).
+//
+// Anomalies are aggregated and reported one per offending event.
+
+interface MeetingChainRow {
+  idx: number;
+  kind: string;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  payload: any;
+  this_hash: Uint8Array | Buffer;
+}
+
+interface MeetingAnomaly {
+  readonly idx: number;
+  readonly kind: string;
+  readonly reason:
+    | 'finalized_missing_signatures'
+    | 'finalized_signatures_wrong_count'
+    | 'adjourned_no_upstream_create'
+    | 'adjourned_metrics_malformed'
+    | 'recommendation_drafted_hash_missing'
+    | 'recommendation_drafted_hash_mismatch'
+    | 'created_template_not_seeded';
+  readonly detail: string;
+}
+
+// M2.1 S5 F-S2 close-out: the verifier's Gate 1 (4-of-4 signature
+// presence by role) MUST match the route's runtime configuration. The
+// pre-S5 verifier hardcoded the role IDs, which meant a workplace
+// whose `MINUTES_SIGNER_*_LABEL` env was edited to a 3- or 5-role set
+// would surface a fleet of `finalized_missing_signatures` anomalies
+// even though the route's finalize gate (which reads the same env)
+// accepted the same row. The default callers below read the runtime
+// config; tests can pass a fixed array to validate edge cases.
+const DEFAULT_REQUIRED_SIGNER_ROLES: ReadonlyArray<SignerRoleId> = [
+  'worker_co_chair',
+  'mgmt_co_chair',
+  'mgmt_external_1',
+  'mgmt_external_2',
+];
+
+function readRequiredSignerRolesFromEnv(
+  env: NodeJS.ProcessEnv = process.env,
+): ReadonlyArray<SignerRoleId> {
+  // Allow-empty mode: in dev/test where the labels aren't set the
+  // verifier still ships the canonical 4-role expectation rather than
+  // refusing to start.
+  try {
+    const roles = loadWorkplaceConfig(env).minutesSignerRoles.map((r) => r.id);
+    return roles.length > 0 ? roles : DEFAULT_REQUIRED_SIGNER_ROLES;
+  } catch {
+    return DEFAULT_REQUIRED_SIGNER_ROLES;
+  }
+}
+
+function checkMeetingChain(
+  rows: ReadonlyArray<MeetingChainRow>,
+  options: { readonly requiredSignerRoles?: ReadonlyArray<SignerRoleId> } = {},
+):
+  | { ok: true; checked: number }
+  | { ok: false; anomalies: ReadonlyArray<MeetingAnomaly>; checked: number } {
+  const requiredSignerRoles = options.requiredSignerRoles ?? DEFAULT_REQUIRED_SIGNER_ROLES;
+  const meetingEvents = rows.filter((r) => r.kind.startsWith('meeting.'));
+  const recommendationDraftedEvents = rows.filter((r) => r.kind === 'recommendation.drafted');
+  const templateSeededEvents = rows.filter((r) => r.kind === 'audit.meeting_template.seeded');
+
+  // Index recommendation.drafted by recommendationId for O(1) lookup.
+  const recDraftedByRecId = new Map<string, MeetingChainRow>();
+  for (const r of recommendationDraftedEvents) {
+    const recId = r.payload?.recommendationId;
+    if (typeof recId === 'string') recDraftedByRecId.set(recId, r);
+  }
+
+  // Index template-seeded events by `${jurisdiction}|${templateVersion}`.
+  // The seed payload carries jurisdiction + templateVersion; the
+  // meeting.created payload carries jurisdiction + agendaTemplateVersion;
+  // the pair joins the two on those keys.
+  const seededByJurVer = new Map<string, MeetingChainRow>();
+  for (const r of templateSeededEvents) {
+    const jur = r.payload?.jurisdiction;
+    const ver = r.payload?.templateVersion;
+    if (typeof jur === 'string' && typeof ver === 'number') {
+      seededByJurVer.set(`${jur}|${ver}`, r);
+    }
+  }
+
+  // Group meeting events by meetingId.
+  const byMeetingId = new Map<string, MeetingChainRow[]>();
+  for (const e of meetingEvents) {
+    const mid = e.payload?.meetingId;
+    if (typeof mid !== 'string') continue;
+    const list = byMeetingId.get(mid) ?? [];
+    list.push(e);
+    byMeetingId.set(mid, list);
+  }
+
+  const anomalies: MeetingAnomaly[] = [];
+
+  for (const e of meetingEvents) {
+    const mid = e.payload?.meetingId;
+    if (typeof mid !== 'string') continue;
+    const peers = byMeetingId.get(mid) ?? [];
+
+    if (e.kind === 'meeting.created') {
+      // Gate 4: the (jurisdiction, agendaTemplateVersion) pair must have
+      // a corresponding audit.meeting_template.seeded UPSTREAM. The seed
+      // script is the only emitter; a meeting.created that references an
+      // unseeded version is the canonical "manual INSERT bypassed the
+      // seed" attack surface (M2.1 S4 forward defense).
+      const jur = e.payload?.jurisdiction;
+      const ver = e.payload?.agendaTemplateVersion;
+      if (typeof jur === 'string' && typeof ver === 'number') {
+        const seeded = seededByJurVer.get(`${jur}|${ver}`);
+        if (!seeded || seeded.idx >= e.idx) {
+          anomalies.push({
+            idx: e.idx,
+            kind: e.kind,
+            reason: 'created_template_not_seeded',
+            detail: `no upstream audit.meeting_template.seeded for jurisdiction=${jur} version=${ver}`,
+          });
+        }
+      }
+    } else if (e.kind === 'meeting.finalized') {
+      // Gate 1: N meeting.signed events upstream of this finalized event
+      // covering all N required roles, where N comes from runtime config
+      // (M2.1 S5 F-S2 close-out). The route's finalize handler reads
+      // the same source — change the env, change the gate.
+      const sigsUpstream = peers.filter((p) => p.kind === 'meeting.signed' && p.idx < e.idx);
+      if (sigsUpstream.length !== requiredSignerRoles.length) {
+        anomalies.push({
+          idx: e.idx,
+          kind: e.kind,
+          reason: 'finalized_signatures_wrong_count',
+          detail: `expected ${requiredSignerRoles.length} meeting.signed events; found ${sigsUpstream.length}`,
+        });
+        continue;
+      }
+      const roles = new Set(sigsUpstream.map((s) => s.payload?.signerRole));
+      const missing = requiredSignerRoles.filter((r) => !roles.has(r));
+      if (missing.length > 0) {
+        anomalies.push({
+          idx: e.idx,
+          kind: e.kind,
+          reason: 'finalized_missing_signatures',
+          detail: `missing signer roles: ${missing.join(', ')}`,
+        });
+      }
+    } else if (e.kind === 'meeting.adjourned') {
+      // Gate 2: a meeting.created event upstream.
+      const created = peers.find((p) => p.kind === 'meeting.created' && p.idx < e.idx);
+      if (!created) {
+        anomalies.push({
+          idx: e.idx,
+          kind: e.kind,
+          reason: 'adjourned_no_upstream_create',
+          detail: 'no meeting.created event found upstream of this meeting.adjourned',
+        });
+      }
+      // Structural metrics dict check (PI-free shape).
+      const m = e.payload?.metrics;
+      const metricsOk =
+        m &&
+        typeof m === 'object' &&
+        typeof m.durationSeconds === 'number' &&
+        typeof m.itemsRaised === 'number' &&
+        typeof m.itemsClosed === 'number' &&
+        typeof m.recommendationsDrafted === 'number' &&
+        typeof m.inspectionsReviewed === 'number' &&
+        m.quorumCompliance &&
+        typeof m.quorumCompliance.metAtCallToOrder === 'boolean' &&
+        typeof m.quorumCompliance.ruleCitation === 'string';
+      if (!metricsOk) {
+        anomalies.push({
+          idx: e.idx,
+          kind: e.kind,
+          reason: 'adjourned_metrics_malformed',
+          detail: 'metrics dict missing required structural fields',
+        });
+      }
+    } else if (e.kind === 'meeting.recommendation_drafted') {
+      // Gate 3: cross-chain anchor hash match (TM-fold-3 / T-ML42).
+      //
+      // Mental model (M2.1 S5 F-L4 close-out comment):
+      //   The recommendations route emits TWO chain rows inside a
+      //   single transaction when a recommendation is drafted in a
+      //   meeting:
+      //     - `recommendation.drafted` — the 1.9-native event
+      //       carrying the rec's `recommendationId`. Its `thisHash` is
+      //       captured by the route handler.
+      //     - `meeting.recommendation_drafted` — this cross-chain
+      //       anchor, whose payload carries the SAME `recommendationId`
+      //       AND `recommendationCreatedEventHash` set to the prior
+      //       row's `thisHash`.
+      //   The recommendation row itself FKs back at the
+      //   `recommendation.drafted` row's audit_idx — NOT this anchor.
+      //   That asymmetry is intentional (the recommendation is the
+      //   primary; the meeting linkage is the secondary). Gate 3
+      //   verifies the secondary's claimed hash matches the primary's
+      //   actual `thisHash`. Both rows live in the same transaction
+      //   so an atomicity violation rolls both back together —
+      //   there's no orphan anchor surface to defend against here.
+      const recId = e.payload?.recommendationId;
+      const claimedHash = e.payload?.recommendationCreatedEventHash;
+      if (typeof recId !== 'string' || typeof claimedHash !== 'string') {
+        anomalies.push({
+          idx: e.idx,
+          kind: e.kind,
+          reason: 'recommendation_drafted_hash_missing',
+          detail: 'recommendationId or recommendationCreatedEventHash missing from payload',
+        });
+        continue;
+      }
+      const recDrafted = recDraftedByRecId.get(recId);
+      if (!recDrafted) {
+        anomalies.push({
+          idx: e.idx,
+          kind: e.kind,
+          reason: 'recommendation_drafted_hash_missing',
+          detail: `no upstream recommendation.drafted event for recommendationId=${recId}`,
+        });
+        continue;
+      }
+      const actualHash = Buffer.from(recDrafted.this_hash).toString('hex');
+      if (actualHash !== claimedHash) {
+        anomalies.push({
+          idx: e.idx,
+          kind: e.kind,
+          reason: 'recommendation_drafted_hash_mismatch',
+          detail: `payload hash=${claimedHash} does not match recommendation.drafted hash=${actualHash}`,
+        });
+      }
+    }
+  }
+
+  if (anomalies.length === 0) {
+    return { ok: true, checked: meetingEvents.length };
+  }
+  return { ok: false, anomalies, checked: meetingEvents.length };
+}
+
+export const _internals = { checkMeetingChain, readRequiredSignerRolesFromEnv };
+
 /**
  * Fetch the audit_log rows in idx-ASC order, optionally bounded by
  * `ts >= sinceIso`. Returns the rows in the in-memory `AuditRow` shape
@@ -334,6 +607,7 @@ async function main(): Promise<void> {
   const checkBackfill = process.argv.includes('--check-backfill');
   const checkEvidence = process.argv.includes('--check-evidence');
   const checkSync = process.argv.includes('--check-sync');
+  const checkMeetings = process.argv.includes('--check-meetings');
   const fullArgs = parseFullArgs(process.argv);
 
   const db = getDb();
@@ -432,6 +706,58 @@ async function main(): Promise<void> {
     }
   }
 
+  if (checkMeetings) {
+    const meetingRows = (await db.execute(sql`
+      SELECT idx, kind, payload, this_hash
+      FROM audit_log
+      WHERE kind LIKE 'meeting.%'
+         OR kind = 'recommendation.drafted'
+         OR kind = 'audit.meeting_template.seeded'
+      ORDER BY idx ASC
+    `)) as unknown as Array<{
+      idx: number | string;
+      kind: string;
+      payload: unknown;
+      this_hash: Uint8Array | Buffer;
+    }>;
+    const meetingsCheck = checkMeetingChain(
+      meetingRows.map((r) => ({
+        idx: Number(r.idx),
+        kind: r.kind,
+        payload: r.payload,
+        this_hash: r.this_hash,
+      })),
+      { requiredSignerRoles: readRequiredSignerRolesFromEnv() },
+    );
+    if (!meetingsCheck.ok) {
+      if (quiet) {
+        for (const a of meetingsCheck.anomalies) {
+          process.stdout.write(
+            `audit-log-verify MEETING_ANOMALY idx=${a.idx} kind=${a.kind} reason=${a.reason}\n`,
+          );
+        }
+      } else {
+        process.stderr.write(
+          `audit-log-verify FAIL (meeting lifecycle forward defense)\n  rows checked:  ${meetingsCheck.checked}\n  anomalies:     ${meetingsCheck.anomalies.length}\n`,
+        );
+        for (const a of meetingsCheck.anomalies) {
+          process.stderr.write(
+            `    - idx=${a.idx} kind='${a.kind}' reason=${a.reason} (${a.detail})\n`,
+          );
+        }
+        process.stderr.write(
+          '\nReason codes:\n  finalized_signatures_wrong_count   — meeting.finalized requires 4 meeting.signed upstream (ADR-0012 §3.9).\n  finalized_missing_signatures       — required signer roles missing.\n  adjourned_no_upstream_create       — meeting.adjourned lacks the meeting.created anchor.\n  adjourned_metrics_malformed        — metrics dict missing required PI-free fields.\n  recommendation_drafted_hash_*      — TM-fold-3 cross-chain anchor integrity broken.\n  created_template_not_seeded        — meeting.created references a template version with no upstream audit.meeting_template.seeded (M2.1 S4).\n',
+        );
+      }
+      process.exit(1);
+    }
+    if (!quiet) {
+      process.stdout.write(
+        `audit-log-verify meeting forward defense: ${meetingsCheck.checked} meeting.* chain row(s) checked, no anomalies found.\n`,
+      );
+    }
+  }
+
   if (checkBackfill) {
     const backfill = await checkBackfillAnchor(db);
     if (!backfill.ok) {
@@ -471,9 +797,18 @@ async function main(): Promise<void> {
   process.exit(0);
 }
 
-main().catch((e: unknown) => {
-  process.stderr.write(
-    `audit-log-verify operational error: ${e instanceof Error ? e.message : String(e)}\n`,
-  );
-  process.exit(2);
-});
+// Only run main() when invoked as a script (not when imported by tests).
+// Importing the module for its `_internals` export must not trigger the
+// process.exit(2) / DATABASE_URL operational path.
+const invokedAsScript =
+  typeof process !== 'undefined' &&
+  process.argv[1] !== undefined &&
+  /audit-log-verify(\.ts|\.js)?$/.test(process.argv[1]);
+if (invokedAsScript) {
+  main().catch((e: unknown) => {
+    process.stderr.write(
+      `audit-log-verify operational error: ${e instanceof Error ? e.message : String(e)}\n`,
+    );
+    process.exit(2);
+  });
+}

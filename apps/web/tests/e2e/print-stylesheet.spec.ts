@@ -128,6 +128,38 @@ test.describe('print stylesheet — evidence-grade output', () => {
     await expect(page.locator('#print-probe-evidentiary')).toHaveCSS('display', 'block');
   });
 
+  test('M2.1 S5 F-P1 — meeting section accordion bodies expand on print', async ({ page }) => {
+    // Inject a fake meeting-detail surface fragment that mirrors the
+    // SectionAccordion shape: a parent card with a button toggle and a
+    // body wrapper carrying [data-section-accordion-body]. The body is
+    // `hidden` on screen (Tailwind's display: none) to mimic the
+    // collapsed state. Under print emulation the canonical print rule
+    // must force the body open.
+    await page.goto('/minutes');
+
+    await page.evaluate(() => {
+      const wrapper = document.createElement('div');
+      wrapper.innerHTML = `
+        <div data-print="card" id="print-probe-accordion">
+          <button type="button" data-section-accordion-toggle aria-expanded="false">
+            Section header (collapsed on screen)
+          </button>
+          <div data-section-accordion-body class="hidden" id="print-probe-accordion-body">
+            Section body content that must surface on print.
+          </div>
+        </div>`;
+      document.body.appendChild(wrapper);
+    });
+
+    // On screen the body is hidden via the Tailwind `hidden` class.
+    await expect(page.locator('#print-probe-accordion-body')).toBeHidden();
+
+    await page.emulateMedia({ media: 'print' });
+
+    // Under print emulation the body must surface (display: block).
+    await expect(page.locator('#print-probe-accordion-body')).toHaveCSS('display', 'block');
+  });
+
   test('T-HD7 — step-up-gated selectors do not un-hide on print', async ({ page }) => {
     // The print stylesheet operates on the DOM that's already present.
     // A field that's structurally absent on-screen (the reveal-gated

@@ -227,6 +227,60 @@
     display: revert !important;
   }
 
+  /*
+   * Meeting detail surface print contract (Milestone 2.1 S3, ADR-0012 §3.5).
+   *
+   *   - Sticky meeting top bar, sticky bottom action bar, modal
+   *     sheets carry data-print="hide" already; the rule above
+   *     drops them.
+   *   - Accordion sections are accessed via the SectionAccordion
+   *     button + a conditionally-rendered body. We expand ALL
+   *     section bodies on print by un-collapsing the
+   *     button-toggled wrapper. The view's section bodies render
+   *     under [data-print="card"] inside an article whose toggle
+   *     state lives in component state; the print stylesheet can
+   *     reach the inner body only via the article + button
+   *     contract below.
+   *   - Signature row attestation-sig hashes carry
+   *     data-print="evidentiary" — they surface on print as the
+   *     JetBrains Mono dashed-divider block defined below.
+   *   - T-HD7 compliance: NO ciphertext (notes_envelope_ct,
+   *     display_name_ct) is ever rendered into the DOM on screen,
+   *     so the print stylesheet cannot leak it. The print output
+   *     is presence-only for sealed fields.
+   */
+  article > div[data-print='card'] {
+    page-break-inside: avoid;
+    break-inside: avoid;
+    margin-bottom: 0.5rem;
+  }
+
+  /*
+   * Force-expand every meeting SectionAccordion body on print
+   * (M2.1 S5 F-P1 close-out). The SectionAccordion component now
+   * renders the body unconditionally with `data-section-accordion-body`
+   * and uses Tailwind's `hidden` class on screen when collapsed; the
+   * rule below un-hides every body for the printout so the rep gets
+   * the full canonical minutes regardless of on-screen state. The
+   * toggle button itself stays in the DOM but conveys no print value
+   * — we hide it so the print output reads as flat content under each
+   * section header.
+   */
+  [data-section-accordion-body] {
+    display: block !important;
+    height: auto !important;
+    overflow: visible !important;
+    visibility: visible !important;
+  }
+  [data-section-accordion-body].hidden {
+    display: block !important;
+  }
+  [data-section-accordion-toggle] {
+    /* Keep the heading text but remove the toggle affordance look. */
+    cursor: default !important;
+    pointer-events: none !important;
+  }
+
   /* Surface evidentially-relevant metadata that screen mode collapses. */
   [data-print='evidentiary'] {
     display: block !important;

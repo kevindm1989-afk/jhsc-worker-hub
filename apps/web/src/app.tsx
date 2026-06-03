@@ -22,8 +22,12 @@ import { NewInspectionView } from './views/new-inspection-view';
 import { NewTemplateView } from './views/new-template-view';
 import { TemplatesView } from './views/templates-view';
 import { LegalView } from './views/legal-view';
+import { MeetingAdjournmentView } from './views/meeting-adjournment-view';
+import { MeetingDetailView } from './views/meeting-detail-view';
+import { MeetingFinalizationView } from './views/meeting-finalization-view';
 import { MinutesView } from './views/minutes-view';
 import { MoreView } from './views/more-view';
+import { NewMeetingView } from './views/new-meeting-view';
 import { NewRecommendationView } from './views/new-recommendation-view';
 import { RecommendationDetailView } from './views/recommendation-detail-view';
 import { RecommendationEditView } from './views/recommendation-edit-view';
@@ -53,6 +57,10 @@ export function App(): JSX.Element {
               <Routes>
                 <Route index element={<Navigate to="/minutes" replace />} />
                 <Route path="/minutes" element={<MinutesView />} />
+                <Route path="/meetings/new" element={<NewMeetingView />} />
+                <Route path="/meetings/:id" element={<MeetingDetailView />} />
+                <Route path="/meetings/:id/adjourn" element={<MeetingAdjournmentView />} />
+                <Route path="/meetings/:id/finalize" element={<MeetingFinalizationView />} />
                 <Route path="/hazards" element={<HazardsView />} />
                 <Route path="/hazards/new" element={<HazardNewView />} />
                 <Route path="/hazards/:id" element={<HazardDetailView />} />

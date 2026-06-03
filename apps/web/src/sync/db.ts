@@ -90,8 +90,15 @@ import Dexie, { type Table } from 'dexie';
 import type { SyncEntityKind, SyncOperationKind, SyncOperationState } from '@jhsc/shared-types';
 
 /** Bump-incrementing version constant; consumed by db.test.ts to assert
- * the schema opens cleanly at the expected version. */
-export const DEXIE_SCHEMA_VERSION = 1 as const;
+ * the schema opens cleanly at the expected version.
+ *
+ * Version 2 (Milestone 2.1, ADR-0012 §3.11 S3) — adds seven meeting-
+ * lifecycle tables (meetings, meeting_sections, meeting_attendance,
+ * meeting_inspection_review, meeting_action_item_state,
+ * meeting_signatures, meeting_templates). The upgrade transformer
+ * from v1 → v2 is a no-op (no prior data; the seven tables are
+ * created empty). */
+export const DEXIE_SCHEMA_VERSION = 2 as const;
 
 /** Singleton Dexie database name. The same string lives in the service
  * worker (service-worker.ts) so it can postMessage the foreground when a
@@ -357,6 +364,121 @@ export interface LegalClauseRow {
 // the next reviewer from reading them as evidence that client-side
 // sealing is wired (it isn't — see the file header).
 
+// ---------------------------------------------------------------------------
+// Meeting-lifecycle row shapes (Milestone 2.1, ADR-0012 §3.11 S3)
+// ---------------------------------------------------------------------------
+//
+// Seven new tables mirror the server-side 0011 migration. The mutable
+// rows carry `_sync_` metadata so the queue worker reasons about them
+// uniformly with hazards / action items / etc. The encrypted columns
+// (notesEnvelopeCt, displayNameCt, signerDisplayNameCt, evidence
+// envelope, chain-of-custody note, attestation signature) are kept
+// opaque — the row stores base64 strings that the rep's browser
+// produced by sealing under the workplace public key. The on-disk
+// plaintext exposure note in the file header applies: per priv-F1
+// close-out, browser drafts that contain sensitive PI (the rep's
+// pre-sync attendance / signer name typed into the form) are
+// plaintext UNTIL the seal completes; the optimistic Dexie write
+// stores the SEALED b64 — the typed input string never lands in
+// Dexie.
+
+/** Meetings (2.1). */
+export interface MeetingRow extends BaseEntityRow {
+  readonly meetingDate: string;
+  readonly location: string | null;
+  readonly status: string;
+  readonly scheduledStartAt: string;
+  readonly scheduledEndAt: string;
+  readonly actualStartAt: string | null;
+  readonly actualEndAt: string | null;
+  readonly agendaTemplateVersion: number;
+  readonly currentSectionId: string | null;
+  readonly createdByActorId: string;
+}
+
+/** Meeting sections (2.1) — one row per template-instantiated section. */
+export interface MeetingSectionRow extends BaseEntityRow {
+  readonly meetingId: string;
+  readonly sectionType: string;
+  readonly visibility: string;
+  readonly orderIdx: number;
+  readonly startedAt: string | null;
+  readonly endedAt: string | null;
+  /** Base64 sealed envelope (workplace public key). null when no notes
+   * have been captured yet. */
+  readonly notesEnvelopeCt: string | null;
+  readonly notesEnvelopeDekCt: string | null;
+}
+
+/** Meeting attendance (2.1) — one row per attendee per meeting. */
+export interface MeetingAttendanceRow extends BaseEntityRow {
+  readonly meetingId: string;
+  readonly role: string;
+  readonly party: string;
+  readonly presentStatus: string;
+  /** Base64 sealed envelope — mandatory (every attendee is named). */
+  readonly displayNameCt: string;
+  readonly displayNameDekCt: string;
+  readonly attendeeUserId: string | null;
+  readonly arrivedAt: string | null;
+  readonly departedAt: string | null;
+}
+
+/** Meeting inspection review (2.1) — link rows between a meeting and an
+ * inspection it considered. */
+export interface MeetingInspectionReviewRow extends BaseEntityRow {
+  readonly meetingId: string;
+  readonly inspectionId: string;
+  readonly outcome: string;
+  readonly notesEnvelopeCt: string | null;
+  readonly notesEnvelopeDekCt: string | null;
+}
+
+/** Meeting signatures (2.1) — append-only counter-sign rows. */
+export interface MeetingSignatureRow extends BaseEntityRow {
+  readonly meetingId: string;
+  readonly signerRole: string;
+  readonly signedMethod: string;
+  readonly signedAt: string;
+  readonly signerDisplayNameCt: string;
+  readonly signerDisplayNameDekCt: string;
+  readonly signerUserId: string | null;
+  readonly evidenceStorageKey: string | null;
+  readonly evidenceEnvelopeCt: string | null;
+  readonly evidenceEnvelopeDekCt: string | null;
+  readonly chainOfCustodyNoteCt: string | null;
+  readonly chainOfCustodyNoteDekCt: string | null;
+  readonly attestationSignedCt: string;
+  readonly signingKeyId: string;
+}
+
+/** Meeting action item state snapshots (2.1) — read-only mirror of the
+ * server table; the client does not enqueue snapshot writes (the
+ * server emits them inside the action_items PATCH and meeting.adjourn
+ * transactions per ADR §3.8). Kept here so the live meeting view can
+ * render the "items raised this meeting" counter offline. */
+export interface MeetingActionItemStateRow {
+  readonly id: string;
+  readonly meetingId: string;
+  readonly actionItemId: string;
+  readonly snapshotKind: string;
+  readonly snapshotStatus: string;
+  readonly snapshotSection: string;
+  readonly snapshotAt: string;
+  readonly cachedAt: string;
+}
+
+/** Meeting templates (2.1) — read-only cache (no `_sync_`). */
+export interface MeetingTemplateRow {
+  readonly id: string;
+  readonly templateCode: string;
+  readonly versionNumber: number;
+  readonly jurisdiction: string;
+  readonly defaultTotalMinutes: number;
+  readonly sections: ReadonlyArray<unknown>;
+  readonly cachedAt: string;
+}
+
 /** A row in the sync queue — the in-flight work the queue worker drains
  * (ADR §3.2). */
 export interface SyncQueueRow {
@@ -461,6 +583,14 @@ export class JhscOfflineDb extends Dexie {
   evidence_files!: Table<EvidenceFileRow, string>;
   // Three-step upload state.
   evidence_pending_uploads!: Table<EvidencePendingUploadRow, string>;
+  // Meeting lifecycle tables (Milestone 2.1, ADR-0012 §3.11 S3).
+  meetings!: Table<MeetingRow, string>;
+  meeting_sections!: Table<MeetingSectionRow, string>;
+  meeting_attendance!: Table<MeetingAttendanceRow, string>;
+  meeting_inspection_review!: Table<MeetingInspectionReviewRow, string>;
+  meeting_signatures!: Table<MeetingSignatureRow, string>;
+  meeting_action_item_state!: Table<MeetingActionItemStateRow, string>;
+  meeting_templates!: Table<MeetingTemplateRow, string>;
   // Read-only caches.
   inspection_templates!: Table<InspectionTemplateRow, string>;
   legal_clauses!: Table<LegalClauseRow, string>;
@@ -493,7 +623,10 @@ export class JhscOfflineDb extends Dexie {
     //     findings, recommendation_id on citations + responses, etc.).
     //   - `nextAttemptAt` on sync_queue — the queue worker hot path
     //     (where('nextAttemptAt').belowOrEqual(now()).first()).
-    this.version(DEXIE_SCHEMA_VERSION).stores({
+    // Schema version 1 (initial). Kept verbatim per the Dexie rule —
+    // never edit a prior .version(N) block; append .version(N+1)
+    // forward migrations.
+    this.version(1).stores({
       // Hazards: PK is id (== _local_id); indexes for the list view
       // filters + the sync-status chip.
       hazards: 'id, _sync_state, status, severity, jurisdiction, reportedAt',
@@ -547,6 +680,41 @@ export class JhscOfflineDb extends Dexie {
       // Last-known-server-state cache; PK is a composite `key`
       // (`${entityKind}:${entityLocalId}`).
       _base_state: 'key, entityKind, entityLocalId, cachedAt',
+    });
+
+    // Schema version 2 (Milestone 2.1, ADR-0012 §3.11 S3) — adds the
+    // seven meeting-lifecycle tables. Forward-only; the upgrade
+    // transformer is a no-op because v1 carried no meeting data.
+    //
+    // Index choices:
+    //   - meetings: meetingDate desc + status for the list view's
+    //     filter chips; _sync_state for the queue worker.
+    //   - meeting_sections: meetingId + orderIdx for the live view's
+    //     accordion render; meetingId for the bulk read.
+    //   - meeting_attendance: meetingId for the live quorum compute;
+    //     [meetingId+role] for the co-chair signer lookup at
+    //     finalization.
+    //   - meeting_inspection_review: meetingId + inspectionId for the
+    //     duplicate-review surface.
+    //   - meeting_signatures: meetingId + signerRole for the 4-signer
+    //     gate count at finalization.
+    //   - meeting_action_item_state: meetingId for the live snapshot
+    //     count; [meetingId+snapshotKind] for the finalized vs live
+    //     filter.
+    //   - meeting_templates: read-only cache by templateCode +
+    //     versionNumber (look up "latest active v1" cheaply).
+    this.version(2).stores({
+      meetings: 'id, _sync_state, status, meetingDate, scheduledStartAt, currentSectionId',
+      meeting_sections: 'id, _sync_state, meetingId, sectionType, orderIdx, [meetingId+orderIdx]',
+      meeting_attendance:
+        'id, _sync_state, meetingId, role, party, presentStatus, [meetingId+role]',
+      meeting_inspection_review:
+        'id, _sync_state, meetingId, inspectionId, outcome, [meetingId+inspectionId]',
+      meeting_signatures:
+        'id, _sync_state, meetingId, signerRole, signedMethod, [meetingId+signerRole]',
+      meeting_action_item_state:
+        'id, meetingId, actionItemId, snapshotKind, [meetingId+snapshotKind], snapshotAt',
+      meeting_templates: 'id, templateCode, versionNumber, [templateCode+versionNumber]',
     });
   }
 }

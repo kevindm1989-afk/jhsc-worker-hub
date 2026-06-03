@@ -162,6 +162,15 @@ const createBody = z
     body: noHtmlBounded({ min: 1, max: 16000 }),
     jurisdiction: z.enum(recommendationJurisdiction),
     citations: z.array(citationSchema).max(500).optional(),
+    // 2.1 (ADR-0012 §3.7 + TM-fold-3): meeting linkage. When set, the
+    // create handler ALSO emits a `meeting.recommendation_drafted`
+    // cross-chain anchor carrying the just-emitted
+    // `recommendation.drafted` event's hash. NULL for recommendations
+    // drafted outside a meeting (the existing 1.9 surface).
+    meetingId: z.string().uuid().optional(),
+    // Required when meetingId is set so the cross-chain anchor binds
+    // to the specific recommendations section the rec was drafted in.
+    sectionId: z.string().uuid().optional(),
   })
   .strict();
 
@@ -478,7 +487,8 @@ recommendationsRoute.post('/', async (c) => {
           id, recommendation_number,
           title_ct, title_dek_ct,
           body_ct, body_dek_ct,
-          jurisdiction, status, drafted_by_user_id, audit_idx
+          jurisdiction, status, drafted_by_user_id, audit_idx,
+          meeting_id
         )
         VALUES (
           ${recommendationId}, ${recommendationNumber},
@@ -486,7 +496,8 @@ recommendationsRoute.post('/', async (c) => {
           ${Buffer.from(titleSealed.dekCt) as unknown as Uint8Array},
           ${Buffer.from(bodySealed.ct) as unknown as Uint8Array},
           ${Buffer.from(bodySealed.dekCt) as unknown as Uint8Array},
-          ${body.jurisdiction}, 'draft', ${auth.userId}, ${chainRow.idx}
+          ${body.jurisdiction}, 'draft', ${auth.userId}, ${chainRow.idx},
+          ${body.meetingId ?? null}
         )
         RETURNING drafted_at::text AS drafted_at
       `)) as unknown as Array<{ drafted_at: string }>;
@@ -503,6 +514,29 @@ recommendationsRoute.post('/', async (c) => {
             )
           `);
         }
+      }
+
+      // 2.1 TM-fold-3 (T-ML42): cross-chain anchor. When a recommendation
+      // is drafted INSIDE a meeting, ALSO emit
+      // `meeting.recommendation_drafted` carrying the just-emitted
+      // `recommendation.drafted` event's this_hash. The two chains
+      // compose so an offline verifier can ask "was this rec drafted
+      // in a meeting?" and trace back to the meeting event.
+      if (body.meetingId) {
+        // chainRow.thisHash is the recommendation.drafted event's hash.
+        const recommendationCreatedEventHash = Buffer.from(chainRow.thisHash).toString('hex');
+        await append(tx, {
+          actorId: auth.userId,
+          payload: {
+            kind: 'meeting.recommendation_drafted',
+            meetingId: body.meetingId,
+            recommendationId,
+            sectionId: body.sectionId ?? body.meetingId,
+            recommendationCreatedEventHash,
+          },
+          resourceType: 'recommendations',
+          resourceId: recommendationId,
+        });
       }
 
       return { recommendationNumber, draftedAt: insertedRows[0]!.drafted_at };

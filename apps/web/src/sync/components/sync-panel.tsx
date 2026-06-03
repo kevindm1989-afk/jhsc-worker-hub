@@ -89,6 +89,20 @@ function entityKindLabel(kind: SyncEntityKind): string {
       return 'Recommendation withdrawal';
     case 'evidence_finalize':
       return 'Evidence upload';
+    case 'meeting':
+      return 'Meeting';
+    case 'meeting_section':
+      return 'Meeting section';
+    case 'meeting_section_notes':
+      return 'Section notes';
+    case 'meeting_attendance':
+      return 'Attendance';
+    case 'meeting_inspection_review':
+      return 'Inspection review';
+    case 'meeting_signature':
+      return 'Signature';
+    case 'meeting_finalize':
+      return 'Meeting finalize';
   }
 }
 
@@ -178,6 +192,18 @@ function entityKindToTable(kind: SyncEntityKind): string | null {
       return 'recommendation_responses';
     case 'evidence_finalize':
       return 'evidence_files';
+    case 'meeting':
+    case 'meeting_finalize':
+      return 'meetings';
+    case 'meeting_section':
+    case 'meeting_section_notes':
+      return 'meeting_sections';
+    case 'meeting_attendance':
+      return 'meeting_attendance';
+    case 'meeting_inspection_review':
+      return 'meeting_inspection_review';
+    case 'meeting_signature':
+      return 'meeting_signatures';
   }
 }
 

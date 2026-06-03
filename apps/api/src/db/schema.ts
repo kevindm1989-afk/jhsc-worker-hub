@@ -453,7 +453,14 @@ export const actionItems = pgTable(
       onDelete: 'restrict',
       onUpdate: 'restrict',
     }),
+    // 2.1 (ADR-0012 §3.2 Layer 2): operational FK. The placeholder uuid
+    // from 1.6 gets its FK to meetings(id) in migration 0011. Mutable;
+    // tracks the meeting currently discussing this item.
     meetingId: uuid('meeting_id'),
+    // 2.1 (ADR-0012 §3.2 Layer 1): immutable provenance — the meeting
+    // this item was FIRST raised in. NULL for items imported from Excel
+    // or raised outside a meeting. Set at create time; never changes.
+    firstRaisedMeetingId: uuid('first_raised_meeting_id'),
     sourceType: text('source_type'),
     sourceId: uuid('source_id'),
     sourceExcelHash: bytea('source_excel_hash'),
@@ -478,6 +485,9 @@ export const actionItems = pgTable(
     sectionSeqIdx: index('action_items_section_seq_idx').on(t.section, t.sequenceNumber),
     sourceIdx: index('action_items_source_idx').on(t.sourceType, t.sourceId),
     meetingIdx: index('action_items_meeting_idx').on(t.meetingId),
+    firstRaisedMeetingIdx: index('action_items_first_raised_meeting_idx').on(
+      t.firstRaisedMeetingId,
+    ),
   }),
 );
 
@@ -646,6 +656,9 @@ export const inspections = pgTable(
     scheduledFor: timestamp('scheduled_for', { withTimezone: true }),
     startedAt: timestamp('started_at', { withTimezone: true }),
     completedAt: timestamp('completed_at', { withTimezone: true }),
+    // 2.1 (ADR-0012 §3.7): the meeting that requested this inspection,
+    // if any. NULL for inspections scheduled outside a meeting context.
+    triggeringMeetingId: uuid('triggering_meeting_id'),
     auditIdx: bigint('audit_idx', { mode: 'number' })
       .notNull()
       .references(() => auditLog.idx, { onDelete: 'restrict', onUpdate: 'restrict' }),
@@ -665,6 +678,7 @@ export const inspections = pgTable(
     templateVersionIdx: index('inspections_template_version_idx').on(t.templateVersionId),
     conductedByIdx: index('inspections_conducted_by_idx').on(t.conductedByUserId),
     scheduledForIdx: index('inspections_scheduled_for_idx').on(t.scheduledFor),
+    triggeringMeetingIdx: index('inspections_triggering_meeting_idx').on(t.triggeringMeetingId),
   }),
 );
 
@@ -876,6 +890,11 @@ export const recommendations = pgTable(
     // Template-supplied PI-clean enum-like reason; SQL caps at 200
     // chars. The route's Zod enum is the tighter gate.
     withdrawnReason: text('withdrawn_reason'),
+    // 2.1 (ADR-0012 §3.7): the meeting this recommendation was drafted
+    // in, if any. NULL for recommendations drafted outside a meeting
+    // (the existing 1.9 surface). FK SET NULL on meeting delete — the
+    // recommendation's own lifecycle outlives the meeting record.
+    meetingId: uuid('meeting_id'),
     auditIdx: bigint('audit_idx', { mode: 'number' })
       .notNull()
       .references(() => auditLog.idx, { onDelete: 'restrict', onUpdate: 'restrict' }),
@@ -898,6 +917,7 @@ export const recommendations = pgTable(
     jurisdictionIdx: index('recommendations_jurisdiction_idx').on(t.jurisdiction),
     draftedByIdx: index('recommendations_drafted_by_idx').on(t.draftedByUserId),
     submittedAtIdx: index('recommendations_submitted_at_idx').on(t.submittedAt),
+    meetingIdx: index('recommendations_meeting_idx').on(t.meetingId),
   }),
 );
 
@@ -1210,6 +1230,297 @@ export const excelImportItems = pgTable(
 );
 
 // ---------------------------------------------------------------------------
+// Meeting lifecycle (2.1, ADR-0012)
+// ---------------------------------------------------------------------------
+
+// meeting_templates — versioned agenda templates (append-only per
+// non-negotiable #13). Same posture as inspection_templates.
+
+export const meetingTemplates = pgTable(
+  'meeting_templates',
+  {
+    id: uuid('id')
+      .primaryKey()
+      .default(sql`gen_random_uuid()`),
+    templateCode: text('template_code').notNull(),
+    versionNumber: integer('version_number').notNull(),
+    name: text('name').notNull(),
+    jurisdiction: text('jurisdiction').notNull(),
+    sectionsJson: jsonb('sections_json').notNull(),
+    signingKeyId: uuid('signing_key_id').references(() => workplaceSigningKeys.id, {
+      onDelete: 'set null',
+      onUpdate: 'restrict',
+    }),
+    createdAt: timestamp('created_at', { withTimezone: true })
+      .notNull()
+      .default(sql`now()`),
+    retiredAt: timestamp('retired_at', { withTimezone: true }),
+  },
+  (t) => ({
+    codeVersionUnique: uniqueIndex('meeting_templates_code_version_unique').on(
+      t.templateCode,
+      t.versionNumber,
+    ),
+    codeIdx: index('meeting_templates_code_idx').on(t.templateCode),
+  }),
+);
+
+// meetings — TM-fold-1 column is `agendaTemplateVersion`. current_section_id
+// FK is added to meeting_sections.id in the migration (chicken-and-egg).
+// Drizzle's lazy `references()` lets us reference meetingSections defined
+// further down.
+
+export const meetings = pgTable(
+  'meetings',
+  {
+    id: uuid('id')
+      .primaryKey()
+      .default(sql`gen_random_uuid()`),
+    workplaceSingleton: smallint('workplace_singleton').notNull().default(1),
+    meetingDate: date('meeting_date', { mode: 'string' }).notNull(),
+    location: text('location'),
+    scheduledStartAt: timestamp('scheduled_start_at', { withTimezone: true }).notNull(),
+    scheduledEndAt: timestamp('scheduled_end_at', { withTimezone: true }).notNull(),
+    actualStartAt: timestamp('actual_start_at', { withTimezone: true }),
+    actualEndAt: timestamp('actual_end_at', { withTimezone: true }),
+    // TM-fold-1 (T-ML33): immutable post-create per #13.
+    agendaTemplateVersion: integer('agenda_template_version').notNull(),
+    status: text('status').notNull().default('scheduled'),
+    // FK to meeting_sections.id added in migration; here it's a plain
+    // uuid column because the meetingSections table is declared later
+    // and Drizzle's lazy reference would create a circular type.
+    currentSectionId: uuid('current_section_id'),
+    encryptedNotesEnvelopeCt: bytea('encrypted_notes_envelope_ct'),
+    encryptedNotesEnvelopeDekCt: bytea('encrypted_notes_envelope_dek_ct'),
+    createdByActorId: uuid('created_by_actor_id')
+      .notNull()
+      .references(() => users.id, { onDelete: 'restrict', onUpdate: 'restrict' }),
+    version: integer('version').notNull().default(1),
+    createdAt: timestamp('created_at', { withTimezone: true })
+      .notNull()
+      .default(sql`now()`),
+    updatedAt: timestamp('updated_at', { withTimezone: true })
+      .notNull()
+      .default(sql`now()`),
+  },
+  (t) => ({
+    meetingDateIdx: index('meetings_meeting_date_idx').on(t.meetingDate),
+    statusIdx: index('meetings_status_idx').on(t.status),
+  }),
+);
+
+// meeting_sections — closed 12-value section_type enum. visibility is
+// TM-fold-2 forward seam (T-ML9 / T-ML11 / T-ML25).
+
+export const meetingSections = pgTable(
+  'meeting_sections',
+  {
+    id: uuid('id')
+      .primaryKey()
+      .default(sql`gen_random_uuid()`),
+    meetingId: uuid('meeting_id')
+      .notNull()
+      .references(() => meetings.id, { onDelete: 'cascade', onUpdate: 'restrict' }),
+    sectionType: text('section_type').notNull(),
+    visibility: text('visibility').notNull().default('standard'),
+    orderIdx: integer('order_idx').notNull(),
+    startedAt: timestamp('started_at', { withTimezone: true }),
+    endedAt: timestamp('ended_at', { withTimezone: true }),
+    notesEnvelopeCt: bytea('notes_envelope_ct'),
+    notesEnvelopeDekCt: bytea('notes_envelope_dek_ct'),
+    version: integer('version').notNull().default(1),
+    createdAt: timestamp('created_at', { withTimezone: true })
+      .notNull()
+      .default(sql`now()`),
+    updatedAt: timestamp('updated_at', { withTimezone: true })
+      .notNull()
+      .default(sql`now()`),
+  },
+  (t) => ({
+    meetingOrderUnique: uniqueIndex('meeting_sections_meeting_order_unique').on(
+      t.meetingId,
+      t.orderIdx,
+    ),
+    meetingIdx: index('meeting_sections_meeting_idx').on(t.meetingId),
+  }),
+);
+
+// meeting_attendance — encrypted display_name (T-ML1). No plaintext
+// name column on this table.
+
+export const meetingAttendance = pgTable(
+  'meeting_attendance',
+  {
+    id: uuid('id')
+      .primaryKey()
+      .default(sql`gen_random_uuid()`),
+    meetingId: uuid('meeting_id')
+      .notNull()
+      .references(() => meetings.id, { onDelete: 'cascade', onUpdate: 'restrict' }),
+    role: text('role').notNull(),
+    party: text('party').notNull(),
+    displayNameCt: bytea('display_name_ct').notNull(),
+    displayNameDekCt: bytea('display_name_dek_ct').notNull(),
+    attendeeUserId: uuid('attendee_user_id').references(() => users.id, {
+      onDelete: 'restrict',
+      onUpdate: 'restrict',
+    }),
+    presentStatus: text('present_status').notNull().default('present'),
+    arrivedAt: timestamp('arrived_at', { withTimezone: true }),
+    departedAt: timestamp('departed_at', { withTimezone: true }),
+    version: integer('version').notNull().default(1),
+    createdAt: timestamp('created_at', { withTimezone: true })
+      .notNull()
+      .default(sql`now()`),
+    updatedAt: timestamp('updated_at', { withTimezone: true })
+      .notNull()
+      .default(sql`now()`),
+  },
+  (t) => ({
+    meetingIdx: index('meeting_attendance_meeting_idx').on(t.meetingId),
+    meetingRoleIdx: index('meeting_attendance_meeting_role_idx').on(t.meetingId, t.role),
+  }),
+);
+
+// meeting_inspection_review — link from a meeting to a 1.8 inspection.
+
+export const meetingInspectionReview = pgTable(
+  'meeting_inspection_review',
+  {
+    id: uuid('id')
+      .primaryKey()
+      .default(sql`gen_random_uuid()`),
+    meetingId: uuid('meeting_id')
+      .notNull()
+      .references(() => meetings.id, { onDelete: 'cascade', onUpdate: 'restrict' }),
+    inspectionId: uuid('inspection_id')
+      .notNull()
+      .references(() => inspections.id, { onDelete: 'restrict', onUpdate: 'restrict' }),
+    reviewedAt: timestamp('reviewed_at', { withTimezone: true })
+      .notNull()
+      .default(sql`now()`),
+    outcome: text('outcome').notNull(),
+    notesEnvelopeCt: bytea('notes_envelope_ct'),
+    notesEnvelopeDekCt: bytea('notes_envelope_dek_ct'),
+    version: integer('version').notNull().default(1),
+    createdAt: timestamp('created_at', { withTimezone: true })
+      .notNull()
+      .default(sql`now()`),
+    updatedAt: timestamp('updated_at', { withTimezone: true })
+      .notNull()
+      .default(sql`now()`),
+  },
+  (t) => ({
+    meetingInspectionUnique: uniqueIndex('meeting_inspection_review_meeting_inspection_unique').on(
+      t.meetingId,
+      t.inspectionId,
+    ),
+    meetingIdx: index('meeting_inspection_review_meeting_idx').on(t.meetingId),
+    inspectionIdx: index('meeting_inspection_review_inspection_idx').on(t.inspectionId),
+  }),
+);
+
+// meeting_signatures — 4-signer counter-sign workflow. TM-fold-4
+// (T-ML5 / T-ML23) columns: chain_of_custody_note_ct (encrypted free-text
+// describing how the off-app signature was obtained) and
+// attestation_signed_ct (64-byte Ed25519 sig over canonical row JSON).
+
+export const meetingSignatures = pgTable(
+  'meeting_signatures',
+  {
+    id: uuid('id')
+      .primaryKey()
+      .default(sql`gen_random_uuid()`),
+    meetingId: uuid('meeting_id')
+      .notNull()
+      .references(() => meetings.id, { onDelete: 'cascade', onUpdate: 'restrict' }),
+    signerRole: text('signer_role').notNull(),
+    signerDisplayNameCt: bytea('signer_display_name_ct').notNull(),
+    signerDisplayNameDekCt: bytea('signer_display_name_dek_ct').notNull(),
+    signerUserId: uuid('signer_user_id').references(() => users.id, {
+      onDelete: 'restrict',
+      onUpdate: 'restrict',
+    }),
+    signedAt: timestamp('signed_at', { withTimezone: true })
+      .notNull()
+      .default(sql`now()`),
+    signedMethod: text('signed_method').notNull(),
+    evidenceStorageKey: text('evidence_storage_key'),
+    evidenceEnvelopeCt: bytea('evidence_envelope_ct'),
+    evidenceEnvelopeDekCt: bytea('evidence_envelope_dek_ct'),
+    stepUpJti: text('step_up_jti'),
+    // TM-fold-4 (T-ML5 / T-ML23): chain-of-custody note.
+    chainOfCustodyNoteCt: bytea('chain_of_custody_note_ct'),
+    chainOfCustodyNoteDekCt: bytea('chain_of_custody_note_dek_ct'),
+    // TM-fold-4 (T-ML5 / T-ML23): Ed25519 sig over canonical row JSON.
+    attestationSignedCt: bytea('attestation_signed_ct').notNull(),
+    signingKeyId: uuid('signing_key_id')
+      .notNull()
+      .references(() => workplaceSigningKeys.id, {
+        onDelete: 'restrict',
+        onUpdate: 'restrict',
+      }),
+    version: integer('version').notNull().default(1),
+    createdAt: timestamp('created_at', { withTimezone: true })
+      .notNull()
+      .default(sql`now()`),
+  },
+  (t) => ({
+    meetingRoleUnique: uniqueIndex('meeting_signatures_meeting_role_unique').on(
+      t.meetingId,
+      t.signerRole,
+    ),
+    meetingIdx: index('meeting_signatures_meeting_idx').on(t.meetingId),
+  }),
+);
+
+// meeting_action_item_state — per-meeting snapshot rows. Per S0 user
+// decision: live rows are retained alongside the finalized row; the
+// partial UNIQUE on snapshot_kind='finalized' is the only structural
+// uniqueness constraint.
+
+export const meetingActionItemState = pgTable(
+  'meeting_action_item_state',
+  {
+    id: uuid('id')
+      .primaryKey()
+      .default(sql`gen_random_uuid()`),
+    meetingId: uuid('meeting_id')
+      .notNull()
+      .references(() => meetings.id, { onDelete: 'cascade', onUpdate: 'restrict' }),
+    actionItemId: uuid('action_item_id')
+      .notNull()
+      .references(() => actionItems.id, { onDelete: 'restrict', onUpdate: 'restrict' }),
+    snapshotKind: text('snapshot_kind').notNull().default('live'),
+    snapshotStatus: text('snapshot_status').notNull(),
+    snapshotSection: text('snapshot_section').notNull(),
+    snapshotAssigneeCt: bytea('snapshot_assignee_ct'),
+    snapshotAssigneeDekCt: bytea('snapshot_assignee_dek_ct'),
+    snapshotAt: timestamp('snapshot_at', { withTimezone: true })
+      .notNull()
+      .default(sql`now()`),
+    version: integer('version').notNull().default(1),
+    createdAt: timestamp('created_at', { withTimezone: true })
+      .notNull()
+      .default(sql`now()`),
+    updatedAt: timestamp('updated_at', { withTimezone: true })
+      .notNull()
+      .default(sql`now()`),
+  },
+  (t) => ({
+    finalizedUnique: uniqueIndex('meeting_action_item_state_finalized_unique')
+      .on(t.meetingId, t.actionItemId)
+      .where(sql`${t.snapshotKind} = 'finalized'`),
+    meetingIdx: index('meeting_action_item_state_meeting_idx').on(t.meetingId),
+    actionItemIdx: index('meeting_action_item_state_action_item_idx').on(t.actionItemId),
+    meetingKindIdx: index('meeting_action_item_state_meeting_kind_idx').on(
+      t.meetingId,
+      t.snapshotKind,
+    ),
+  }),
+);
+
+// ---------------------------------------------------------------------------
 // Re-export for Drizzle adapters
 // ---------------------------------------------------------------------------
 
@@ -1248,6 +1559,13 @@ export const schema = {
   syncIdempotency,
   excelImports,
   excelImportItems,
+  meetingTemplates,
+  meetings,
+  meetingSections,
+  meetingAttendance,
+  meetingInspectionReview,
+  meetingSignatures,
+  meetingActionItemState,
   loginAttemptOutcome,
   authEventKind,
   webauthnPurpose,

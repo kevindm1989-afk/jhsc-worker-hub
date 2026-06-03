@@ -20,11 +20,18 @@
     "./action-item-flag": {
       "types": "./src/action-item-flag.ts",
       "default": "./src/action-item-flag.ts"
+    },
+    "./meeting": {
+      "types": "./src/meeting.ts",
+      "default": "./src/meeting.ts"
     }
   },
   "scripts": {
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "vitest run"
+  },
+  "dependencies": {
+    "zod": "^3.23.8"
   },
   "devDependencies": {
     "typescript": "^5.7.2",
