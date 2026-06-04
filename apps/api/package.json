@@ -19,6 +19,7 @@
     "@jhsc/audit": "workspace:*",
     "@jhsc/crypto": "workspace:*",
     "@jhsc/legal-corpus": "workspace:*",
+    "@jhsc/pdf-shared": "workspace:*",
     "@jhsc/shared-types": "workspace:*",
     "@lucia-auth/adapter-drizzle": "^1.1.0",
     "@oslojs/crypto": "^1.0.1",

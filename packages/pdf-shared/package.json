@@ -1,0 +1,54 @@
+{
+  "name": "@jhsc/pdf-shared",
+  "version": "0.0.0",
+  "private": true,
+  "description": "JHSC Worker Hub — shared pdfkit primitives (header / footer / chain receipt / signature panel / retention statement) consumed by inspection, recommendation, and minutes-document PDF renderers (ADR-0008 §S4 + ADR-0014 §3.2.2).",
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./src/index.ts",
+      "default": "./src/index.ts"
+    },
+    "./fonts": {
+      "types": "./src/fonts.ts",
+      "default": "./src/fonts.ts"
+    },
+    "./page-size": {
+      "types": "./src/page-size.ts",
+      "default": "./src/page-size.ts"
+    },
+    "./header": {
+      "types": "./src/header.ts",
+      "default": "./src/header.ts"
+    },
+    "./footer": {
+      "types": "./src/footer.ts",
+      "default": "./src/footer.ts"
+    },
+    "./chain-receipt": {
+      "types": "./src/chain-receipt.ts",
+      "default": "./src/chain-receipt.ts"
+    },
+    "./signature-panel": {
+      "types": "./src/signature-panel.ts",
+      "default": "./src/signature-panel.ts"
+    },
+    "./retention-statement": {
+      "types": "./src/retention-statement.ts",
+      "default": "./src/retention-statement.ts"
+    }
+  },
+  "scripts": {
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "pdfkit": "^0.15.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.14.0",
+    "@types/pdfkit": "^0.13.0",
+    "typescript": "^5.7.2",
+    "vitest": "^4.1.0"
+  }
+}
