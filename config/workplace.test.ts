@@ -93,4 +93,63 @@ describe('loadWorkplaceConfig', () => {
       ).not.toThrow();
     });
   });
+
+  describe('documentPageSize (2.3, ADR-0014 §3.2.4)', () => {
+    it('defaults to letter (Ontario default per ADR + S0 Q1)', () => {
+      expect(loadWorkplaceConfig({}).documentPageSize).toBe('letter');
+    });
+
+    it('honors a4 override (CA-FED-primary workplaces)', () => {
+      expect(loadWorkplaceConfig({ WORKPLACE_DOCUMENT_PAGE_SIZE: 'a4' }).documentPageSize).toBe(
+        'a4',
+      );
+      // Case-insensitive (a rep typing 'A4' should not silently fall back)
+      expect(loadWorkplaceConfig({ WORKPLACE_DOCUMENT_PAGE_SIZE: 'A4' }).documentPageSize).toBe(
+        'a4',
+      );
+    });
+
+    it('falls back to letter on a misconfigured value (fail-soft, no throw)', () => {
+      expect(loadWorkplaceConfig({ WORKPLACE_DOCUMENT_PAGE_SIZE: 'legal' }).documentPageSize).toBe(
+        'letter',
+      );
+      expect(loadWorkplaceConfig({ WORKPLACE_DOCUMENT_PAGE_SIZE: '' }).documentPageSize).toBe(
+        'letter',
+      );
+    });
+  });
+
+  describe('minutesRecipientWorkplaceRoleNLabel (2.3, ADR-0014 §3.3 — S0 Q4)', () => {
+    it('returns null when env vars are unset (slot hidden in UI)', () => {
+      const cfg = loadWorkplaceConfig({});
+      expect(cfg.minutesRecipientWorkplaceRole1Label).toBeNull();
+      expect(cfg.minutesRecipientWorkplaceRole2Label).toBeNull();
+    });
+
+    it('returns null for an empty / whitespace-only env var', () => {
+      const cfg = loadWorkplaceConfig({
+        MINUTES_RECIPIENT_ROLE_WORKPLACE_1_LABEL: '   ',
+        MINUTES_RECIPIENT_ROLE_WORKPLACE_2_LABEL: '',
+      });
+      expect(cfg.minutesRecipientWorkplaceRole1Label).toBeNull();
+      expect(cfg.minutesRecipientWorkplaceRole2Label).toBeNull();
+    });
+
+    it('reads the labels from env vars per non-negotiable #1 (env-driven only)', () => {
+      const cfg = loadWorkplaceConfig({
+        MINUTES_RECIPIENT_ROLE_WORKPLACE_1_LABEL: 'Plant Manager',
+        MINUTES_RECIPIENT_ROLE_WORKPLACE_2_LABEL: 'Warehouse Manager',
+      });
+      expect(cfg.minutesRecipientWorkplaceRole1Label).toBe('Plant Manager');
+      expect(cfg.minutesRecipientWorkplaceRole2Label).toBe('Warehouse Manager');
+    });
+
+    it('allows only one of the two slots to be configured (independent)', () => {
+      const cfg = loadWorkplaceConfig({
+        MINUTES_RECIPIENT_ROLE_WORKPLACE_1_LABEL: 'Site Director',
+      });
+      expect(cfg.minutesRecipientWorkplaceRole1Label).toBe('Site Director');
+      expect(cfg.minutesRecipientWorkplaceRole2Label).toBeNull();
+    });
+  });
 });

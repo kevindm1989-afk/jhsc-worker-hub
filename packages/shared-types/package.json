@@ -28,6 +28,30 @@
     "./action-item-closure": {
       "types": "./src/action-item-closure.ts",
       "default": "./src/action-item-closure.ts"
+    },
+    "./minutes-document-format-version": {
+      "types": "./src/minutes-document-format-version.ts",
+      "default": "./src/minutes-document-format-version.ts"
+    },
+    "./minutes-document-render-audience": {
+      "types": "./src/minutes-document-render-audience.ts",
+      "default": "./src/minutes-document-render-audience.ts"
+    },
+    "./minutes-document-hold-state": {
+      "types": "./src/minutes-document-hold-state.ts",
+      "default": "./src/minutes-document-hold-state.ts"
+    },
+    "./minutes-document-recipient-role": {
+      "types": "./src/minutes-document-recipient-role.ts",
+      "default": "./src/minutes-document-recipient-role.ts"
+    },
+    "./minutes-document-sent-method": {
+      "types": "./src/minutes-document-sent-method.ts",
+      "default": "./src/minutes-document-sent-method.ts"
+    },
+    "./minutes-document-regeneration-reason": {
+      "types": "./src/minutes-document-regeneration-reason.ts",
+      "default": "./src/minutes-document-regeneration-reason.ts"
     }
   },
   "scripts": {

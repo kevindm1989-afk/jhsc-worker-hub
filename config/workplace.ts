@@ -23,7 +23,39 @@ export interface WorkplaceConfig {
    * two env vars; the source code carries no names.
    */
   readonly minutesSignerRoles: readonly SignerRoleDef[];
+  /**
+   * Document page size for generated PDFs (Milestone 2.3, ADR-0014
+   * §3.2.4). 'letter' is the Ontario default (the rep's existing
+   * Excel print workflow is Letter); 'a4' for CA-FED-primary
+   * workplaces. Env: `WORKPLACE_DOCUMENT_PAGE_SIZE`. Pinned per-
+   * document at generation time on minutes_documents — a config
+   * change here produces a NEW document_hash on next regeneration
+   * (one of the inputs that breaks idempotency per ADR §3.5).
+   */
+  readonly documentPageSize: DocumentPageSize;
+  /**
+   * Display label for the workplace_role_1 minutes-distribution
+   * recipient slot (Milestone 2.3, ADR-0014 §3.3 — S0 Q4 split
+   * source-vs-env rule). NULL = the slot is hidden in the UI (the
+   * workplace has no workplace-specific recipient 1). Env:
+   * `MINUTES_RECIPIENT_ROLE_WORKPLACE_1_LABEL`. Per non-negotiable
+   * #1 the SOURCE carries zero workplace-specific recipient labels.
+   */
+  readonly minutesRecipientWorkplaceRole1Label: string | null;
+  /**
+   * Display label for the workplace_role_2 minutes-distribution
+   * recipient slot. NULL = slot hidden. Env:
+   * `MINUTES_RECIPIENT_ROLE_WORKPLACE_2_LABEL`.
+   */
+  readonly minutesRecipientWorkplaceRole2Label: string | null;
 }
+
+/**
+ * Document page size enum (Milestone 2.3, ADR-0014 §3.2.4).
+ * 'letter' = North American Letter (8.5" × 11").
+ * 'a4'     = ISO A4 (210mm × 297mm).
+ */
+export type DocumentPageSize = 'letter' | 'a4';
 
 export type Jurisdiction = 'ON' | 'CA-FED';
 
@@ -164,6 +196,30 @@ function parseJurisdiction(raw: string | undefined): Jurisdiction {
   return 'ON';
 }
 
+/**
+ * Parse WORKPLACE_DOCUMENT_PAGE_SIZE per ADR-0014 §3.2.4. Defaults to
+ * 'letter' (Ontario default); accepts 'a4' for CA-FED-primary workplaces.
+ * Any other value (typo, misconfiguration) falls back to 'letter' rather
+ * than throwing — the page size is a layout preference, not a security-
+ * relevant value, and the fail-soft behavior keeps the API booting in
+ * a development environment that hasn't set the var.
+ */
+function parseDocumentPageSize(raw: string | undefined): DocumentPageSize {
+  const v = raw?.trim().toLowerCase();
+  if (v === 'a4') return 'a4';
+  return 'letter';
+}
+
+/**
+ * Parse an env-driven workplace_role_X display label per ADR-0014 §3.3
+ * S0 Q4 split source-vs-env rule. Trim + empty-to-null so a missing or
+ * blank env var consistently presents as `null` (UI hides the slot).
+ */
+function parseWorkplaceRecipientRoleLabel(raw: string | undefined): string | null {
+  const v = raw?.trim() ?? '';
+  return v.length === 0 ? null : v;
+}
+
 function readZones(env: NodeJS.ProcessEnv): readonly Zone[] {
   return ZONE_IDS.map((id, idx) => {
     const envKey = `ZONE_${idx + 1}_NAME` as const;
@@ -182,6 +238,13 @@ export function loadWorkplaceConfig(env: NodeJS.ProcessEnv = process.env): Workp
     jurisdiction: parseJurisdiction(env.WORKPLACE_JURISDICTION),
     zones: readZones(env),
     minutesSignerRoles: readSignerRoles(env),
+    documentPageSize: parseDocumentPageSize(env.WORKPLACE_DOCUMENT_PAGE_SIZE),
+    minutesRecipientWorkplaceRole1Label: parseWorkplaceRecipientRoleLabel(
+      env.MINUTES_RECIPIENT_ROLE_WORKPLACE_1_LABEL,
+    ),
+    minutesRecipientWorkplaceRole2Label: parseWorkplaceRecipientRoleLabel(
+      env.MINUTES_RECIPIENT_ROLE_WORKPLACE_2_LABEL,
+    ),
   };
 }
 

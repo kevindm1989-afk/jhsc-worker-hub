@@ -25,6 +25,20 @@ import type {
 export * from './action-item-closure';
 import type { ActionItemReopenReason } from './action-item-closure';
 
+// Re-export minutes-document enums + Zod schemas (2.3, ADR-0014).
+export * from './minutes-document-format-version';
+export * from './minutes-document-render-audience';
+export * from './minutes-document-hold-state';
+export * from './minutes-document-recipient-role';
+export * from './minutes-document-sent-method';
+export * from './minutes-document-regeneration-reason';
+import type { MinutesDocumentFormatVersion } from './minutes-document-format-version';
+import type { MinutesDocumentRenderAudience } from './minutes-document-render-audience';
+import type { MinutesDocumentHoldState } from './minutes-document-hold-state';
+import type { MinutesDocumentRecipientRole } from './minutes-document-recipient-role';
+import type { MinutesDocumentSentMethod } from './minutes-document-sent-method';
+import type { MinutesDocumentRegenerationReason } from './minutes-document-regeneration-reason';
+
 // ---------------------------------------------------------------------------
 // Result<T, E> — fallible operations
 // ---------------------------------------------------------------------------
@@ -201,6 +215,21 @@ export type AuditEventKind =
   // meeting.recommendation_drafted (M2.1).
   | 'meeting.action_item_added'
   | 'meeting.action_item_moved'
+  // Minutes document generation (Milestone 2.3, ADR-0014 §3.6 + S0
+  // addendum). Six load-bearing kinds:
+  //   - minutes_document.generated   (initial PDF render)
+  //   - minutes_document.regenerated (later re-render, prior_document_id set)
+  //   - minutes_document.downloaded  (one anchor per byte fetch per ADR §3.6.2)
+  //   - minutes_document.distributed (per-recipient per-event row)
+  //   - minutes_document.hold_placed   (TM-fold-6 lifecycle)
+  //   - minutes_document.hold_released (TM-fold-6 lifecycle)
+  // All PI-clean per T-AC9 — IDs + hashes + enums + counts only.
+  | 'minutes_document.generated'
+  | 'minutes_document.regenerated'
+  | 'minutes_document.downloaded'
+  | 'minutes_document.distributed'
+  | 'minutes_document.hold_placed'
+  | 'minutes_document.hold_released'
   | AuthEventKind;
 
 // ---------------------------------------------------------------------------
@@ -1072,6 +1101,72 @@ export type AuditPayload =
       readonly templateVersion: number;
       readonly jurisdiction: 'ON' | 'CA-FED';
       readonly templateHash: string;
+    }
+  // ---------------------------------------------------------------------
+  // Minutes document generation (2.3, ADR-0014 §3.6 + S0 addendum table)
+  //
+  // Six load-bearing kinds. PI-clean per T-AC9 — NEVER recipient names,
+  // signer names, attendee names, hold reason plaintexts, retention
+  // citation prose. Only ids + enums + hashes + counts + timestamps.
+  // ---------------------------------------------------------------------
+  | {
+      readonly kind: 'minutes_document.generated';
+      readonly meetingId: string;
+      readonly documentId: string;
+      readonly documentHash: string;
+      readonly documentSize: number;
+      readonly formatVersion: MinutesDocumentFormatVersion;
+      readonly renderAudience: MinutesDocumentRenderAudience;
+      readonly generatedAt: string;
+      readonly generatedByActorId: string;
+      readonly retentionCorpusEntryHashes: ReadonlyArray<string>;
+    }
+  | {
+      readonly kind: 'minutes_document.regenerated';
+      readonly meetingId: string;
+      readonly documentId: string;
+      readonly priorDocumentId: string;
+      readonly documentHash: string;
+      readonly generatedAt: string;
+      readonly generatedByActorId: string;
+      readonly reason: MinutesDocumentRegenerationReason;
+    }
+  | {
+      readonly kind: 'minutes_document.downloaded';
+      readonly meetingId: string;
+      readonly documentId: string;
+      readonly documentHash: string;
+      readonly downloadedAt: string;
+      readonly downloadedByActorId: string;
+    }
+  | {
+      readonly kind: 'minutes_document.distributed';
+      readonly meetingId: string;
+      readonly documentId: string;
+      readonly distributionId: string;
+      readonly documentHash: string;
+      readonly recipientHash: string;
+      readonly recipientRole: MinutesDocumentRecipientRole;
+      readonly sentMethod: MinutesDocumentSentMethod;
+      readonly sentAt: string;
+      readonly sentByActorId: string;
+    }
+  | {
+      readonly kind: 'minutes_document.hold_placed';
+      readonly meetingId: string;
+      readonly documentId: string;
+      readonly holdState: MinutesDocumentHoldState;
+      readonly holdReasonHash: string;
+      readonly placedAt: string;
+      readonly placedByActorId: string;
+    }
+  | {
+      readonly kind: 'minutes_document.hold_released';
+      readonly meetingId: string;
+      readonly documentId: string;
+      readonly priorHoldState: MinutesDocumentHoldState;
+      readonly releasedAt: string;
+      readonly releasedByActorId: string;
     }
   | { readonly kind: 'signup'; readonly via: 'first_run' | 'invite' }
   | { readonly kind: 'login.passkey' }
