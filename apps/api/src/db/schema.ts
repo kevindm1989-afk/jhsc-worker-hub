@@ -1645,6 +1645,142 @@ export const actionItemClosures = pgTable(
 );
 
 // ---------------------------------------------------------------------------
+// Minutes documents + distributions (2.3, ADR-0014 §3.1 + TM-folds 1..6)
+// ---------------------------------------------------------------------------
+//
+// Append-only per-generation PDF record + per-distribution send record.
+// Mirrors the M2.1 meeting_signatures + M2.2 action_item_closures
+// pattern: every row carries a 64-byte Ed25519 attestation_signed_ct
+// signed under the active workplace signing key in the same transaction
+// that INSERTs the row. The chain anchor for the row lives in
+// audit_log; audit_idx is the unique back-reference. CHECK constraints
+// (hold envelope pair, tigris key regex, document hash length,
+// attestation sig length, render_audience enum, hold_state enum,
+// recipient_role enum, sent_method enum, retention_corpus_entry_hashes
+// JSONB-array shape, document_size_bytes positivity, hold timestamp
+// ordering) all live in migration 0014.
+
+export const minutesDocuments = pgTable(
+  'minutes_documents',
+  {
+    id: uuid('id').primaryKey(),
+    meetingId: uuid('meeting_id')
+      .notNull()
+      .references(() => meetings.id, { onDelete: 'restrict', onUpdate: 'restrict' }),
+    formatVersion: text('format_version').notNull(),
+    // TM-fold-2 (T-MD7..T-MD10): render_audience dual-render enum.
+    renderAudience: text('render_audience').notNull(),
+    // SHA-256 hex of the rendered PDF bytes. CHECK length = 64 in 0014.
+    documentHash: text('document_hash').notNull(),
+    documentSizeBytes: integer('document_size_bytes').notNull(),
+    // TM-fold-4 (T-MD24/T-MD25/T-MD28): canonical Tigris key shape
+    // enforced via regex CHECK in migration 0014.
+    tigrisStorageKey: text('tigris_storage_key').notNull(),
+    // Append-only chain of regenerations (NULL on initial; FK to the
+    // prior row on each re-generation per ADR §3.5).
+    priorDocumentId: uuid('prior_document_id'),
+    regenerationReason: text('regeneration_reason'),
+    generatedAt: timestamp('generated_at', { withTimezone: true })
+      .notNull()
+      .default(sql`now()`),
+    generatedByActorId: uuid('generated_by_actor_id')
+      .notNull()
+      .references(() => users.id, { onDelete: 'restrict', onUpdate: 'restrict' }),
+    // TM-fold-6 (T-MD27): hold lifecycle + envelope-encrypted reason.
+    holdState: text('hold_state').notNull().default('none'),
+    holdReasonEnvelopeCt: bytea('hold_reason_envelope_ct'),
+    holdReasonEnvelopeDekCt: bytea('hold_reason_envelope_dek_ct'),
+    holdPlacedAt: timestamp('hold_placed_at', { withTimezone: true }),
+    holdReleasedAt: timestamp('hold_released_at', { withTimezone: true }),
+    // Defense-in-depth: workplace signing key + 64-byte Ed25519 sig
+    // over the canonical row JSON. Parity with M2.1 meeting_signatures.
+    signingKeyId: uuid('signing_key_id')
+      .notNull()
+      .references(() => workplaceSigningKeys.id, {
+        onDelete: 'restrict',
+        onUpdate: 'restrict',
+      }),
+    attestationSignedCt: bytea('attestation_signed_ct').notNull(),
+    // TM-fold-5 (T-MD26/T-MD27): array of SHA-256 hex hashes of
+    // legal-corpus retention entries pinned to this document.
+    retentionCorpusEntryHashes: jsonb('retention_corpus_entry_hashes').notNull(),
+    auditIdx: bigint('audit_idx', { mode: 'number' })
+      .notNull()
+      .references(() => auditLog.idx, { onDelete: 'restrict', onUpdate: 'restrict' }),
+    version: integer('version').notNull().default(1),
+    createdAt: timestamp('created_at', { withTimezone: true })
+      .notNull()
+      .default(sql`now()`),
+    updatedAt: timestamp('updated_at', { withTimezone: true })
+      .notNull()
+      .default(sql`now()`),
+  },
+  (t) => ({
+    // TM-fold-1 idempotency backstop: byte-identical regeneration for
+    // the same meeting + audience returns the existing row at the
+    // route layer (pre-INSERT check on document_hash); the UNIQUE here
+    // is the structural defense.
+    meetingHashAudienceUnique: uniqueIndex('minutes_documents_meeting_hash_audience_unique').on(
+      t.meetingId,
+      t.documentHash,
+      t.renderAudience,
+    ),
+    auditIdxUnique: uniqueIndex('minutes_documents_audit_idx_unique').on(t.auditIdx),
+    tigrisStorageKeyUnique: uniqueIndex('minutes_documents_tigris_storage_key_unique').on(
+      t.tigrisStorageKey,
+    ),
+    meetingIdx: index('minutes_documents_meeting_idx').on(t.meetingId),
+    generatedAtIdx: index('minutes_documents_generated_at_idx').on(t.generatedAt),
+    // Partial: only documents currently under hold (TM-fold-6 GC).
+    holdStateIdx: index('minutes_documents_hold_state_idx')
+      .on(t.holdState)
+      .where(sql`${t.holdState} != 'none'`),
+  }),
+);
+
+export const minutesDistributions = pgTable(
+  'minutes_distributions',
+  {
+    id: uuid('id').primaryKey(),
+    documentId: uuid('document_id')
+      .notNull()
+      .references(() => minutesDocuments.id, {
+        onDelete: 'restrict',
+        onUpdate: 'restrict',
+      }),
+    // 9-value enum per S0 Q4 (7 generic + 2 workplace_role_X slots).
+    // CHECK constraint in migration 0014. The 2 workplace_role_X
+    // display labels are env-driven per non-negotiable #1; the
+    // SOURCE carries zero workplace-specific role labels.
+    recipientRole: text('recipient_role').notNull(),
+    // TM-fold-3 (T-MD18/T-MD23/T-MD37): encrypted display name. No
+    // plaintext name column anywhere in the schema.
+    recipientDisplayNameEnvelopeCt: bytea('recipient_display_name_envelope_ct').notNull(),
+    recipientDisplayNameEnvelopeDekCt: bytea('recipient_display_name_envelope_dek_ct').notNull(),
+    // TM-fold-3: chain-payload-safe identifier. CHECK length = 64 hex.
+    recipientHash: text('recipient_hash').notNull(),
+    sentMethod: text('sent_method').notNull(),
+    sentAt: timestamp('sent_at', { withTimezone: true }).notNull(),
+    sentByActorId: uuid('sent_by_actor_id')
+      .notNull()
+      .references(() => users.id, { onDelete: 'restrict', onUpdate: 'restrict' }),
+    auditIdx: bigint('audit_idx', { mode: 'number' })
+      .notNull()
+      .references(() => auditLog.idx, { onDelete: 'restrict', onUpdate: 'restrict' }),
+    version: integer('version').notNull().default(1),
+    createdAt: timestamp('created_at', { withTimezone: true })
+      .notNull()
+      .default(sql`now()`),
+  },
+  (t) => ({
+    auditIdxUnique: uniqueIndex('minutes_distributions_audit_idx_unique').on(t.auditIdx),
+    documentIdx: index('minutes_distributions_document_idx').on(t.documentId),
+    recipientHashIdx: index('minutes_distributions_recipient_hash_idx').on(t.recipientHash),
+    sentAtIdx: index('minutes_distributions_sent_at_idx').on(t.sentAt),
+  }),
+);
+
+// ---------------------------------------------------------------------------
 // Re-export for Drizzle adapters
 // ---------------------------------------------------------------------------
 
@@ -1691,6 +1827,8 @@ export const schema = {
   meetingSignatures,
   meetingActionItemState,
   actionItemClosures,
+  minutesDocuments,
+  minutesDistributions,
   loginAttemptOutcome,
   authEventKind,
   webauthnPurpose,
